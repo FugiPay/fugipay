@@ -2,6 +2,52 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
 
+// Generate a timed PIN for receiving a payment
+router.post('/generate-pin', async (req, res) => {
+  const { username } = req.body;
+  const pin = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit PIN
+  const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes expiry
+  try {
+    const user = await User.findOne({ username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.transactions.push({ type: 'pending-pin', amount: 0, toFrom: `PIN:${pin}`, date: new Date(expiresAt) });
+    await user.save();
+    res.json({ pin, expiresAt });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Make a payment with PIN verification
+router.post('/payment-with-pin', async (req, res) => {
+  const { fromUsername, toUsername, amount, pin } = req.body;
+  try {
+    const sender = await User.findOne({ username: fromUsername });
+    const receiver = await User.findOne({ username: toUsername });
+    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
+
+    const pendingPin = receiver.transactions.find(tx => tx.toFrom === `PIN:${pin}` && tx.type === 'pending-pin');
+    if (!pendingPin || new Date(pendingPin.date) < new Date()) {
+      return res.status(400).json({ error: 'Invalid or expired PIN' });
+    }
+
+    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
+
+    sender.balance -= amount;
+    receiver.balance += amount;
+
+    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername });
+    receiver.transactions = receiver.transactions.filter(tx => tx !== pendingPin); // Remove pending PIN
+    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername });
+
+    await sender.save();
+    await receiver.save();
+    res.json({ message: 'Payment successful' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Middleware to check if user is admin (use query param for GET, body for POST)
 const isAdmin = async (req, res, next) => {
   const username = req.query.adminUsername || req.body.adminUsername; // Check query first, then body
