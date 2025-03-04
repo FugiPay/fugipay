@@ -6,7 +6,7 @@ const User = require('../models/User');
 router.post('/generate-pin', async (req, res) => {
   const { username } = req.body;
   const pin = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit PIN
-  const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes expiry
+  const expiresAt = Date.now() + 15 * 60 * 1000; // 5 minutes expiry
   try {
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -19,7 +19,7 @@ router.post('/generate-pin', async (req, res) => {
 });
 
 // Make a payment with PIN verification
-router.post('/payment-with-pin', async (req, res) => {
+/* router.post('/payment-with-pin', async (req, res) => {
   const { fromUsername, toUsername, amount, pin } = req.body;
   try {
     const sender = await User.findOne({ username: fromUsername });
@@ -38,6 +38,29 @@ router.post('/payment-with-pin', async (req, res) => {
 
     sender.transactions.push({ type: 'sent', amount, toFrom: toUsername });
     receiver.transactions = receiver.transactions.filter(tx => tx !== pendingPin); // Remove pending PIN
+    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername });
+
+    await sender.save();
+    await receiver.save();
+    res.json({ message: 'Payment successful' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}); */
+
+router.post('/payment-with-pin', async (req, res) => {
+  const { fromUsername, toUsername, amount, pin } = req.body;
+  try {
+    const sender = await User.findOne({ username: fromUsername });
+    const receiver = await User.findOne({ username: toUsername });
+    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
+
+    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
+
+    sender.balance -= amount;
+    receiver.balance += amount;
+
+    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername });
     receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername });
 
     await sender.save();
@@ -95,8 +118,32 @@ router.get('/user/:username', async (req, res) => {
 });
 
 // Make a payment (users only)
-router.post('/payment', async (req, res) => {
+/* router.post('/payment', async (req, res) => {
   const { fromUsername, toUsername, amount } = req.body;
+  try {
+    const sender = await User.findOne({ username: fromUsername });
+    const receiver = await User.findOne({ username: toUsername });
+    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
+    if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
+    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
+
+    sender.balance -= amount;
+    receiver.balance += amount;
+
+    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername });
+    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername });
+
+    await sender.save();
+    await receiver.save();
+    res.json({ message: 'Payment successful' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+ */
+
+router.post('/payment', async (req, res) => {
+  const { fromUsername, toUsername, amount, pin } = req.body; // Added pin
   try {
     const sender = await User.findOne({ username: fromUsername });
     const receiver = await User.findOne({ username: toUsername });
