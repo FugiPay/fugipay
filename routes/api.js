@@ -1,87 +1,97 @@
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
+const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
+require('dotenv').config(); // Add dotenv
 
-// Generate a timed PIN for receiving a payment
-router.post('/generate-pin', async (req, res) => {
-  const { username } = req.body;
-  const pin = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit PIN
-  const expiresAt = Date.now() + 15 * 60 * 1000; // 5 minutes expiry
+const secretKey = process.env.LOGIN_KEY || '1243$'; // Use env variable or fallback
+
+// Middleware to verify token
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Access denied: No token provided' });
+
+  jwt.verify(token, secretKey, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid or expired token' });
+    req.user = user;
+    next();
+  });
+};
+
+// Middleware to check if user is admin
+const isAdmin = async (req, res, next) => {
+  const username = req.query.adminUsername || req.body.adminUsername;
+  if (!username) return res.status(400).json({ error: 'Admin username required' });
+  try {
+    const user = await User.findOne({ username });
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    req.adminUsername = username;
+    next();
+  } catch (error) {
+    res.status(500).json({ error: 'Server error during admin check' });
+  }
+};
+
+// Temporary QR code PIN storage schema
+const qrPinSchema = new mongoose.Schema({
+  username: { type: String, required: true },
+  pin: { type: String, required: true },
+  qrId: { type: String, required: true, unique: true },
+  createdAt: { type: Date, default: Date.now, expires: 15 * 60 } // TTL: 15 minutes
+});
+const QRPin = mongoose.model('QRPin', qrPinSchema);
+
+// Store QR code PIN
+router.post('/store-qr-pin', async (req, res) => {
+  const { username, pin } = req.body;
   try {
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: 'User not found' });
-    user.transactions.push({ type: 'pending-pin', amount: 0, toFrom: `PIN:${pin}`, date: new Date(expiresAt) });
-    await user.save();
-    res.json({ pin, expiresAt });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Make a payment with PIN verification
-/* router.post('/payment-with-pin', async (req, res) => {
-  const { fromUsername, toUsername, amount, pin } = req.body;
-  try {
-    const sender = await User.findOne({ username: fromUsername });
-    const receiver = await User.findOne({ username: toUsername });
-    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
-
-    const pendingPin = receiver.transactions.find(tx => tx.toFrom === `PIN:${pin}` && tx.type === 'pending-pin');
-    if (!pendingPin || new Date(pendingPin.date) < new Date()) {
-      return res.status(400).json({ error: 'Invalid or expired PIN' });
+    if (!pin || pin.length !== 4 || !/^\d{4}$/.test(pin)) {
+      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
-
-    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
-
-    sender.balance -= amount;
-    receiver.balance += amount;
-
-    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername });
-    receiver.transactions = receiver.transactions.filter(tx => tx !== pendingPin); // Remove pending PIN
-    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername });
-
-    await sender.save();
-    await receiver.save();
-    res.json({ message: 'Payment successful' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-}); */
-
-router.post('/payment-with-pin', async (req, res) => {
-  const { fromUsername, toUsername, amount, pin } = req.body;
-  try {
-    const sender = await User.findOne({ username: fromUsername });
-    const receiver = await User.findOne({ username: toUsername });
-    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
-
-    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
-
-    sender.balance -= amount;
-    receiver.balance += amount;
-
-    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername });
-    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername });
-
-    await sender.save();
-    await receiver.save();
-    res.json({ message: 'Payment successful' });
+    const qrId = mongoose.Types.ObjectId().toString();
+    const qrPin = new QRPin({ username, pin, qrId });
+    await qrPin.save();
+    res.json({ qrId, message: 'PIN stored successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Middleware to check if user is admin (use query param for GET, body for POST)
-const isAdmin = async (req, res, next) => {
-  const username = req.query.adminUsername || req.body.adminUsername; // Check query first, then body
-  if (!username) return res.status(400).json({ error: 'Admin username required' });
-  const user = await User.findOne({ username });
-  if (!user || user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
+// Payment with QR PIN validation
+router.post('/payment-with-qr-pin', async (req, res) => {
+  const { fromUsername, toUsername, amount, qrId, pin } = req.body;
+  try {
+    const sender = await User.findOne({ username: fromUsername });
+    const receiver = await User.findOne({ username: toUsername });
+    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
+    if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
+    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
+
+    const qrPin = await QRPin.findOne({ qrId, username: toUsername });
+    if (!qrPin) return res.status(400).json({ error: 'QR code invalid or expired' });
+    if (qrPin.pin !== pin) return res.status(400).json({ error: 'Invalid PIN' });
+
+    sender.balance -= amount;
+    receiver.balance += amount;
+
+    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername });
+    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername });
+
+    await sender.save();
+    await receiver.save();
+    await QRPin.deleteOne({ qrId });
+
+    res.json({ message: 'Payment successful' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-  req.adminUsername = username; // Pass it along
-  next();
-};
+});
 
 // Register a user
 router.post('/register', async (req, res) => {
@@ -103,63 +113,26 @@ router.post('/login', async (req, res) => {
     if (!user || user.password !== password) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    res.json({ message: 'Login successful', username: user.username, role: user.role });
+    const token = jwt.sign({ username: user.username, role: user.role }, secretKey, { expiresIn: '1h' });
+    res.json({ message: 'Login successful', username: user.username, role: user.role, token });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get user balance and transactions
-router.get('/user/:username', async (req, res) => {
+// Get user balance and transactions (protected)
+router.get('/user/:username', authenticateToken, async (req, res) => {
   const { username } = req.params;
-  const user = await User.findOne({ username });
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json({ balance: user.balance, transactions: user.transactions, phoneNumber: user.phoneNumber, role: user.role });
-});
-
-// Make a payment (users only)
-/* router.post('/payment', async (req, res) => {
-  const { fromUsername, toUsername, amount } = req.body;
   try {
-    const sender = await User.findOne({ username: fromUsername });
-    const receiver = await User.findOne({ username: toUsername });
-    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
-    if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
-    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
-
-    sender.balance -= amount;
-    receiver.balance += amount;
-
-    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername });
-    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername });
-
-    await sender.save();
-    await receiver.save();
-    res.json({ message: 'Payment successful' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
- */
-
-router.post('/payment', async (req, res) => {
-  const { fromUsername, toUsername, amount, pin } = req.body; // Added pin
-  try {
-    const sender = await User.findOne({ username: fromUsername });
-    const receiver = await User.findOne({ username: toUsername });
-    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
-    if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
-    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
-
-    sender.balance -= amount;
-    receiver.balance += amount;
-
-    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername });
-    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername });
-
-    await sender.save();
-    await receiver.save();
-    res.json({ message: 'Payment successful' });
+    const user = await User.findOne({ username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({
+      balance: user.balance,
+      transactions: user.transactions,
+      phoneNumber: user.phoneNumber,
+      role: user.role,
+      username: user.username,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -184,16 +157,24 @@ router.post('/credit', isAdmin, async (req, res) => {
 
 // Admin: Get all users
 router.get('/users', isAdmin, async (req, res) => {
-  const users = await User.find({}, 'username phoneNumber role balance');
-  res.json(users);
+  try {
+    const users = await User.find({}, 'username phoneNumber role balance');
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Admin: Get all transactions for a user
 router.get('/transactions/:username', isAdmin, async (req, res) => {
   const { username } = req.params;
-  const user = await User.findOne({ username });
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json(user.transactions);
+  try {
+    const user = await User.findOne({ username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(user.transactions);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 module.exports = router;
