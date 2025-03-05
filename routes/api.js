@@ -3,9 +3,9 @@ const router = express.Router();
 const User = require('../models/User');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-require('dotenv').config(); // Add dotenv
+require('dotenv').config();
 
-const secretKey = process.env.LOGIN_KEY || '1243$'; // Use env variable or fallback
+const secretKey = process.env.LOGIN_KEY || '1243$';
 
 // Middleware to verify token
 const authenticateToken = (req, res, next) => {
@@ -54,7 +54,7 @@ router.post('/store-qr-pin', async (req, res) => {
     if (!pin || pin.length !== 4 || !/^\d{4}$/.test(pin)) {
       return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
-    const qrId = mongoose.Types.ObjectId().toString();
+    const qrId = new mongoose.Types.ObjectId().toString(); // Fixed with 'new'
     const qrPin = new QRPin({ username, pin, qrId });
     await qrPin.save();
     res.json({ qrId, message: 'PIN stored successfully' });

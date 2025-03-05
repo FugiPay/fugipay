@@ -7,7 +7,7 @@ const userSchema = new mongoose.Schema({
   role: { type: String, enum: ['admin', 'user'], default: 'user' },
   balance: { type: Number, default: 0 },
   transactions: [{
-    type: { type: String, enum: ['sent', 'received', 'credited', 'pending-pin'] }, // Added 'pending-pin'
+    type: { type: String, enum: ['sent', 'received', 'credited', 'pending-pin'] },
     amount: Number,
     toFrom: String,
     date: { type: Date, default: Date.now }
