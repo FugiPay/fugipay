@@ -85,7 +85,7 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
     const receiver = await User.findOne({ username: toUsername });
     if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
     if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
-    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
+    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient internal funds' });
 
     const qrPin = await QRPin.findOne({ qrId, username: toUsername });
     if (!qrPin) return res.status(400).json({ error: 'QR code invalid or expired' });
@@ -118,7 +118,11 @@ router.post('/moneyunify/send', authenticateToken, async (req, res) => {
     if (!recipientPhone || !amount || amount <= 0) {
       return res.status(400).json({ error: 'Invalid recipient phone or amount' });
     }
-    if ((user.moneyunifyBalance || 0) < amount) return res.status(400).json({ error: 'Insufficient MoneyUnify balance' });
+    if ((user.moneyunifyBalance || 0) < amount) {
+      return res.status(400).json({ 
+        error: 'Insufficient MoneyUnify balance in app. Top up from your mobile money account if needed.' 
+      });
+    }
     if (!['MTN', 'AIRTEL', 'ZAMTEL'].includes(network)) {
       return res.status(400).json({ error: 'Invalid network. Use MTN, AIRTEL, or ZAMTEL' });
     }
@@ -142,14 +146,17 @@ router.post('/moneyunify/send', authenticateToken, async (req, res) => {
     user.transactions.push({ type: 'sent_moneyunify', amount, toFrom: recipientPhone });
     await user.save();
 
-    res.json({ message: 'Money sent via MoneyUnify', transactionId: response.data.transactionId });
+    res.json({ 
+      message: 'Money sent via MoneyUnify (deducted from app balance; real funds moved from your mobile money account)', 
+      transactionId: response.data.transactionId 
+    });
   } catch (error) {
     console.error('MoneyUnify Send Error:', error.response?.data || error.message);
     res.status(500).json({ error: error.response?.data?.error || 'Failed to send money via MoneyUnify' });
   }
 });
 
-// Receive Money via MoneyUnify
+// Receive Money via MoneyUnify (Top-up app balance from real mobile money)
 router.post('/moneyunify/receive', authenticateToken, async (req, res) => {
   const { username, payerPhone, amount, network } = req.body;
   try {
@@ -181,7 +188,10 @@ router.post('/moneyunify/receive', authenticateToken, async (req, res) => {
     user.transactions.push({ type: 'received_moneyunify', amount, toFrom: payerPhone });
     await user.save();
 
-    res.json({ message: 'Money received via MoneyUnify', transactionId: response.data.transactionId });
+    res.json({ 
+      message: 'Money received via MoneyUnify (added to app balance; real funds moved from payer’s mobile money account)', 
+      transactionId: response.data.transactionId 
+    });
   } catch (error) {
     console.error('MoneyUnify Receive Error:', error.response?.data || error.message);
     res.status(500).json({ error: error.response?.data?.error || 'Failed to receive money via MoneyUnify' });
@@ -192,7 +202,15 @@ router.post('/moneyunify/receive', authenticateToken, async (req, res) => {
 router.post('/register', async (req, res) => {
   const { username, password, phoneNumber, role } = req.body;
   try {
-    const user = new User({ username, password, phoneNumber, role: role || 'user', airtelBalance: 0, moneyunifyBalance: 0 });
+    const user = new User({ 
+      username, 
+      password, 
+      phoneNumber, 
+      role: role || 'user', 
+      airtelBalance: 0, 
+      moneyunifyBalance: 0,
+      mtnBalance: 0
+    });
     await user.save();
     res.status(201).json({ message: 'User registered', username: user.username });
   } catch (error) {
@@ -223,12 +241,13 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: 'User not found' });
-    const mainBalance = user.balance + (user.airtelBalance || 0) + (user.moneyunifyBalance || 0); // Aggregate main balance
+    const mainBalance = user.balance + (user.airtelBalance || 0) + (user.moneyunifyBalance || 0) + (user.mtnBalance || 0);
     res.json({
       mainBalance,
       subBalances: { 
         airtel: user.airtelBalance || 0, 
-        moneyunify: user.moneyunifyBalance || 0 
+        moneyunify: user.moneyunifyBalance || 0,
+        mtn: user.mtnBalance || 0
       },
       transactions: user.transactions,
       phoneNumber: user.phoneNumber,
@@ -241,18 +260,26 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
   }
 });
 
-// Admin: Give credit to a user
+// Admin: Give credit to a user (manual sync option)
 router.post('/credit', isAdmin, async (req, res) => {
-  const { toUsername, amount } = req.body;
+  const { toUsername, amount, targetBalance } = req.body;
   const adminUsername = req.adminUsername;
   try {
     const user = await User.findOne({ username: toUsername });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    user.balance += amount;
+    if (targetBalance === 'moneyunify') {
+      user.moneyunifyBalance += amount;
+    } else if (targetBalance === 'airtel') {
+      user.airtelBalance += amount;
+    } else if (targetBalance === 'mtn') {
+      user.mtnBalance += amount;
+    } else {
+      user.balance += amount; // Default to internal balance
+    }
     user.transactions.push({ type: 'credited', amount, toFrom: adminUsername });
     await user.save();
-    res.json({ message: `Credited $${amount} to ${toUsername}` });
+    res.json({ message: `Credited $${amount} to ${toUsername} (${targetBalance || 'internal'} balance)` });
   } catch (error) {
     console.error('Credit Error:', error);
     res.status(500).json({ error: error.message });
@@ -262,7 +289,7 @@ router.post('/credit', isAdmin, async (req, res) => {
 // Admin: Get all users
 router.get('/users', isAdmin, async (req, res) => {
   try {
-    const users = await User.find({}, 'username phoneNumber role balance airtelBalance moneyunifyBalance');
+    const users = await User.find({}, 'username phoneNumber role balance airtelBalance moneyunifyBalance mtnBalance');
     res.json(users);
   } catch (error) {
     console.error('Users Fetch Error:', error);
