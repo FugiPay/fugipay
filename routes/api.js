@@ -3,15 +3,20 @@ const router = express.Router();
 const User = require('../models/User');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
+const axios = require('axios');
 require('dotenv').config();
 
-const secretKey = process.env.LOGIN_KEY || '1243$'; // Matches your setup
+const secretKey = process.env.LOGIN_KEY || '1243$';
+const MONEYUNIFY_CONFIG = {
+  muid: process.env.MONEYUNIFY_MUID || 'YOUR_MONEYUNIFY_MUID', // From moneyunify.com
+  baseUrl: 'https://api.moneyunify.com/v1', // Adjust if MoneyUnify provides a different URL
+};
 
 // Middleware to verify token
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  console.log('Auth Header:', authHeader); // Debug
+  console.log('Auth Header:', authHeader);
   if (!token) {
     console.log('No token provided');
     return res.status(401).json({ error: 'Access denied: No token provided' });
@@ -49,12 +54,12 @@ const qrPinSchema = new mongoose.Schema({
   username: { type: String, required: true },
   pin: { type: String, required: true },
   qrId: { type: String, required: true, unique: true },
-  createdAt: { type: Date, default: Date.now, expires: 15 * 60 } // TTL: 15 minutes
+  createdAt: { type: Date, default: Date.now, expires: 15 * 60 },
 });
 const QRPin = mongoose.model('QRPin', qrPinSchema);
 
 // Store QR code PIN
-router.post('/store-qr-pin', async (req, res) => {
+router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   const { username, pin } = req.body;
   try {
     const user = await User.findOne({ username });
@@ -62,7 +67,7 @@ router.post('/store-qr-pin', async (req, res) => {
     if (!pin || pin.length !== 4 || !/^\d{4}$/.test(pin)) {
       return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
-    const qrId = new mongoose.Types.ObjectId().toString(); // Fixed with 'new'
+    const qrId = new mongoose.Types.ObjectId().toString();
     const qrPin = new QRPin({ username, pin, qrId });
     await qrPin.save();
     res.json({ qrId, message: 'PIN stored successfully' });
@@ -73,7 +78,7 @@ router.post('/store-qr-pin', async (req, res) => {
 });
 
 // Payment with QR PIN validation
-router.post('/payment-with-qr-pin', async (req, res) => {
+router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, qrId, pin } = req.body;
   try {
     const sender = await User.findOne({ username: fromUsername });
@@ -103,11 +108,91 @@ router.post('/payment-with-qr-pin', async (req, res) => {
   }
 });
 
+// Send Money via MoneyUnify
+router.post('/moneyunify/send', authenticateToken, async (req, res) => {
+  const { username, recipientPhone, amount, network } = req.body;
+  try {
+    const user = await User.findOne({ username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
+    if (!recipientPhone || !amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid recipient phone or amount' });
+    }
+    if ((user.moneyunifyBalance || 0) < amount) return res.status(400).json({ error: 'Insufficient MoneyUnify balance' });
+    if (!['MTN', 'AIRTEL', 'ZAMTEL'].includes(network)) {
+      return res.status(400).json({ error: 'Invalid network. Use MTN, AIRTEL, or ZAMTEL' });
+    }
+
+    const response = await axios.post(
+      `${MONEYUNIFY_CONFIG.baseUrl}/disburse`,
+      {
+        muid: MONEYUNIFY_CONFIG.muid,
+        phone: `260${recipientPhone.replace(/^0/, '')}`, // Zambia format: 260XXXXXXXXX
+        amount,
+        network,
+      },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+
+    if (!response.data.success) {
+      throw new Error(response.data.error || 'MoneyUnify disbursement failed');
+    }
+
+    user.moneyunifyBalance -= amount;
+    user.transactions.push({ type: 'sent_moneyunify', amount, toFrom: recipientPhone });
+    await user.save();
+
+    res.json({ message: 'Money sent via MoneyUnify', transactionId: response.data.transactionId });
+  } catch (error) {
+    console.error('MoneyUnify Send Error:', error.response?.data || error.message);
+    res.status(500).json({ error: error.response?.data?.error || 'Failed to send money via MoneyUnify' });
+  }
+});
+
+// Receive Money via MoneyUnify
+router.post('/moneyunify/receive', authenticateToken, async (req, res) => {
+  const { username, payerPhone, amount, network } = req.body;
+  try {
+    const user = await User.findOne({ username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!payerPhone || !amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid payer phone or amount' });
+    }
+    if (!['MTN', 'AIRTEL', 'ZAMTEL'].includes(network)) {
+      return res.status(400).json({ error: 'Invalid network. Use MTN, AIRTEL, or ZAMTEL' });
+    }
+
+    const response = await axios.post(
+      `${MONEYUNIFY_CONFIG.baseUrl}/collect`,
+      {
+        muid: MONEYUNIFY_CONFIG.muid,
+        phone: `260${payerPhone.replace(/^0/, '')}`,
+        amount,
+        network,
+      },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+
+    if (!response.data.success) {
+      throw new Error(response.data.error || 'MoneyUnify collection failed');
+    }
+
+    user.moneyunifyBalance = (user.moneyunifyBalance || 0) + amount;
+    user.transactions.push({ type: 'received_moneyunify', amount, toFrom: payerPhone });
+    await user.save();
+
+    res.json({ message: 'Money received via MoneyUnify', transactionId: response.data.transactionId });
+  } catch (error) {
+    console.error('MoneyUnify Receive Error:', error.response?.data || error.message);
+    res.status(500).json({ error: error.response?.data?.error || 'Failed to receive money via MoneyUnify' });
+  }
+});
+
 // Register a user
 router.post('/register', async (req, res) => {
   const { username, password, phoneNumber, role } = req.body;
   try {
-    const user = new User({ username, password, phoneNumber, role: role || 'user' });
+    const user = new User({ username, password, phoneNumber, role: role || 'user', airtelBalance: 0, moneyunifyBalance: 0 });
     await user.save();
     res.status(201).json({ message: 'User registered', username: user.username });
   } catch (error) {
@@ -138,8 +223,13 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: 'User not found' });
+    const mainBalance = user.balance + (user.airtelBalance || 0) + (user.moneyunifyBalance || 0); // Aggregate main balance
     res.json({
-      balance: user.balance,
+      mainBalance,
+      subBalances: { 
+        airtel: user.airtelBalance || 0, 
+        moneyunify: user.moneyunifyBalance || 0 
+      },
       transactions: user.transactions,
       phoneNumber: user.phoneNumber,
       role: user.role,
@@ -172,7 +262,7 @@ router.post('/credit', isAdmin, async (req, res) => {
 // Admin: Get all users
 router.get('/users', isAdmin, async (req, res) => {
   try {
-    const users = await User.find({}, 'username phoneNumber role balance');
+    const users = await User.find({}, 'username phoneNumber role balance airtelBalance moneyunifyBalance');
     res.json(users);
   } catch (error) {
     console.error('Users Fetch Error:', error);
