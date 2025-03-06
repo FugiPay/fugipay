@@ -323,6 +323,7 @@ router.get('/qr-pins/:qrId', authenticateToken, async (req, res) => {
 });
 
 // Fetch real MoneyUnify balance
+// api.js
 router.get('/moneyunify/balance', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username });
@@ -330,23 +331,24 @@ router.get('/moneyunify/balance', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Phone number not registered' });
     }
 
-    // Mock MoneyUnify balance request (replace with real API call)
+    const phone = user.phoneNumber;
+    let network;
+    if (phone.startsWith('097')) network = 'AIRTEL';
+    else if (phone.startsWith('096')) network = 'MTN';
+    else if (phone.startsWith('095')) network = 'ZAMTEL';
+    else return res.status(400).json({ error: 'Unknown network prefix' });
+
+    // Mock or real MoneyUnify balance request
     const response = await axios.get('https://api.moneyunify.com/v1/balance', {
-      params: {
-        phone: user.phoneNumber,
-        network: user.phoneNumber.startsWith('096') ? 'MTN' : user.phoneNumber.startsWith('097') ? 'AIRTEL' : 'ZAMTEL',
-      },
-      headers: {
-        Authorization: `Bearer ${process.env.MONEYUNIFY_API_KEY}`, // Set in Render env
-      },
+      params: { phone, network },
+      headers: { Authorization: `Bearer ${process.env.MONEYUNIFY_API_KEY}` },
     });
 
-    const realBalance = response.data.balance;
-    // Optionally sync moneyunifyBalance
-    user.moneyunifyBalance = realBalance;
+    const realBalance = response.data.balance || 0;
+    user.moneyunifyBalance = realBalance; // Sync to main balance
     await user.save();
 
-    res.json({ balance: realBalance });
+    res.json({ balance: realBalance, network });
   } catch (error) {
     console.error('Balance Fetch Error:', error);
     res.status(500).json({ error: 'Failed to fetch balance' });
