@@ -310,4 +310,47 @@ router.get('/transactions/:username', isAdmin, async (req, res) => {
   }
 });
 
+// Get QR PIN for validation
+router.get('/qr-pins/:qrId', authenticateToken, async (req, res) => {
+  try {
+    const qrPin = await QRPin.findOne({ qrId: req.params.qrId });
+    if (!qrPin) return res.status(404).json({ error: 'QR code not found or expired' });
+    res.json({ pin: qrPin.pin });
+  } catch (error) {
+    console.error('QR PIN Fetch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Fetch real MoneyUnify balance
+router.get('/moneyunify/balance', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || !user.phoneNumber) {
+      return res.status(400).json({ error: 'Phone number not registered' });
+    }
+
+    // Mock MoneyUnify balance request (replace with real API call)
+    const response = await axios.get('https://api.moneyunify.com/v1/balance', {
+      params: {
+        phone: user.phoneNumber,
+        network: user.phoneNumber.startsWith('096') ? 'MTN' : user.phoneNumber.startsWith('097') ? 'AIRTEL' : 'ZAMTEL',
+      },
+      headers: {
+        Authorization: `Bearer ${process.env.MONEYUNIFY_API_KEY}`, // Set in Render env
+      },
+    });
+
+    const realBalance = response.data.balance;
+    // Optionally sync moneyunifyBalance
+    user.moneyunifyBalance = realBalance;
+    await user.save();
+
+    res.json({ balance: realBalance });
+  } catch (error) {
+    console.error('Balance Fetch Error:', error);
+    res.status(500).json({ error: 'Failed to fetch balance' });
+  }
+});
+
 module.exports = router;
