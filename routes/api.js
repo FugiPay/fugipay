@@ -48,8 +48,6 @@ router.post('/register', async (req, res) => {
     res.status(500).json({ error: 'Server error during registration' });
   }
 });
-
-// POST /api/login
 router.post('/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
@@ -60,7 +58,14 @@ router.post('/login', async (req, res) => {
     if (!user) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
-    const isMatch = await bcrypt.compare(password, user.password);
+    let isMatch;
+    // Check if password is hashed (starts with $2a$ or similar)
+    if (user.password.startsWith('$2')) {
+      isMatch = await bcrypt.compare(password, user.password);
+    } else {
+      // Plaintext fallback for old users
+      isMatch = password === user.password;
+    }
     if (!isMatch) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
