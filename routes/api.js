@@ -323,7 +323,6 @@ router.get('/qr-pins/:qrId', authenticateToken, async (req, res) => {
 });
 
 // Fetch real MoneyUnify balance
-// api.js
 router.get('/moneyunify/balance', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username });
@@ -333,9 +332,9 @@ router.get('/moneyunify/balance', authenticateToken, async (req, res) => {
 
     const phone = user.phoneNumber;
     let network;
-    if (phone.startsWith('097')) network = 'AIRTEL';
-    else if (phone.startsWith('096')) network = 'MTN';
-    else if (phone.startsWith('095')) network = 'ZAMTEL';
+    if (phone.startsWith('097') || phone.startsWith('077')) network = 'AIRTEL';
+    else if (phone.startsWith('096') || phone.startsWith('076')) network = 'MTN';
+    else if (phone.startsWith('095') || phone.startsWith('075')) network = 'ZAMTEL';
     else return res.status(400).json({ error: 'Unknown network prefix' });
 
     // Mock or real MoneyUnify balance request
@@ -345,7 +344,7 @@ router.get('/moneyunify/balance', authenticateToken, async (req, res) => {
     });
 
     const realBalance = response.data.balance || 0;
-    user.moneyunifyBalance = realBalance; // Sync to main balance
+    user.moneyunifyBalance = realBalance;
     await user.save();
 
     res.json({ balance: realBalance, network });
