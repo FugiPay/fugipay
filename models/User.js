@@ -5,17 +5,9 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   phoneNumber: { type: String, required: true, unique: true },
   role: { type: String, enum: ['admin', 'user'], default: 'user' },
-  balance: { type: Number, default: 0 }, // Internal balance
-  airtelBalance: { type: Number, default: 0 }, // Airtel Money sub-balance
-  moneyunifyBalance: { type: Number, default: 0 }, // MoneyUnify sub-balance
-  mtnBalance: { type: Number, default: 0 }, // MTN sub-balance
+  balance: { type: Number, default: 0 },
   transactions: [{
-    type: { type: String, enum: [
-      'sent', 'received', 'credited', 'pending-pin',
-      'sent_airtel', 'received_airtel',
-      'sent_moneyunify', 'received_moneyunify',
-      'sent_mtn', 'received_mtn' // MTN-specific transactions
-    ] },
+    type: { type: String, enum: ['sent', 'received', 'credited', 'pending-pin'] },
     amount: Number,
     toFrom: String,
     date: { type: Date, default: Date.now }
