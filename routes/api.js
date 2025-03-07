@@ -7,6 +7,26 @@ require('dotenv').config();
 
 const secretKey = process.env.LOGIN_KEY || '1243$'; // Matches your setup
 
+const QRPin = require('./models/QRPin'); // Adjust path to your QRPin model
+const authenticateToken = require('./middleware/authenticateToken'); // Adjust path
+
+// Check QR PIN status
+router.get('/check-qr-pin/:qrId', authenticateToken, async (req, res) => {
+  const { qrId } = req.params;
+  try {
+    const qrPin = await QRPin.findOne({ qrId });
+    if (!qrPin) {
+      return res.status(200).json({ used: true, expired: false }); // QR code used or never existed
+    }
+    const now = Date.now();
+    const expired = now > qrPin.createdAt.getTime() + 15 * 60 * 1000; // 15 minutes
+    res.status(200).json({ used: false, expired });
+  } catch (error) {
+    console.error('QR Check Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Middleware to verify token
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
