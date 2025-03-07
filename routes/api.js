@@ -213,4 +213,20 @@ router.get('/transactions/:username', isAdmin, async (req, res) => {
   }
 });
 
+router.post('/payment-with-search', authenticateToken, async (req, res) => {
+  const { searchQuery, amount, pin } = req.body;
+  const sender = await User.findOne({ username: req.user.username });
+  const receiver = await User.findOne({ $or: [{ username: searchQuery }, { phoneNumber: searchQuery }] });
+  if (!receiver) return res.status(404).json({ error: 'Recipient not found' });
+  // Add PIN verification logic if needed
+  if (sender.mainBalance < amount) return res.status(400).json({ error: 'Insufficient balance' });
+  sender.mainBalance -= amount;
+  receiver.mainBalance += amount;
+  sender.transactions.push({ type: 'sent', amount, toFrom: receiver.username, date: new Date() });
+  receiver.transactions.push({ type: 'received', amount, toFrom: sender.username, date: new Date() });
+  await sender.save();
+  await receiver.save();
+  res.json({ message: 'Payment successful' });
+});
+
 module.exports = router;
