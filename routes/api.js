@@ -340,7 +340,7 @@ router.get('/moneyunify/balance', authenticateToken, async (req, res) => {
     // Mock or real MoneyUnify balance request
     const response = await axios.get('https://api.moneyunify.com/v1/balance', {
       params: { phone, network },
-      headers: { Authorization: `Bearer ${process.env.MONEYUNIFY_API_KEY}` },
+      headers: { Authorization: `Bearer ${process.env.MONEYUNIFY_MUID}` },
     });
 
     const realBalance = response.data.balance || 0;
