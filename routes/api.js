@@ -229,4 +229,13 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
   res.json({ message: 'Payment successful' });
 });
 
+router.put('/user/update', authenticateToken, async (req, res) => {
+  const { username, password } = req.body;
+  const user = await User.findOne({ username: req.user.username });
+  if (username) user.username = username;
+  if (password) user.password = await bcrypt.hash(password, 10); // Assuming bcrypt
+  await user.save();
+  res.json({ message: 'User updated' });
+});
+
 module.exports = router;
