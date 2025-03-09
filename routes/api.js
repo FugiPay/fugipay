@@ -235,4 +235,79 @@ router.put('/user/update', authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/users (Fetch all users, admin only)
+router.get('/users', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized: Admins only' });
+    }
+    const users = await User.find({}, { password: 0 }); // Exclude password
+    res.json(users);
+  } catch (error) {
+    console.error('Fetch All Users Error:', error);
+    res.status(500).json({ error: 'Server error fetching users' });
+  }
+});
+
+// POST /api/credit (Admin credits a user)
+router.post('/credit', authenticateToken, async (req, res) => {
+  const { adminUsername, toUsername, amount } = req.body;
+  if (req.user.role !== 'admin' || req.user.username !== adminUsername) {
+    return res.status(403).json({ error: 'Unauthorized: Admins only' });
+  }
+  try {
+    const user = await User.findOne({ username: toUsername });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.balance += amount;
+    user.transactions.push({ type: 'credited', amount, toFrom: adminUsername, date: new Date() });
+    await user.save();
+    res.json({ message: 'Credit successful' });
+  } catch (error) {
+    console.error('Credit Error:', error);
+    res.status(500).json({ error: 'Server error during credit' });
+  }
+});
+
+// POST /api/payment-with-pin (Admin payment with PIN)
+router.post('/payment-with-pin', authenticateToken, async (req, res) => {
+  const { fromUsername, toUsername, amount, pin } = req.body;
+  if (req.user.username !== fromUsername || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  try {
+    const sender = await User.findOne({ username: fromUsername });
+    const receiver = await User.findOne({ username: toUsername });
+    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
+    const qrPin = await QRPin.findOne({ username: toUsername, pin });
+    if (!qrPin) return res.status(400).json({ error: 'Invalid PIN' });
+    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
+    sender.balance -= amount;
+    receiver.balance += amount;
+    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername, date: new Date() });
+    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername, date: new Date() });
+    await QRPin.deleteOne({ _id: qrPin._id });
+    await sender.save();
+    await receiver.save();
+    res.json({ message: 'Payment successful' });
+  } catch (error) {
+    console.error('Payment with PIN Error:', error);
+    res.status(500).json({ error: 'Server error during payment' });
+  }
+});
+
+// GET /api/transactions/:username (Fetch user transactions, admin only)
+router.get('/transactions/:username', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Unauthorized: Admins only' });
+  }
+  try {
+    const user = await User.findOne({ username: req.params.username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(user.transactions);
+  } catch (error) {
+    console.error('Transactions Fetch Error:', error);
+    res.status(500).json({ error: 'Server error fetching transactions' });
+  }
+});
+
 module.exports = router;
