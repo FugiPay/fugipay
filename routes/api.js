@@ -235,14 +235,38 @@ router.put('/user/update', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/users (Fetch all users, admin only)
+// GET /api/users (Fetch all users with pagination and search, admin only)
 router.get('/users', authenticateToken, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Unauthorized: Admins only' });
     }
-    const users = await User.find({}, { password: 0 }); // Exclude password
-    res.json(users);
+    const { page = 1, limit = 10, search = '' } = req.query;
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    const query = search
+      ? {
+          $or: [
+            { username: { $regex: search, $options: 'i' } },
+            { phoneNumber: { $regex: search, $options: 'i' } },
+          ],
+        }
+      : {};
+
+    const total = await User.countDocuments(query);
+    const users = await User.find(query, { password: 0 })
+      .skip(skip)
+      .limit(limitNum);
+
+    res.json({
+      users,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
+    });
   } catch (error) {
     console.error('Fetch All Users Error:', error);
     res.status(500).json({ error: 'Server error fetching users' });
