@@ -2,40 +2,89 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const multer = require('multer');
+const AWS = require('aws-sdk');
+const fs = require('fs');
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const authenticateToken = require('../middleware/authenticateToken');
 
+// Configure multer for temporary local storage
+const upload = multer({ dest: 'uploads/' });
+
+// Configure AWS S3
+const s3 = new AWS.S3({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION || 'us-east-1', // Default region
+});
+const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
+
 // Secret key for JWT (use environment variable in production)
 const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
 
-// POST /api/register (to match your signup.tsx)
-router.post('/register', async (req, res) => {
-  const { username, password, phoneNumber, role } = req.body;
+// POST /api/register - Updated for KYC and S3
+router.post('/register', upload.single('idImage'), async (req, res) => {
+  const { name, phoneNumber, email, password } = req.body;
+  const idImage = req.file;
 
-  if (!username || !password || !phoneNumber) {
-    return res.status(400).json({ error: 'Username, password, and phone number are required' });
+  if (!name || !phoneNumber || !email || !password || !idImage) {
+    return res.status(400).json({ error: 'Name, phone number, email, password, and ID image are required' });
+  }
+
+  if (!phoneNumber.match(/^\+260(9[5678]|7[34679])\d{7}$/)) {
+    return res.status(400).json({ error: 'Invalid Zambian phone number (e.g., +260 971 234 567)' });
   }
 
   try {
-    const existingUser = await User.findOne({ $or: [{ username }, { phoneNumber }] });
+    const existingUser = await User.findOne({ $or: [{ email }, { phoneNumber }] });
     if (existingUser) {
-      return res.status(400).json({ error: 'Username or phone number already exists' });
+      return res.status(400).json({ error: 'Email or phone number already exists' });
+    }
+
+    // Upload ID image to S3
+    const fileContent = fs.readFileSync(idImage.path);
+    const s3Key = `id-images/${Date.now()}-${idImage.originalname}`;
+    const params = {
+      Bucket: S3_BUCKET,
+      Key: s3Key,
+      Body: fileContent,
+      ContentType: idImage.mimetype,
+      ACL: 'private', // Restrict access
+    };
+    const s3Response = await s3.upload(params).promise();
+    const idImageUrl = s3Response.Location;
+
+    // Delete local file
+    fs.unlinkSync(idImage.path);
+
+    // Placeholder for KYC verification (e.g., Smile ID/uqudo later)
+    const idData = { name, idNumber: 'pending_verification', dob: 'pending_verification' };
+    const isSanctioned = false; // Replace with real sanctions check later
+    if (isSanctioned) {
+      return res.status(403).json({ error: 'User is on sanctions list' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const username = email.split('@')[0]; // Derive username from email
     const user = new User({
       username,
-      password: hashedPassword,
+      name,
       phoneNumber,
-      role: role || 'user', // Default to 'user' if not provided
+      email,
+      password: hashedPassword,
+      idImageUrl,
+      role: 'user', // Default role
+      balance: 0,
+      transactions: [],
+      kycStatus: 'pending', // Track KYC status
     });
     await user.save();
 
     const token = jwt.sign(
       { username: user.username, role: user.role },
       JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' } // Extended to 24 hours
     );
 
     res.status(201).json({
@@ -48,6 +97,8 @@ router.post('/register', async (req, res) => {
     res.status(500).json({ error: 'Server error during registration' });
   }
 });
+
+// POST /api/login
 router.post('/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
@@ -59,12 +110,10 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
     let isMatch;
-    // Check if password is hashed (starts with $2a$ or similar)
     if (user.password.startsWith('$2')) {
       isMatch = await bcrypt.compare(password, user.password);
     } else {
-      // Plaintext fallback for old users
-      isMatch = password === user.password;
+      isMatch = password === user.password; // Plaintext fallback
     }
     if (!isMatch) {
       return res.status(400).json({ error: 'Invalid credentials' });
@@ -72,7 +121,7 @@ router.post('/login', async (req, res) => {
     const token = jwt.sign(
       { username: user.username, role: user.role },
       JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' } // Extended to 24 hours
     );
     res.json({ token, username: user.username, role: user.role });
   } catch (error) {
@@ -80,6 +129,7 @@ router.post('/login', async (req, res) => {
     res.status(500).json({ error: 'Server error during login' });
   }
 });
+
 // GET /api/user/:username
 router.get('/user/:username', authenticateToken, async (req, res) => {
   try {
@@ -88,7 +138,15 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
     if (req.user.username !== user.username && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Unauthorized' });
     }
-    res.json(user);
+    res.json({
+      username: user.username,
+      name: user.name,
+      phoneNumber: user.phoneNumber,
+      email: user.email,
+      balance: user.balance,
+      transactions: user.transactions,
+      kycStatus: user.kycStatus,
+    });
   } catch (error) {
     console.error('User Fetch Error:', error);
     res.status(500).json({ error: 'Server error fetching user' });
@@ -235,7 +293,7 @@ router.put('/user/update', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/users (Fetch all users with pagination and search, admin only)
+// GET /api/users (Admin only)
 router.get('/users', authenticateToken, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -256,7 +314,7 @@ router.get('/users', authenticateToken, async (req, res) => {
       : {};
 
     const total = await User.countDocuments(query);
-    const users = await User.find(query, { password: 0 })
+    const users = await User.find(query, { password: 0, idImageUrl: 0 }) // Exclude sensitive fields
       .skip(skip)
       .limit(limitNum);
 
@@ -273,7 +331,7 @@ router.get('/users', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/credit (Admin credits a user)
+// POST /api/credit (Admin only)
 router.post('/credit', authenticateToken, async (req, res) => {
   const { adminUsername, toUsername, amount } = req.body;
   if (req.user.role !== 'admin' || req.user.username !== adminUsername) {
@@ -282,8 +340,12 @@ router.post('/credit', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username: toUsername });
     if (!user) return res.status(404).json({ error: 'User not found' });
-    user.balance += amount;
-    user.transactions.push({ type: 'credited', amount, toFrom: adminUsername, date: new Date() });
+    const paymentAmount = parseFloat(amount);
+    if (isNaN(paymentAmount) || paymentAmount <= 0) {
+      return res.status(400).json({ error: 'Amount must be a positive number' });
+    }
+    user.balance += paymentAmount;
+    user.transactions.push({ type: 'credited', amount: paymentAmount, toFrom: adminUsername, date: new Date() });
     await user.save();
     res.json({ message: 'Credit successful' });
   } catch (error) {
@@ -292,7 +354,7 @@ router.post('/credit', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/payment-with-pin (Admin payment with PIN)
+// POST /api/payment-with-pin (Admin only)
 router.post('/payment-with-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, pin } = req.body;
   if (req.user.username !== fromUsername || req.user.role !== 'admin') {
@@ -304,11 +366,15 @@ router.post('/payment-with-pin', authenticateToken, async (req, res) => {
     if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
     const qrPin = await QRPin.findOne({ username: toUsername, pin });
     if (!qrPin) return res.status(400).json({ error: 'Invalid PIN' });
-    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
-    sender.balance -= amount;
-    receiver.balance += amount;
-    sender.transactions.push({ type: 'sent', amount, toFrom: toUsername, date: new Date() });
-    receiver.transactions.push({ type: 'received', amount, toFrom: fromUsername, date: new Date() });
+    const paymentAmount = parseFloat(amount);
+    if (isNaN(paymentAmount) || paymentAmount <= 0) {
+      return res.status(400).json({ error: 'Amount must be a positive number' });
+    }
+    if (sender.balance < paymentAmount) return res.status(400).json({ error: 'Insufficient balance' });
+    sender.balance -= paymentAmount;
+    receiver.balance += paymentAmount;
+    sender.transactions.push({ type: 'sent', amount: paymentAmount, toFrom: toUsername, date: new Date() });
+    receiver.transactions.push({ type: 'received', amount: paymentAmount, toFrom: fromUsername, date: new Date() });
     await QRPin.deleteOne({ _id: qrPin._id });
     await sender.save();
     await receiver.save();
@@ -319,7 +385,7 @@ router.post('/payment-with-pin', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/transactions/:username (Fetch user transactions, admin only)
+// GET /api/transactions/:username (Admin only)
 router.get('/transactions/:username', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
