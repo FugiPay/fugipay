@@ -104,6 +104,10 @@ router.post('/login', async (req, res) => {
   if (!identifier || !password) {
     return res.status(400).json({ error: 'Username or phone number and password are required' });
   }
+  if (!JWT_SECRET) {
+    console.error('JWT_SECRET is not defined');
+    return res.status(500).json({ error: 'Server configuration error' });
+  }
   try {
     const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
     if (!user) {
