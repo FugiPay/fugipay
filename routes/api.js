@@ -100,12 +100,12 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
 
 // POST /api/login
 router.post('/login', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
+  const { identifier, password } = req.body;
+  if (!identifier || !password) {
+    return res.status(400).json({ error: 'Username or phone number and password are required' });
   }
   try {
-    const user = await User.findOne({ username });
+    const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
     if (!user) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
@@ -121,7 +121,7 @@ router.post('/login', async (req, res) => {
     const token = jwt.sign(
       { username: user.username, role: user.role },
       JWT_SECRET,
-      { expiresIn: '24h' } // Extended to 24 hours
+      { expiresIn: '24h' }
     );
     res.json({ token, username: user.username, role: user.role });
   } catch (error) {
