@@ -279,20 +279,47 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
 
 // PUT /api/user/update
 router.put('/user/update', authenticateToken, async (req, res) => {
-  const { username, password } = req.body;
+  const { username, email, password } = req.body;
 
-  if (!username && !password) {
-    return res.status(400).json({ error: 'Username or password required to update' });
+  if (!username && !email && !password) {
+    return res.status(400).json({ error: 'At least one field (username, email, or password) is required to update' });
   }
 
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    if (username) user.username = username;
-    if (password) user.password = await bcrypt.hash(password, 10);
-    await user.save();
+    // Update username if provided and different
+    if (username && username !== user.username) {
+      const existingUsername = await User.findOne({ username });
+      if (existingUsername) {
+        return res.status(400).json({ error: 'Username already taken' });
+      }
+      user.username = username;
+    }
 
+    // Update email if provided and different
+    if (email && email !== user.email) {
+      const existingEmail = await User.findOne({ email });
+      if (existingEmail) {
+        return res.status(400).json({ error: 'Email already in use' });
+      }
+      // Basic email format validation
+      if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
+        return res.status(400).json({ error: 'Invalid email format' });
+      }
+      user.email = email;
+    }
+
+    // Update password if provided
+    if (password) {
+      if (password.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      }
+      user.password = await bcrypt.hash(password, 10);
+    }
+
+    await user.save();
     res.json({ message: 'User updated' });
   } catch (error) {
     console.error('User Update Error:', error);
@@ -300,7 +327,26 @@ router.put('/user/update', authenticateToken, async (req, res) => {
   }
 });
 
-// PUT /api/user/update-kyc (Admin only)// PUT /api/user/update-kyc (Admin only)
+// DELETE /api/user/delete
+router.delete('/user/delete', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Delete associated QR pins
+    await QRPin.deleteMany({ username: req.user.username });
+
+    // Delete the user
+    await User.deleteOne({ username: req.user.username });
+
+    res.json({ message: 'Account deleted successfully' });
+  } catch (error) {
+    console.error('Delete Account Error:', error);
+    res.status(500).json({ error: 'Server error deleting account' });
+  }
+});
+
+// PUT /api/user/update-kyc (Admin only)
 router.put('/user/update-kyc', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -353,6 +399,7 @@ router.put('/user/toggle-active', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Server error toggling user status', details: error.message });
   }
 });
+
 // GET /api/users (Admin only)
 router.get('/users', authenticateToken, async (req, res) => {
   try {
