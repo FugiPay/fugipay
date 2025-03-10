@@ -300,7 +300,7 @@ router.put('/user/update', authenticateToken, async (req, res) => {
   }
 });
 
-// PUT /api/user/update-kyc (Admin only)
+// PUT /api/user/update-kyc (Admin only)// PUT /api/user/update-kyc (Admin only)
 router.put('/user/update-kyc', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -313,14 +313,18 @@ router.put('/user/update-kyc', authenticateToken, async (req, res) => {
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: 'User not found' });
     user.kycStatus = kycStatus;
-    // Automatically activate/deactivate based on KYC status
     if (kycStatus === 'verified') user.isActive = true;
     else if (kycStatus === 'rejected') user.isActive = false;
     await user.save();
     res.json({ message: 'KYC status updated' });
   } catch (error) {
-    console.error('KYC Update Error:', error);
-    res.status(500).json({ error: 'Server error updating KYC status' });
+    console.error('KYC Update Error:', {
+      message: error.message,
+      stack: error.stack,
+      username,
+      kycStatus,
+    });
+    res.status(500).json({ error: 'Server error updating KYC status', details: error.message });
   }
 });
 
@@ -340,11 +344,15 @@ router.put('/user/toggle-active', authenticateToken, async (req, res) => {
     await user.save();
     res.json({ message: `User ${isActive ? 'activated' : 'deactivated'}` });
   } catch (error) {
-    console.error('Toggle Active Error:', error);
-    res.status(500).json({ error: 'Server error toggling user status' });
+    console.error('Toggle Active Error:', {
+      message: error.message,
+      stack: error.stack,
+      username,
+      isActive,
+    });
+    res.status(500).json({ error: 'Server error toggling user status', details: error.message });
   }
 });
-
 // GET /api/users (Admin only)
 router.get('/users', authenticateToken, async (req, res) => {
   try {
