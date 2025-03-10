@@ -78,6 +78,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
       balance: 0,
       transactions: [],
       kycStatus: 'pending', // Track KYC status
+      isActive: false, // Default to inactive until KYC is verified
     });
     await user.save();
 
@@ -150,6 +151,7 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
       balance: user.balance,
       transactions: user.transactions,
       kycStatus: user.kycStatus,
+      isActive: user.isActive,
     });
   } catch (error) {
     console.error('User Fetch Error:', error);
@@ -168,6 +170,7 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
     if (req.user.username !== username) return res.status(403).json({ error: 'Unauthorized' });
 
     const qrId = require('crypto').randomBytes(16).toString('hex');
@@ -194,11 +197,11 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
 
   try {
     const sender = await User.findOne({ username: fromUsername });
-    if (!sender) return res.status(404).json({ error: 'Sender not found' });
+    if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
     if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
 
     const receiver = await User.findOne({ username: toUsername });
-    if (!receiver) return res.status(404).json({ error: 'Recipient not found' });
+    if (!receiver || !receiver.isActive) return res.status(403).json({ error: 'Recipient not found or inactive' });
 
     const qrPin = await QRPin.findOne({ qrId, pin });
     if (!qrPin || qrPin.username !== toUsername) {
@@ -240,11 +243,11 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
 
   try {
     const sender = await User.findOne({ username: fromUsername });
-    if (!sender) return res.status(404).json({ error: 'Sender not found' });
+    if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
     if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
 
     const receiver = await User.findOne({ $or: [{ username: searchQuery }, { phoneNumber: searchQuery }] });
-    if (!receiver) return res.status(404).json({ error: 'Recipient not found' });
+    if (!receiver || !receiver.isActive) return res.status(403).json({ error: 'Recipient not found or inactive' });
 
     const qrPin = await QRPin.findOne({ username: receiver.username, pin });
     if (!qrPin) return res.status(400).json({ error: 'Invalid PIN or no active QR code' });
@@ -297,6 +300,51 @@ router.put('/user/update', authenticateToken, async (req, res) => {
   }
 });
 
+// PUT /api/user/update-kyc (Admin only)
+router.put('/user/update-kyc', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Unauthorized: Admins only' });
+  }
+  const { username, kycStatus } = req.body;
+  if (!username || !kycStatus || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
+    return res.status(400).json({ error: 'Valid username and kycStatus are required' });
+  }
+  try {
+    const user = await User.findOne({ username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.kycStatus = kycStatus;
+    // Automatically activate/deactivate based on KYC status
+    if (kycStatus === 'verified') user.isActive = true;
+    else if (kycStatus === 'rejected') user.isActive = false;
+    await user.save();
+    res.json({ message: 'KYC status updated' });
+  } catch (error) {
+    console.error('KYC Update Error:', error);
+    res.status(500).json({ error: 'Server error updating KYC status' });
+  }
+});
+
+// PUT /api/user/toggle-active (Admin only)
+router.put('/user/toggle-active', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Unauthorized: Admins only' });
+  }
+  const { username, isActive } = req.body;
+  if (!username || typeof isActive !== 'boolean') {
+    return res.status(400).json({ error: 'Valid username and isActive status are required' });
+  }
+  try {
+    const user = await User.findOne({ username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.isActive = isActive;
+    await user.save();
+    res.json({ message: `User ${isActive ? 'activated' : 'deactivated'}` });
+  } catch (error) {
+    console.error('Toggle Active Error:', error);
+    res.status(500).json({ error: 'Server error toggling user status' });
+  }
+});
+
 // GET /api/users (Admin only)
 router.get('/users', authenticateToken, async (req, res) => {
   try {
@@ -344,6 +392,7 @@ router.post('/credit', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username: toUsername });
     if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
     const paymentAmount = parseFloat(amount);
     if (isNaN(paymentAmount) || paymentAmount <= 0) {
       return res.status(400).json({ error: 'Amount must be a positive number' });
@@ -366,8 +415,9 @@ router.post('/payment-with-pin', authenticateToken, async (req, res) => {
   }
   try {
     const sender = await User.findOne({ username: fromUsername });
+    if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
     const receiver = await User.findOne({ username: toUsername });
-    if (!sender || !receiver) return res.status(404).json({ error: 'User not found' });
+    if (!receiver || !receiver.isActive) return res.status(403).json({ error: 'Recipient not found or inactive' });
     const qrPin = await QRPin.findOne({ username: toUsername, pin });
     if (!qrPin) return res.status(400).json({ error: 'Invalid PIN' });
     const paymentAmount = parseFloat(amount);
