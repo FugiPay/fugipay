@@ -83,7 +83,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
     await user.save();
 
     const token = jwt.sign(
-      { username: user.username, role: user.role },
+      { phoneNumber: user.phoneNumber, role: user.role }, // Use phoneNumber in token
       JWT_SECRET,
       { expiresIn: '24h' } // Extended to 24 hours
     );
@@ -124,7 +124,7 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
     const token = jwt.sign(
-      { username: user.username, role: user.role },
+      { phoneNumber: user.phoneNumber, role: user.role }, // Use phoneNumber in token
       JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -140,7 +140,7 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.params.username });
     if (!user) return res.status(404).json({ error: 'User not found' });
-    if (req.user.username !== user.username && req.user.role !== 'admin') {
+    if (req.user.phoneNumber !== user.phoneNumber && req.user.role !== 'admin') { // Use phoneNumber for auth check
       return res.status(403).json({ error: 'Unauthorized' });
     }
     res.json({
@@ -168,10 +168,10 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ username });
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for lookup
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
-    if (req.user.username !== username) return res.status(403).json({ error: 'Unauthorized' });
+    if (username !== user.username) return res.status(403).json({ error: 'Unauthorized' });
 
     const qrId = require('crypto').randomBytes(16).toString('hex');
     const qrPin = new QRPin({ username, qrId, pin });
@@ -196,8 +196,9 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   }
 
   try {
-    const sender = await User.findOne({ username: fromUsername });
+    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for sender
     if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
+    if (sender.username !== fromUsername) return res.status(403).json({ error: 'Unauthorized sender' });
     if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
 
     const receiver = await User.findOne({ username: toUsername });
@@ -242,8 +243,9 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
   }
 
   try {
-    const sender = await User.findOne({ username: fromUsername });
+    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for sender
     if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
+    if (sender.username !== fromUsername) return res.status(403).json({ error: 'Unauthorized sender' });
     if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
 
     const receiver = await User.findOne({ $or: [{ username: searchQuery }, { phoneNumber: searchQuery }] });
@@ -281,44 +283,25 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
 router.put('/user/update', authenticateToken, async (req, res) => {
   const { username, email, password } = req.body;
 
-  if (!username && !email && !password) {
-    return res.status(400).json({ error: 'At least one field (username, email, or password) is required to update' });
-  }
-
   try {
-    const user = await User.findOne({ username: req.user.username });
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for lookup
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // Update username if provided and different
     if (username && username !== user.username) {
       const existingUsername = await User.findOne({ username });
-      if (existingUsername) {
-        return res.status(400).json({ error: 'Username already taken' });
-      }
+      if (existingUsername) return res.status(400).json({ error: 'Username already taken' });
       user.username = username;
     }
-
-    // Update email if provided and different
     if (email && email !== user.email) {
       const existingEmail = await User.findOne({ email });
-      if (existingEmail) {
-        return res.status(400).json({ error: 'Email already in use' });
-      }
-      // Basic email format validation
-      if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
-        return res.status(400).json({ error: 'Invalid email format' });
-      }
+      if (existingEmail) return res.status(400).json({ error: 'Email already in use' });
+      if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) return res.status(400).json({ error: 'Invalid email format' });
       user.email = email;
     }
-
-    // Update password if provided
     if (password) {
-      if (password.length < 6) {
-        return res.status(400).json({ error: 'Password must be at least 6 characters' });
-      }
+      if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
       user.password = await bcrypt.hash(password, 10);
     }
-
     await user.save();
     res.json({ message: 'User updated' });
   } catch (error) {
@@ -330,15 +313,11 @@ router.put('/user/update', authenticateToken, async (req, res) => {
 // DELETE /api/user/delete
 router.delete('/user/delete', authenticateToken, async (req, res) => {
   try {
-    const user = await User.findOne({ username: req.user.username });
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for lookup
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // Delete associated QR pins
-    await QRPin.deleteMany({ username: req.user.username });
-
-    // Delete the user
-    await User.deleteOne({ username: req.user.username });
-
+    await QRPin.deleteMany({ username: user.username });
+    await User.deleteOne({ phoneNumber: req.user.phoneNumber });
     res.json({ message: 'Account deleted successfully' });
   } catch (error) {
     console.error('Delete Account Error:', error);
@@ -441,10 +420,12 @@ router.get('/users', authenticateToken, async (req, res) => {
 // POST /api/credit (Admin only)
 router.post('/credit', authenticateToken, async (req, res) => {
   const { adminUsername, toUsername, amount } = req.body;
-  if (req.user.role !== 'admin' || req.user.username !== adminUsername) {
+  if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
   }
   try {
+    const admin = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Verify admin
+    if (!admin || admin.username !== adminUsername) return res.status(403).json({ error: 'Unauthorized admin' });
     const user = await User.findOne({ username: toUsername });
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
@@ -465,12 +446,13 @@ router.post('/credit', authenticateToken, async (req, res) => {
 // POST /api/payment-with-pin (Admin only)
 router.post('/payment-with-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, pin } = req.body;
-  if (req.user.username !== fromUsername || req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Unauthorized' });
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Unauthorized: Admins only' });
   }
   try {
-    const sender = await User.findOne({ username: fromUsername });
+    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for sender
     if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
+    if (sender.username !== fromUsername) return res.status(403).json({ error: 'Unauthorized sender' });
     const receiver = await User.findOne({ username: toUsername });
     if (!receiver || !receiver.isActive) return res.status(403).json({ error: 'Recipient not found or inactive' });
     const qrPin = await QRPin.findOne({ username: toUsername, pin });
