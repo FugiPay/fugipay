@@ -139,7 +139,7 @@ router.post('/login', async (req, res) => {
 });
 
 // POST /api/forgot-password - Updated with Twilio SMS
-// POST /api/forgot-password - Updated with detailed error handling
+// POST /api/forgot-password - Enhanced Twilio error reporting
 router.post('/forgot-password', async (req, res) => {
   const { identifier } = req.body;
   if (!identifier) {
@@ -172,16 +172,14 @@ router.post('/forgot-password', async (req, res) => {
         code: twilioError.code,
         status: twilioError.status,
         details: twilioError.details,
+        from: TWILIO_PHONE_NUMBER,
+        to: user.phoneNumber,
       });
-      if (twilioError.code === 21211) {
-        return res.status(400).json({ error: 'Invalid phone number format' });
-      } else if (twilioError.code === 21610) {
-        return res.status(400).json({ error: 'User has unsubscribed from SMS' });
-      } else if (twilioError.code === 20003) {
-        return res.status(500).json({ error: 'Twilio authentication failed. Contact support.' });
-      } else {
-        return res.status(500).json({ error: 'Failed to send SMS. Please try again.' });
-      }
+      return res.status(500).json({
+        error: 'Failed to send SMS',
+        twilioCode: twilioError.code,
+        twilioMessage: twilioError.message,
+      });
     }
 
     res.json({ message: 'Reset instructions have been sent to your phone.' });
