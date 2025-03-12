@@ -183,8 +183,17 @@ router.post('/forgot-password', async (req, res) => {
         message: emailError.message,
         code: emailError.code,
         response: emailError.response,
+        emailUser: process.env.EMAIL_USER,
+        emailTo: user.email,
       });
-      return res.status(500).json({ error: 'Failed to send email. Please try again.' });
+      return res.status(500).json({
+        error: 'Failed to send email',
+        emailError: {
+          message: emailError.message,
+          code: emailError.code,
+          response: emailError.response,
+        },
+      });
     }
 
     res.json({ message: 'Reset instructions have been sent to your email.' });
