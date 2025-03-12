@@ -7,16 +7,20 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   idImageUrl: { type: String },
-  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+  role: { type: String, default: 'user' },
   balance: { type: Number, default: 0 },
-  transactions: [{
-    type: { type: String, required: true },
-    amount: { type: Number, required: true },
-    toFrom: { type: String, required: true },
-    date: { type: Date, default: Date.now },
-  }],
-  kycStatus: { type: String, enum: ['pending', 'verified', 'rejected'], default: 'pending' },
-  isActive: { type: Boolean, default: false }, // New field
+  transactions: [
+    {
+      type: { type: String },
+      amount: { type: Number },
+      toFrom: { type: String },
+      date: { type: Date, default: Date.now },
+    },
+  ],
+  kycStatus: { type: String, default: 'pending' },
+  isActive: { type: Boolean, default: false },
+  resetToken: { type: String }, // New field for password reset token
+  resetTokenExpiry: { type: Number }, // New field for token expiry
 });
 
 module.exports = mongoose.model('User', userSchema);

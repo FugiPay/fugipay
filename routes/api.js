@@ -5,9 +5,15 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const AWS = require('aws-sdk');
 const fs = require('fs');
+const crypto = require('crypto');
+const twilio = require('twilio'); // Add Twilio SDK
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const authenticateToken = require('../middleware/authenticateToken');
+
+// Configure Twilio client
+const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
 
 // Configure multer for temporary local storage
 const upload = multer({ dest: 'uploads/' });
@@ -16,11 +22,11 @@ const upload = multer({ dest: 'uploads/' });
 const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION || 'us-east-1', // Default region
+  region: process.env.AWS_REGION || 'us-east-1',
 });
 const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
 
-// Secret key for JWT (use environment variable in production)
+// Secret key for JWT
 const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
 
 // POST /api/register - Updated for KYC and S3
@@ -42,7 +48,6 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
       return res.status(400).json({ error: 'Email or phone number already exists' });
     }
 
-    // Upload ID image to S3
     const fileContent = fs.readFileSync(idImage.path);
     const s3Key = `id-images/${Date.now()}-${idImage.originalname}`;
     const params = {
@@ -50,23 +55,21 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
       Key: s3Key,
       Body: fileContent,
       ContentType: idImage.mimetype,
-      ACL: 'private', // Restrict access
+      ACL: 'private',
     };
     const s3Response = await s3.upload(params).promise();
     const idImageUrl = s3Response.Location;
 
-    // Delete local file
     fs.unlinkSync(idImage.path);
 
-    // Placeholder for KYC verification (e.g., Smile ID/uqudo later)
     const idData = { name, idNumber: 'pending_verification', dob: 'pending_verification' };
-    const isSanctioned = false; // Replace with real sanctions check later
+    const isSanctioned = false; // Placeholder for sanctions check
     if (isSanctioned) {
       return res.status(403).json({ error: 'User is on sanctions list' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const username = email.split('@')[0]; // Derive username from email
+    const username = email.split('@')[0];
     const user = new User({
       username,
       name,
@@ -74,18 +77,18 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
       email,
       password: hashedPassword,
       idImageUrl,
-      role: 'user', // Default role
+      role: 'user',
       balance: 0,
       transactions: [],
-      kycStatus: 'pending', // Track KYC status
-      isActive: false, // Default to inactive until KYC is verified
+      kycStatus: 'pending',
+      isActive: false,
     });
     await user.save();
 
     const token = jwt.sign(
-      { phoneNumber: user.phoneNumber, role: user.role }, // Use phoneNumber in token
+      { phoneNumber: user.phoneNumber, role: user.role },
       JWT_SECRET,
-      { expiresIn: '24h' } // Extended to 24 hours
+      { expiresIn: '24h' }
     );
 
     res.status(201).json({
@@ -124,7 +127,7 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
     const token = jwt.sign(
-      { phoneNumber: user.phoneNumber, role: user.role }, // Use phoneNumber in token
+      { phoneNumber: user.phoneNumber, role: user.role },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -135,12 +138,74 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// POST /api/forgot-password - Updated with Twilio SMS
+router.post('/forgot-password', async (req, res) => {
+  const { identifier } = req.body;
+  if (!identifier) {
+    return res.status(400).json({ error: 'Username or phone number is required' });
+  }
+
+  try {
+    const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
+    if (!user) {
+      return res.status(404).json({ error: 'No account found with that identifier' });
+    }
+
+    const resetToken = crypto.randomBytes(20).toString('hex');
+    const resetTokenExpiry = Date.now() + 3600000; // 1 hour expiry
+
+    user.resetToken = resetToken;
+    user.resetTokenExpiry = resetTokenExpiry;
+    await user.save();
+
+    // Send reset token via Twilio SMS
+    await twilioClient.messages.create({
+      body: `Your Zangena password reset token is: ${resetToken}. It expires in 1 hour.`,
+      from: TWILIO_PHONE_NUMBER,
+      to: user.phoneNumber,
+    });
+
+    res.json({ message: 'Reset instructions have been sent to your phone.' });
+  } catch (error) {
+    console.error('Forgot Password Error:', error);
+    res.status(500).json({ error: 'Server error during password reset request' });
+  }
+});
+
+// POST /api/reset-password
+router.post('/reset-password', async (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: 'Token and new password are required' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  }
+
+  try {
+    const user = await User.findOne({ resetToken: token, resetTokenExpiry: { $gt: Date.now() } });
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    user.resetToken = undefined;
+    user.resetTokenExpiry = undefined;
+    await user.save();
+
+    res.json({ message: 'Password reset successful' });
+  } catch (error) {
+    console.error('Reset Password Error:', error);
+    res.status(500).json({ error: 'Server error during password reset' });
+  }
+});
+
 // GET /api/user/:username
 router.get('/user/:username', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.params.username });
     if (!user) return res.status(404).json({ error: 'User not found' });
-    if (req.user.phoneNumber !== user.phoneNumber && req.user.role !== 'admin') { // Use phoneNumber for auth check
+    if (req.user.phoneNumber !== user.phoneNumber && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Unauthorized' });
     }
     res.json({
@@ -168,12 +233,12 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for lookup
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
     if (username !== user.username) return res.status(403).json({ error: 'Unauthorized' });
 
-    const qrId = require('crypto').randomBytes(16).toString('hex');
+    const qrId = crypto.randomBytes(16).toString('hex');
     const qrPin = new QRPin({ username, qrId, pin });
     await qrPin.save();
 
@@ -196,7 +261,7 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   }
 
   try {
-    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for sender
+    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
     if (sender.username !== fromUsername) return res.status(403).json({ error: 'Unauthorized sender' });
     if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
@@ -243,7 +308,7 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
   }
 
   try {
-    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for sender
+    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
     if (sender.username !== fromUsername) return res.status(403).json({ error: 'Unauthorized sender' });
     if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
@@ -284,7 +349,7 @@ router.put('/user/update', authenticateToken, async (req, res) => {
   const { username, email, password } = req.body;
 
   try {
-    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for lookup
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     if (username && username !== user.username) {
@@ -313,7 +378,7 @@ router.put('/user/update', authenticateToken, async (req, res) => {
 // DELETE /api/user/delete
 router.delete('/user/delete', authenticateToken, async (req, res) => {
   try {
-    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for lookup
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     await QRPin.deleteMany({ username: user.username });
@@ -343,12 +408,7 @@ router.put('/user/update-kyc', authenticateToken, async (req, res) => {
     await user.save();
     res.json({ message: 'KYC status updated' });
   } catch (error) {
-    console.error('KYC Update Error:', {
-      message: error.message,
-      stack: error.stack,
-      username,
-      kycStatus,
-    });
+    console.error('KYC Update Error:', { message: error.message, stack: error.stack });
     res.status(500).json({ error: 'Server error updating KYC status', details: error.message });
   }
 });
@@ -369,12 +429,7 @@ router.put('/user/toggle-active', authenticateToken, async (req, res) => {
     await user.save();
     res.json({ message: `User ${isActive ? 'activated' : 'deactivated'}` });
   } catch (error) {
-    console.error('Toggle Active Error:', {
-      message: error.message,
-      stack: error.stack,
-      username,
-      isActive,
-    });
+    console.error('Toggle Active Error:', { message: error.message, stack: error.stack });
     res.status(500).json({ error: 'Server error toggling user status', details: error.message });
   }
 });
@@ -400,7 +455,7 @@ router.get('/users', authenticateToken, async (req, res) => {
       : {};
 
     const total = await User.countDocuments(query);
-    const users = await User.find(query, { password: 0, idImageUrl: 0 }) // Exclude sensitive fields
+    const users = await User.find(query, { password: 0, idImageUrl: 0 })
       .skip(skip)
       .limit(limitNum);
 
@@ -424,7 +479,7 @@ router.post('/credit', authenticateToken, async (req, res) => {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
   }
   try {
-    const admin = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Verify admin
+    const admin = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!admin || admin.username !== adminUsername) return res.status(403).json({ error: 'Unauthorized admin' });
     const user = await User.findOne({ username: toUsername });
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -450,7 +505,7 @@ router.post('/payment-with-pin', authenticateToken, async (req, res) => {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
   }
   try {
-    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber }); // Use phoneNumber for sender
+    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
     if (sender.username !== fromUsername) return res.status(403).json({ error: 'Unauthorized sender' });
     const receiver = await User.findOne({ username: toUsername });
