@@ -139,6 +139,7 @@ router.post('/login', async (req, res) => {
 });
 
 // POST /api/forgot-password - Updated with Twilio SMS
+// POST /api/forgot-password - Updated with detailed error handling
 router.post('/forgot-password', async (req, res) => {
   const { identifier } = req.body;
   if (!identifier) {
@@ -159,16 +160,38 @@ router.post('/forgot-password', async (req, res) => {
     await user.save();
 
     // Send reset token via Twilio SMS
-    await twilioClient.messages.create({
-      body: `Your Zangena password reset token is: ${resetToken}. It expires in 1 hour.`,
-      from: TWILIO_PHONE_NUMBER,
-      to: user.phoneNumber,
-    });
+    try {
+      await twilioClient.messages.create({
+        body: `Your Zangena password reset token is: ${resetToken}. It expires in 1 hour.`,
+        from: TWILIO_PHONE_NUMBER,
+        to: user.phoneNumber,
+      });
+    } catch (twilioError) {
+      console.error('Twilio Error:', {
+        message: twilioError.message,
+        code: twilioError.code,
+        status: twilioError.status,
+        details: twilioError.details,
+      });
+      if (twilioError.code === 21211) {
+        return res.status(400).json({ error: 'Invalid phone number format' });
+      } else if (twilioError.code === 21610) {
+        return res.status(400).json({ error: 'User has unsubscribed from SMS' });
+      } else if (twilioError.code === 20003) {
+        return res.status(500).json({ error: 'Twilio authentication failed. Contact support.' });
+      } else {
+        return res.status(500).json({ error: 'Failed to send SMS. Please try again.' });
+      }
+    }
 
     res.json({ message: 'Reset instructions have been sent to your phone.' });
   } catch (error) {
-    console.error('Forgot Password Error:', error);
-    res.status(500).json({ error: 'Server error during password reset request' });
+    console.error('Forgot Password Error:', {
+      message: error.message,
+      stack: error.stack,
+      identifier,
+    });
+    res.status(500).json({ error: 'Server error during password reset request', details: error.message });
   }
 });
 
