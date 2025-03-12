@@ -6,14 +6,10 @@ const multer = require('multer');
 const AWS = require('aws-sdk');
 const fs = require('fs');
 const crypto = require('crypto');
-const twilio = require('twilio'); // Add Twilio SDK
+const nodemailer = require('nodemailer'); // Replace Twilio with Nodemailer
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const authenticateToken = require('../middleware/authenticateToken');
-
-// Configure Twilio client
-const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
-const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
 
 // Configure multer for temporary local storage
 const upload = multer({ dest: 'uploads/' });
@@ -29,7 +25,16 @@ const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
 // Secret key for JWT
 const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
 
-// POST /api/register - Updated for KYC and S3
+// Configure Nodemailer with Gmail
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER, // e.g., your-email@gmail.com
+    pass: process.env.EMAIL_PASS, // Gmail App Password if 2FA, or regular password
+  },
+});
+
+// POST /api/register - Unchanged
 router.post('/register', upload.single('idImage'), async (req, res) => {
   const { name, phoneNumber, email, password } = req.body;
   const idImage = req.file;
@@ -102,7 +107,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   }
 });
 
-// POST /api/login
+// POST /api/login - Unchanged
 router.post('/login', async (req, res) => {
   const { identifier, password } = req.body;
   if (!identifier || !password) {
@@ -138,8 +143,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// POST /api/forgot-password - Updated with Twilio SMS
-// POST /api/forgot-password - Normalize phone numbers for Twilio
+// POST /api/forgot-password - Updated to use Gmail instead of Twilio
 router.post('/forgot-password', async (req, res) => {
   const { identifier } = req.body;
   if (!identifier) {
@@ -159,44 +163,31 @@ router.post('/forgot-password', async (req, res) => {
     user.resetTokenExpiry = resetTokenExpiry;
     await user.save();
 
-    // Normalize phone number to E.164 format for Twilio
-    let normalizedPhoneNumber = user.phoneNumber;
-    const zambianNumberPattern = /^(0?[976][56789]|7[34679])\d{7}$/;
-    if (zambianNumberPattern.test(user.phoneNumber)) {
-      // If it matches Zambian format without country code (e.g., 097272XXXX), add +260
-      normalizedPhoneNumber = `+260${user.phoneNumber.replace(/^0/, '')}`;
-    } else if (!user.phoneNumber.startsWith('+')) {
-      // If no country code and not a valid Zambian pattern, assume +260 as fallback
-      normalizedPhoneNumber = `+260${user.phoneNumber}`;
-    }
-    // If it already starts with +260 or another valid country code, leave it as is
+    // Send reset token via Gmail
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: user.email,
+      subject: 'Zangena Password Reset',
+      text: `Your password reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena app to reset your password.`,
+      html: `
+        <h2>Zangena Password Reset</h2>
+        <p>Your password reset token is: <strong>${resetToken}</strong></p>
+        <p>It expires in 1 hour. Enter it in the Zangena app to reset your password.</p>
+      `,
+    };
 
-    console.log('Normalized phone number for SMS:', normalizedPhoneNumber);
-
-    // Send reset token via Twilio SMS
     try {
-      await twilioClient.messages.create({
-        body: `Your Zangena password reset token is: ${resetToken}. It expires in 1 hour.`,
-        from: TWILIO_PHONE_NUMBER,
-        to: normalizedPhoneNumber,
+      await transporter.sendMail(mailOptions);
+    } catch (emailError) {
+      console.error('Email Error:', {
+        message: emailError.message,
+        code: emailError.code,
+        response: emailError.response,
       });
-    } catch (twilioError) {
-      console.error('Twilio Error:', {
-        message: twilioError.message,
-        code: twilioError.code,
-        status: twilioError.status,
-        details: twilioError.details,
-        from: TWILIO_PHONE_NUMBER,
-        to: normalizedPhoneNumber,
-      });
-      return res.status(500).json({
-        error: 'Failed to send SMS',
-        twilioCode: twilioError.code,
-        twilioMessage: twilioError.message,
-      });
+      return res.status(500).json({ error: 'Failed to send email. Please try again.' });
     }
 
-    res.json({ message: 'Reset instructions have been sent to your phone.' });
+    res.json({ message: 'Reset instructions have been sent to your email.' });
   } catch (error) {
     console.error('Forgot Password Error:', {
       message: error.message,
@@ -207,7 +198,7 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-// POST /api/reset-password
+// POST /api/reset-password - Unchanged
 router.post('/reset-password', async (req, res) => {
   const { token, newPassword } = req.body;
   if (!token || !newPassword) {
@@ -235,7 +226,7 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-// GET /api/user/:username
+// GET /api/user/:username - Unchanged
 router.get('/user/:username', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.params.username });
@@ -259,7 +250,7 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/store-qr-pin
+// POST /api/store-qr-pin - Unchanged
 router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   const { username, pin } = req.body;
 
@@ -287,7 +278,7 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/payment-with-qr-pin
+// POST /api/payment-with-qr-pin - Unchanged
 router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, qrId, pin } = req.body;
 
@@ -334,7 +325,7 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/payment-with-search
+// POST /api/payment-with-search - Unchanged
 router.post('/payment-with-search', authenticateToken, async (req, res) => {
   const { fromUsername, searchQuery, amount, pin } = req.body;
 
@@ -379,7 +370,7 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
   }
 });
 
-// PUT /api/user/update
+// PUT /api/user/update - Unchanged
 router.put('/user/update', authenticateToken, async (req, res) => {
   const { username, email, password } = req.body;
 
@@ -410,7 +401,7 @@ router.put('/user/update', authenticateToken, async (req, res) => {
   }
 });
 
-// DELETE /api/user/delete
+// DELETE /api/user/delete - Unchanged
 router.delete('/user/delete', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
@@ -425,7 +416,7 @@ router.delete('/user/delete', authenticateToken, async (req, res) => {
   }
 });
 
-// PUT /api/user/update-kyc (Admin only)
+// PUT /api/user/update-kyc (Admin only) - Unchanged
 router.put('/user/update-kyc', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -448,7 +439,7 @@ router.put('/user/update-kyc', authenticateToken, async (req, res) => {
   }
 });
 
-// PUT /api/user/toggle-active (Admin only)
+// PUT /api/user/toggle-active (Admin only) - Unchanged
 router.put('/user/toggle-active', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -469,7 +460,7 @@ router.put('/user/toggle-active', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/users (Admin only)
+// GET /api/users (Admin only) - Unchanged
 router.get('/users', authenticateToken, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -507,7 +498,7 @@ router.get('/users', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/credit (Admin only)
+// POST /api/credit (Admin only) - Unchanged
 router.post('/credit', authenticateToken, async (req, res) => {
   const { adminUsername, toUsername, amount } = req.body;
   if (req.user.role !== 'admin') {
@@ -533,7 +524,7 @@ router.post('/credit', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/payment-with-pin (Admin only)
+// POST /api/payment-with-pin (Admin only) - Unchanged
 router.post('/payment-with-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, pin } = req.body;
   if (req.user.role !== 'admin') {
@@ -566,7 +557,7 @@ router.post('/payment-with-pin', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/transactions/:username (Admin only)
+// GET /api/transactions/:username (Admin only) - Unchanged
 router.get('/transactions/:username', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
