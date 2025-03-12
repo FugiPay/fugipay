@@ -139,7 +139,7 @@ router.post('/login', async (req, res) => {
 });
 
 // POST /api/forgot-password - Updated with Twilio SMS
-// POST /api/forgot-password - Enhanced Twilio error reporting
+// POST /api/forgot-password - Normalize phone numbers for Twilio
 router.post('/forgot-password', async (req, res) => {
   const { identifier } = req.body;
   if (!identifier) {
@@ -159,12 +159,26 @@ router.post('/forgot-password', async (req, res) => {
     user.resetTokenExpiry = resetTokenExpiry;
     await user.save();
 
+    // Normalize phone number to E.164 format for Twilio
+    let normalizedPhoneNumber = user.phoneNumber;
+    const zambianNumberPattern = /^(0?[976][56789]|7[34679])\d{7}$/;
+    if (zambianNumberPattern.test(user.phoneNumber)) {
+      // If it matches Zambian format without country code (e.g., 097272XXXX), add +260
+      normalizedPhoneNumber = `+260${user.phoneNumber.replace(/^0/, '')}`;
+    } else if (!user.phoneNumber.startsWith('+')) {
+      // If no country code and not a valid Zambian pattern, assume +260 as fallback
+      normalizedPhoneNumber = `+260${user.phoneNumber}`;
+    }
+    // If it already starts with +260 or another valid country code, leave it as is
+
+    console.log('Normalized phone number for SMS:', normalizedPhoneNumber);
+
     // Send reset token via Twilio SMS
     try {
       await twilioClient.messages.create({
         body: `Your Zangena password reset token is: ${resetToken}. It expires in 1 hour.`,
         from: TWILIO_PHONE_NUMBER,
-        to: user.phoneNumber,
+        to: normalizedPhoneNumber,
       });
     } catch (twilioError) {
       console.error('Twilio Error:', {
@@ -173,7 +187,7 @@ router.post('/forgot-password', async (req, res) => {
         status: twilioError.status,
         details: twilioError.details,
         from: TWILIO_PHONE_NUMBER,
-        to: user.phoneNumber,
+        to: normalizedPhoneNumber,
       });
       return res.status(500).json({
         error: 'Failed to send SMS',
