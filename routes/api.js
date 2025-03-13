@@ -352,7 +352,7 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
     }
 
     // Find admin user (assumed username: 'system-admin')
-    const admin = await User.findOne({ username: 'system-admin', role: 'admin' });
+    const admin = await User.findOne({ username: 'admin', role: 'admin' });
     if (!admin) return res.status(500).json({ error: 'Admin account not found' });
 
     // Update balances
@@ -436,7 +436,7 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
     }
 
     // Find admin user (assumed username: 'system-admin')
-    const admin = await User.findOne({ username: 'system-admin', role: 'admin' });
+    const admin = await User.findOne({ username: 'admin', role: 'admin' });
     if (!admin) return res.status(500).json({ error: 'Admin account not found' });
 
     // Update balances
