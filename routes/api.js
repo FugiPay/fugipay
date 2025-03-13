@@ -34,6 +34,31 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+
+// Charge Sheet Functions
+const getSendingFee = (amount) => {
+  if (amount <= 50) return 1.00;
+  if (amount <= 100) return 2.00;
+  if (amount <= 500) return 3.50;
+  if (amount <= 1000) return 5.00;
+  if (amount <= 5000) return 10.00;
+  if (amount <= 10000) return 15.00;
+  return 0; // Explicitly 0 for > 10,000, but validation will catch this
+};
+
+const getReceivingFee = (amount) => {
+  if (amount <= 50) return 0.50;
+  if (amount <= 100) return 1.00;
+  if (amount <= 500) return 1.50;
+  if (amount <= 1000) return 2.00;
+  if (amount <= 5000) return 3.00;
+  if (amount <= 10000) return 5.00;
+  return 0; // Explicitly 0 for > 10,000, but validation will catch this
+};
+
+// ... (Other endpoints unchanged: /register, /login, /forgot-password, etc.)
+
+
 // POST /api/register - Unchanged
 router.post('/register', upload.single('idImage'), async (req, res) => {
   const { name, phoneNumber, email, password } = req.body;
@@ -288,6 +313,7 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
 });
 
 // POST /api/payment-with-qr-pin - Unchanged
+// POST /api/payment-with-qr-pin - Updated with explicit 10,000 ZMW limit
 router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, qrId, pin } = req.body;
 
@@ -313,28 +339,67 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
     if (isNaN(paymentAmount) || paymentAmount <= 0) {
       return res.status(400).json({ error: 'Amount must be a positive number' });
     }
-
-    if (sender.balance < paymentAmount) {
-      return res.status(400).json({ error: 'Insufficient balance' });
+    if (paymentAmount > 10000) {
+      return res.status(400).json({ error: 'You cannot send more than 10,000 ZMW in a single transaction' });
     }
 
-    sender.balance -= paymentAmount;
-    receiver.balance += paymentAmount;
-    sender.transactions.push({ type: 'sent', amount: paymentAmount, toFrom: toUsername, date: new Date() });
-    receiver.transactions.push({ type: 'received', amount: paymentAmount, toFrom: fromUsername, date: new Date() });
+    const sendingFee = getSendingFee(paymentAmount);
+    const receivingFee = getReceivingFee(paymentAmount);
+    const totalSenderDeduction = paymentAmount + sendingFee;
+
+    if (sender.balance < totalSenderDeduction) {
+      return res.status(400).json({ error: 'Insufficient balance to cover amount and sending fee' });
+    }
+
+    // Find admin user (assumed username: 'system-admin')
+    const admin = await User.findOne({ username: 'system-admin', role: 'admin' });
+    if (!admin) return res.status(500).json({ error: 'Admin account not found' });
+
+    // Update balances
+    sender.balance -= totalSenderDeduction;
+    receiver.balance += paymentAmount - receivingFee;
+    admin.balance += sendingFee + receivingFee;
+
+    // Record transactions
+    sender.transactions.push({
+      type: 'sent',
+      amount: paymentAmount,
+      fee: sendingFee,
+      toFrom: toUsername,
+      date: new Date(),
+    });
+    receiver.transactions.push({
+      type: 'received',
+      amount: paymentAmount,
+      fee: receivingFee,
+      toFrom: fromUsername,
+      date: new Date(),
+    });
+    admin.transactions.push({
+      type: 'fee-collected',
+      amount: sendingFee + receivingFee,
+      toFrom: `${fromUsername} -> ${toUsername}`,
+      date: new Date(),
+    });
 
     await QRPin.deleteOne({ qrId });
     await sender.save();
     await receiver.save();
+    await admin.save();
 
-    res.json({ message: 'Payment successful' });
+    res.json({
+      message: 'Payment successful',
+      sendingFee,
+      receivingFee,
+      amountReceived: paymentAmount - receivingFee,
+    });
   } catch (error) {
     console.error('QR Payment Error:', error);
     res.status(500).json({ error: 'Server error during payment' });
   }
 });
 
-// POST /api/payment-with-search - Unchanged
+// POST /api/payment-with-search - Updated with explicit 10,000 ZMW limit
 router.post('/payment-with-search', authenticateToken, async (req, res) => {
   const { fromUsername, searchQuery, amount, pin } = req.body;
 
@@ -358,21 +423,60 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
     if (isNaN(paymentAmount) || paymentAmount <= 0) {
       return res.status(400).json({ error: 'Amount must be a positive number' });
     }
-
-    if (sender.balance < paymentAmount) {
-      return res.status(400).json({ error: 'Insufficient balance' });
+    if (paymentAmount > 10000) {
+      return res.status(400).json({ error: 'You cannot send more than 10,000 ZMW in a single transaction' });
     }
 
-    sender.balance -= paymentAmount;
-    receiver.balance += paymentAmount;
-    sender.transactions.push({ type: 'sent', amount: paymentAmount, toFrom: receiver.username, date: new Date() });
-    receiver.transactions.push({ type: 'received', amount: paymentAmount, toFrom: fromUsername, date: new Date() });
+    const sendingFee = getSendingFee(paymentAmount);
+    const receivingFee = getReceivingFee(paymentAmount);
+    const totalSenderDeduction = paymentAmount + sendingFee;
+
+    if (sender.balance < totalSenderDeduction) {
+      return res.status(400).json({ error: 'Insufficient balance to cover amount and sending fee' });
+    }
+
+    // Find admin user (assumed username: 'system-admin')
+    const admin = await User.findOne({ username: 'system-admin', role: 'admin' });
+    if (!admin) return res.status(500).json({ error: 'Admin account not found' });
+
+    // Update balances
+    sender.balance -= totalSenderDeduction;
+    receiver.balance += paymentAmount - receivingFee;
+    admin.balance += sendingFee + receivingFee;
+
+    // Record transactions
+    sender.transactions.push({
+      type: 'sent',
+      amount: paymentAmount,
+      fee: sendingFee,
+      toFrom: receiver.username,
+      date: new Date(),
+    });
+    receiver.transactions.push({
+      type: 'received',
+      amount: paymentAmount,
+      fee: receivingFee,
+      toFrom: fromUsername,
+      date: new Date(),
+    });
+    admin.transactions.push({
+      type: 'fee-collected',
+      amount: sendingFee + receivingFee,
+      toFrom: `${fromUsername} -> ${receiver.username}`,
+      date: new Date(),
+    });
 
     await QRPin.deleteOne({ _id: qrPin._id });
     await sender.save();
     await receiver.save();
+    await admin.save();
 
-    res.json({ message: 'Payment successful' });
+    res.json({
+      message: 'Payment successful',
+      sendingFee,
+      receivingFee,
+      amountReceived: paymentAmount - receivingFee,
+    });
   } catch (error) {
     console.error('Search Payment Error:', error);
     res.status(500).json({ error: 'Server error during payment' });
