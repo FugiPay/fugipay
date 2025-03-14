@@ -774,16 +774,19 @@ router.get('/transactions/:username', authenticateToken, async (req, res) => {
   }
 });
 
-router.get('/api/admin/stats', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admins only' });
+// Admin stats route
+router.get('/admin/stats', async (req, res) => {
   try {
     const totalUsers = await User.countDocuments();
-    const totalBalance = (await User.aggregate([{ $group: { _id: null, total: { $sum: '$balance' } } }]))[0]?.total || 0;
+    const totalBalance = await User.aggregate([
+      { $group: { _id: null, total: { $sum: '$balance' } } },
+    ]).then(result => result[0]?.total || 0);
     const recentTxCount = await User.aggregate([
       { $unwind: '$transactions' },
       { $match: { 'transactions.date': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } },
-      { $count: 'count' },
-    ]).then((result) => result[0]?.count || 0);
+      { $count: 'recentTxCount' },
+    ]).then(result => result[0]?.recentTxCount || 0);
+
     res.json({ totalUsers, totalBalance, recentTxCount });
   } catch (error) {
     console.error('Stats Error:', error);
