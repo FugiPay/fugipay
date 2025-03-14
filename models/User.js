@@ -1,30 +1,39 @@
 const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
+  username: { type: String, required: true, unique: true, index: true },
   name: { type: String, required: true },
-  phoneNumber: { type: String, required: true, unique: true },
-  email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
+  phoneNumber: {
+    type: String,
+    required: true,
+    unique: true,
+    index: true,
+    match: /^\+260(9[5678]|7[34679])\d{7}$/,
+  },
+  email: { type: String, required: true, unique: true, index: true },
+  password: { type: String, required: true, minlength: 6 },
   idImageUrl: { type: String },
-  role: { type: String, default: 'user' },
-  balance: { type: Number, default: 0 }, // Renamed from mainBalance, used as wallet balance
+  role: { type: String, default: 'user', enum: ['user', 'admin'] },
+  balance: { type: Number, default: 0 },
   transactions: [
     {
-      type: { type: String }, // 'sent', 'received', 'credited', 'deposited', 'withdrawn', 'fee-collected', 'pending-pin'
+      type: {
+        type: String,
+        enum: ['sent', 'received', 'credited', 'deposited', 'withdrawn', 'fee-collected', 'pending-pin'],
+      },
       amount: { type: Number },
       toFrom: { type: String },
-      date: { type: Date, default: Date.now },
-      fee: { type: Number }, // Added for user-facing fees (sent, received, deposited, withdrawn)
-      originalAmount: { type: Number }, // Added for fee-collected (admin)
-      sendingFee: { type: Number },     // Added for fee-collected (admin)
-      receivingFee: { type: Number },   // Added for fee-collected (admin)
+      date: { type: Date, default: Date.now, index: true },
+      fee: { type: Number },
+      originalAmount: { type: Number },
+      sendingFee: { type: Number },
+      receivingFee: { type: Number },
     },
   ],
-  kycStatus: { type: String, default: 'pending' },
+  kycStatus: { type: String, default: 'pending', enum: ['pending', 'verified', 'rejected'] },
   isActive: { type: Boolean, default: false },
   resetToken: { type: String },
-  resetTokenExpiry: { type: Number },
+  resetTokenExpiry: { type: Date },
 });
 
 module.exports = mongoose.model('User', userSchema);
