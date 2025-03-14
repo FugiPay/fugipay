@@ -8,19 +8,23 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   idImageUrl: { type: String },
   role: { type: String, default: 'user' },
-  balance: { type: Number, default: 0 },
+  balance: { type: Number, default: 0 }, // Renamed from mainBalance, used as wallet balance
   transactions: [
     {
-      type: { type: String },
+      type: { type: String }, // 'sent', 'received', 'credited', 'deposited', 'withdrawn', 'fee-collected', 'pending-pin'
       amount: { type: Number },
       toFrom: { type: String },
       date: { type: Date, default: Date.now },
+      fee: { type: Number }, // Added for user-facing fees (sent, received, deposited, withdrawn)
+      originalAmount: { type: Number }, // Added for fee-collected (admin)
+      sendingFee: { type: Number },     // Added for fee-collected (admin)
+      receivingFee: { type: Number },   // Added for fee-collected (admin)
     },
   ],
   kycStatus: { type: String, default: 'pending' },
   isActive: { type: Boolean, default: false },
-  resetToken: { type: String }, // New field for password reset token
-  resetTokenExpiry: { type: Number }, // New field for token expiry
+  resetToken: { type: String },
+  resetTokenExpiry: { type: Number },
 });
 
 module.exports = mongoose.model('User', userSchema);

@@ -6,7 +6,8 @@ const multer = require('multer');
 const AWS = require('aws-sdk');
 const fs = require('fs');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer'); // Replace Twilio with Nodemailer
+const nodemailer = require('nodemailer');
+const Flutterwave = require('flutterwave-node-v3');
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const authenticateToken = require('../middleware/authenticateToken');
@@ -22,6 +23,9 @@ const s3 = new AWS.S3({
 });
 const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
 
+// Configure Flutterwave
+const flw = new Flutterwave(process.env.FLUTTERWAVE_PUBLIC_KEY, process.env.FLUTTERWAVE_SECRET_KEY);
+
 // Secret key for JWT
 const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
 
@@ -29,11 +33,10 @@ const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.EMAIL_USER, // e.g., your-email@gmail.com
-    pass: process.env.EMAIL_PASS, // Gmail App Password if 2FA, or regular password
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
   },
 });
-
 
 // Charge Sheet Functions
 const getSendingFee = (amount) => {
@@ -43,7 +46,7 @@ const getSendingFee = (amount) => {
   if (amount <= 1000) return 5.00;
   if (amount <= 5000) return 10.00;
   if (amount <= 10000) return 15.00;
-  return 0; // Explicitly 0 for > 10,000, but validation will catch this
+  return 0; // Explicitly 0 for > 10,000, validation catches this
 };
 
 const getReceivingFee = (amount) => {
@@ -53,13 +56,10 @@ const getReceivingFee = (amount) => {
   if (amount <= 1000) return 2.00;
   if (amount <= 5000) return 3.00;
   if (amount <= 10000) return 5.00;
-  return 0; // Explicitly 0 for > 10,000, but validation will catch this
+  return 0; // Explicitly 0 for > 10,000, validation catches this
 };
 
-// ... (Other endpoints unchanged: /register, /login, /forgot-password, etc.)
-
-
-// POST /api/register - Unchanged
+// POST /api/register
 router.post('/register', upload.single('idImage'), async (req, res) => {
   const { name, phoneNumber, email, password } = req.body;
   const idImage = req.file;
@@ -132,7 +132,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   }
 });
 
-// POST /api/login - Unchanged
+// POST /api/login
 router.post('/login', async (req, res) => {
   const { identifier, password } = req.body;
   if (!identifier || !password) {
@@ -168,7 +168,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// POST /api/forgot-password - Updated to use Gmail instead of Twilio
+// POST /api/forgot-password
 router.post('/forgot-password', async (req, res) => {
   const { identifier } = req.body;
   if (!identifier) {
@@ -188,7 +188,6 @@ router.post('/forgot-password', async (req, res) => {
     user.resetTokenExpiry = resetTokenExpiry;
     await user.save();
 
-    // Send reset token via Gmail
     const mailOptions = {
       from: process.env.EMAIL_USER,
       to: user.email,
@@ -208,31 +207,21 @@ router.post('/forgot-password', async (req, res) => {
         message: emailError.message,
         code: emailError.code,
         response: emailError.response,
-        emailUser: process.env.EMAIL_USER,
-        emailTo: user.email,
       });
       return res.status(500).json({
         error: 'Failed to send email',
-        emailError: {
-          message: emailError.message,
-          code: emailError.code,
-          response: emailError.response,
-        },
+        emailError: { message: emailError.message, code: emailError.code },
       });
     }
 
     res.json({ message: 'Reset instructions have been sent to your email.' });
   } catch (error) {
-    console.error('Forgot Password Error:', {
-      message: error.message,
-      stack: error.stack,
-      identifier,
-    });
-    res.status(500).json({ error: 'Server error during password reset request', details: error.message });
+    console.error('Forgot Password Error:', error);
+    res.status(500).json({ error: 'Server error during password reset request' });
   }
 });
 
-// POST /api/reset-password - Unchanged
+// POST /api/reset-password
 router.post('/reset-password', async (req, res) => {
   const { token, newPassword } = req.body;
   if (!token || !newPassword) {
@@ -260,7 +249,7 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-// GET /api/user/:username - Unchanged
+// GET /api/user/:username
 router.get('/user/:username', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.params.username });
@@ -284,7 +273,7 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/store-qr-pin - Unchanged
+// POST /api/store-qr-pin
 router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   const { username, pin } = req.body;
 
@@ -302,7 +291,7 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
     const qrPin = new QRPin({ username, qrId, pin });
     await qrPin.save();
 
-    user.transactions.push({ type: 'pending-pin', amount: 0, toFrom: 'Self', date: new Date() });
+    user.transactions.push({ type: 'pending-pin', amount: 0, toFrom: 'Self' });
     await user.save();
 
     res.json({ qrId });
@@ -312,8 +301,118 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/payment-with-qr-pin - Unchanged
-// POST /api/payment-with-qr-pin - Updated with explicit 10,000 ZMW limit
+// POST /api/deposit
+router.post('/api/deposit', authenticateToken, async (req, res) => {
+  const { amount, paymentMethod } = req.body; // e.g., 'mobile-money-mtn'
+  const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+
+  if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+  const gatewayFeePercentage = 0.015; // 1.5%
+  const gatewayFlatFee = 0.5; // 0.5 ZMW
+  const depositFee = amount * gatewayFeePercentage + gatewayFlatFee;
+  const totalCharge = amount + depositFee;
+
+  const paymentData = {
+    tx_ref: `zangena-deposit-${Date.now()}`,
+    amount: totalCharge,
+    currency: 'ZMW',
+    email: user.email,
+    phone_number: user.phoneNumber,
+    redirect_url: 'https://zangena.onrender.com/deposit-success',
+    payment_options: 'mobilemoneyzambia',
+  };
+
+  try {
+    const response = await flw.Charge.mobilemoney(paymentData);
+    if (response.status !== 'success') throw new Error('Payment failed');
+
+    let creditedAmount = amount;
+    const isFirstDeposit = user.transactions.every(tx => tx.type !== 'deposited');
+    if (isFirstDeposit) {
+      const bonus = Math.min(amount * 0.05, 10); // 5% bonus, max 10 ZMW
+      creditedAmount += bonus;
+    }
+
+    user.balance += creditedAmount;
+    user.transactions.push({
+      type: 'deposited',
+      amount: creditedAmount,
+      toFrom: paymentMethod,
+      fee: depositFee,
+    });
+
+    await user.save();
+    res.json({ message: `Deposited ${creditedAmount.toFixed(2)} ZMW${isFirstDeposit ? ' (incl. bonus)' : ''}`, balance: user.balance });
+  } catch (error) {
+    console.error('Deposit Error:', error);
+    res.status(500).json({ error: error.message || 'Deposit failed' });
+  }
+});
+
+// POST /api/withdraw
+router.post('/api/withdraw', authenticateToken, async (req, res) => {
+  const { amount, phoneNumber, paymentMethod } = req.body;
+  const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+
+  if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+  if (!phoneNumber || !phoneNumber.match(/^\+260(9[5678]|7[34679])\d{7}$/)) {
+    return res.status(400).json({ error: 'Invalid Zambian phone number' });
+  }
+  if (!paymentMethod || !['mobile-money-mtn', 'mobile-money-airtel'].includes(paymentMethod)) {
+    return res.status(400).json({ error: 'Invalid payment method' });
+  }
+
+  // Validate phoneNumber against paymentMethod
+  const mtnPrefixes = ['96', '97', '95', '76']; // MTN Zambia
+  const airtelPrefixes = ['77', '94']; // Airtel Zambia
+  const prefix = phoneNumber.slice(4, 6); // e.g., "96" from "+26096xxxxxxx"
+  if (paymentMethod === 'mobile-money-mtn' && !mtnPrefixes.includes(prefix)) {
+    return res.status(400).json({ error: 'Phone number does not match MTN provider' });
+  }
+  if (paymentMethod === 'mobile-money-airtel' && !airtelPrefixes.includes(prefix)) {
+    return res.status(400).json({ error: 'Phone number does not match Airtel provider' });
+  }
+
+  const withdrawFee = Math.max(amount * 0.01, 2); // 1% or 2 ZMW min
+  const totalDeduction = amount + withdrawFee;
+
+  if (user.balance < totalDeduction) {
+    return res.status(400).json({ error: 'Insufficient balance' });
+  }
+
+  const paymentData = {
+    tx_ref: `zangena-withdraw-${Date.now()}`,
+    amount,
+    currency: 'ZMW',
+    account_bank: 'mobilemoneyzambia',
+    account_number: phoneNumber,
+    narration: 'Zangena Withdrawal',
+  };
+
+  try {
+    const response = await flw.Transfer.initiate(paymentData);
+    if (response.status !== 'success') throw new Error('Withdrawal failed');
+
+    user.balance -= totalDeduction;
+    user.transactions.push({
+      type: 'withdrawn',
+      amount,
+      toFrom: `${phoneNumber} (${paymentMethod})`, // Log both for clarity
+      fee: withdrawFee,
+    });
+
+    await user.save();
+    res.json({ message: `Withdrew ${amount.toFixed(2)} ZMW (fee: ${withdrawFee.toFixed(2)} ZMW)`, balance: user.balance });
+  } catch (error) {
+    console.error('Withdraw Error:', error);
+    res.status(500).json({ error: error.message || 'Withdrawal failed' });
+  }
+});
+
+// POST /api/payment-with-qr-pin
 router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, qrId, pin } = req.body;
 
@@ -351,41 +450,36 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance to cover amount and sending fee' });
     }
 
-    // Find admin user (assumed username: 'system-admin')
     const admin = await User.findOne({ username: 'admin', role: 'admin' });
     if (!admin) return res.status(500).json({ error: 'Admin account not found' });
 
-    // Update balances
     sender.balance -= totalSenderDeduction;
     receiver.balance += paymentAmount - receivingFee;
     admin.balance += sendingFee + receivingFee;
 
-    // Record transactions
     sender.transactions.push({
       type: 'sent',
       amount: paymentAmount,
-      fee: sendingFee,
       toFrom: toUsername,
-      date: new Date(),
+      fee: sendingFee,
     });
     receiver.transactions.push({
       type: 'received',
       amount: paymentAmount,
-      fee: receivingFee,
       toFrom: fromUsername,
-      date: new Date(),
+      fee: receivingFee,
     });
     admin.transactions.push({
       type: 'fee-collected',
       amount: sendingFee + receivingFee,
       toFrom: `${fromUsername} -> ${toUsername}`,
-      date: new Date(),
+      originalAmount: paymentAmount,
+      sendingFee,
+      receivingFee,
     });
 
     await QRPin.deleteOne({ qrId });
-    await sender.save();
-    await receiver.save();
-    await admin.save();
+    await Promise.all([sender.save(), receiver.save(), admin.save()]);
 
     res.json({
       message: 'Payment successful',
@@ -399,7 +493,7 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/payment-with-search - Updated with explicit 10,000 ZMW limit
+// POST /api/payment-with-search
 router.post('/payment-with-search', authenticateToken, async (req, res) => {
   const { fromUsername, searchQuery, amount, pin } = req.body;
 
@@ -435,41 +529,36 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance to cover amount and sending fee' });
     }
 
-    // Find admin user (assumed username: 'system-admin')
     const admin = await User.findOne({ username: 'admin', role: 'admin' });
     if (!admin) return res.status(500).json({ error: 'Admin account not found' });
 
-    // Update balances
     sender.balance -= totalSenderDeduction;
     receiver.balance += paymentAmount - receivingFee;
     admin.balance += sendingFee + receivingFee;
 
-    // Record transactions
     sender.transactions.push({
       type: 'sent',
       amount: paymentAmount,
-      fee: sendingFee,
       toFrom: receiver.username,
-      date: new Date(),
+      fee: sendingFee,
     });
     receiver.transactions.push({
       type: 'received',
       amount: paymentAmount,
-      fee: receivingFee,
       toFrom: fromUsername,
-      date: new Date(),
+      fee: receivingFee,
     });
     admin.transactions.push({
       type: 'fee-collected',
       amount: sendingFee + receivingFee,
       toFrom: `${fromUsername} -> ${receiver.username}`,
-      date: new Date(),
+      originalAmount: paymentAmount,
+      sendingFee,
+      receivingFee,
     });
 
     await QRPin.deleteOne({ _id: qrPin._id });
-    await sender.save();
-    await receiver.save();
-    await admin.save();
+    await Promise.all([sender.save(), receiver.save(), admin.save()]);
 
     res.json({
       message: 'Payment successful',
@@ -483,7 +572,7 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
   }
 });
 
-// PUT /api/user/update - Unchanged
+// PUT /api/user/update
 router.put('/user/update', authenticateToken, async (req, res) => {
   const { username, email, password } = req.body;
 
@@ -514,7 +603,7 @@ router.put('/user/update', authenticateToken, async (req, res) => {
   }
 });
 
-// DELETE /api/user/delete - Unchanged
+// DELETE /api/user/delete
 router.delete('/user/delete', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
@@ -529,7 +618,7 @@ router.delete('/user/delete', authenticateToken, async (req, res) => {
   }
 });
 
-// PUT /api/user/update-kyc (Admin only) - Unchanged
+// PUT /api/user/update-kyc (Admin only)
 router.put('/user/update-kyc', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -547,12 +636,12 @@ router.put('/user/update-kyc', authenticateToken, async (req, res) => {
     await user.save();
     res.json({ message: 'KYC status updated' });
   } catch (error) {
-    console.error('KYC Update Error:', { message: error.message, stack: error.stack });
-    res.status(500).json({ error: 'Server error updating KYC status', details: error.message });
+    console.error('KYC Update Error:', error);
+    res.status(500).json({ error: 'Server error updating KYC status' });
   }
 });
 
-// PUT /api/user/toggle-active (Admin only) - Unchanged
+// PUT /api/user/toggle-active (Admin only)
 router.put('/user/toggle-active', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -568,12 +657,12 @@ router.put('/user/toggle-active', authenticateToken, async (req, res) => {
     await user.save();
     res.json({ message: `User ${isActive ? 'activated' : 'deactivated'}` });
   } catch (error) {
-    console.error('Toggle Active Error:', { message: error.message, stack: error.stack });
-    res.status(500).json({ error: 'Server error toggling user status', details: error.message });
+    console.error('Toggle Active Error:', error);
+    res.status(500).json({ error: 'Server error toggling user status' });
   }
 });
 
-// GET /api/users (Admin only) - Unchanged
+// GET /api/users (Admin only)
 router.get('/users', authenticateToken, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -611,7 +700,7 @@ router.get('/users', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/credit (Admin only) - Unchanged
+// POST /api/credit (Admin only)
 router.post('/credit', authenticateToken, async (req, res) => {
   const { adminUsername, toUsername, amount } = req.body;
   if (req.user.role !== 'admin') {
@@ -628,7 +717,7 @@ router.post('/credit', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Amount must be a positive number' });
     }
     user.balance += paymentAmount;
-    user.transactions.push({ type: 'credited', amount: paymentAmount, toFrom: adminUsername, date: new Date() });
+    user.transactions.push({ type: 'credited', amount: paymentAmount, toFrom: adminUsername });
     await user.save();
     res.json({ message: 'Credit successful' });
   } catch (error) {
@@ -637,7 +726,7 @@ router.post('/credit', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/payment-with-pin (Admin only) - Unchanged
+// POST /api/payment-with-pin (Admin only)
 router.post('/payment-with-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, pin } = req.body;
   if (req.user.role !== 'admin') {
@@ -658,8 +747,8 @@ router.post('/payment-with-pin', authenticateToken, async (req, res) => {
     if (sender.balance < paymentAmount) return res.status(400).json({ error: 'Insufficient balance' });
     sender.balance -= paymentAmount;
     receiver.balance += paymentAmount;
-    sender.transactions.push({ type: 'sent', amount: paymentAmount, toFrom: toUsername, date: new Date() });
-    receiver.transactions.push({ type: 'received', amount: paymentAmount, toFrom: fromUsername, date: new Date() });
+    sender.transactions.push({ type: 'sent', amount: paymentAmount, toFrom: toUsername });
+    receiver.transactions.push({ type: 'received', amount: paymentAmount, toFrom: fromUsername });
     await QRPin.deleteOne({ _id: qrPin._id });
     await sender.save();
     await receiver.save();
@@ -670,7 +759,7 @@ router.post('/payment-with-pin', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/transactions/:username (Admin only) - Unchanged
+// GET /api/transactions/:username (Admin only)
 router.get('/transactions/:username', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -682,6 +771,23 @@ router.get('/transactions/:username', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Transactions Fetch Error:', error);
     res.status(500).json({ error: 'Server error fetching transactions' });
+  }
+});
+
+router.get('/api/admin/stats', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admins only' });
+  try {
+    const totalUsers = await User.countDocuments();
+    const totalBalance = (await User.aggregate([{ $group: { _id: null, total: { $sum: '$balance' } } }]))[0]?.total || 0;
+    const recentTxCount = await User.aggregate([
+      { $unwind: '$transactions' },
+      { $match: { 'transactions.date': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } },
+      { $count: 'count' },
+    ]).then((result) => result[0]?.count || 0);
+    res.json({ totalUsers, totalBalance, recentTxCount });
+  } catch (error) {
+    console.error('Stats Error:', error);
+    res.status(500).json({ error: 'Failed to fetch stats' });
   }
 });
 
