@@ -337,8 +337,6 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     const airtelPrefixes = ['97', '77'];
     const prefix = phoneNumber.slice(4, 6);
     console.log('Extracted Prefix:', prefix);
-    console.log('MTN Prefixes:', mtnPrefixes);
-    console.log('Airtel Prefixes:', airtelPrefixes);
 
     let paymentMethod;
     if (mtnPrefixes.includes(prefix)) {
@@ -361,16 +359,20 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       tx_ref: `zangena-deposit-${Date.now()}`,
       amount: totalCharge,
       currency: 'ZMW',
-      email: user.email || 'user@example.com',
+      email: user.email || 'user@example.com', // Ensure email exists in DB
       phone_number: phoneNumber,
-      redirect_url: 'https://zangena.onrender.com/deposit-success',
-      payment_options: 'mobilemoneyzambia',
+      redirect_url: 'https://zangena.onrender.com/deposit-success', // Optional for mobile money
+      network: paymentMethod === 'mobile-money-mtn' ? 'MTN' : 'AIRTEL', // Specific to Zambia
     };
     console.log('Payment Data:', paymentData);
 
-    const response = await flw.Charge.mobilemoney(paymentData);
+    const response = await flw.MobileMoney.zambia(paymentData);
     console.log('Flutterwave Deposit Response:', response);
-    if (response.status !== 'success') throw new Error(`Payment failed: ${response.message || 'Unknown error'}`);
+
+    if (response.status !== 'success') {
+      console.log('Flutterwave failed:', response);
+      throw new Error(`Payment failed: ${response.message || 'Unknown error'}`);
+    }
 
     let creditedAmount = amount;
     const isFirstDeposit = !user.transactions || user.transactions.every((tx) => tx.type !== 'deposited');
