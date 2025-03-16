@@ -361,7 +361,6 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       phone_number: phoneNumber,
       network: paymentMethod === 'mobile-money-mtn' ? 'MTN' : 'AIRTEL',
       meta: { userId: user._id.toString() },
-      type: 'mobile_money_zambia', // Explicitly specify type
     };
     console.log('Payment Data:', paymentData);
 
@@ -391,7 +390,7 @@ router.post('/deposit', authenticateToken, async (req, res) => {
         return res.json({
           message: 'Redirect required. Please complete payment in the browser.',
           redirectUrl: response.meta.authorization.redirect,
-          transactionId: response.tx_ref, // Use tx_ref since data.id isn’t present
+          transactionId: response.tx_ref,
           status: 'pending',
         });
       } else if (response.data?.status === 'pending' || response.data?.status === 'successful') {
@@ -405,7 +404,7 @@ router.post('/deposit', authenticateToken, async (req, res) => {
         console.log('Unexpected success state:', response);
         return res.json({
           message: 'Deposit initiated. Please check your phone to enter your PIN.',
-          transactionId: response.tx_ref, // Fallback to tx_ref
+          transactionId: response.tx_ref,
           status: 'pending',
         });
       }
