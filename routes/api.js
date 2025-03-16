@@ -364,103 +364,66 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     };
     console.log('Payment Data:', paymentData);
 
-    console.log('Flutterwave instance:', !!flw, flw.MobileMoney ? 'MobileMoney exists' : 'MobileMoney missing');
-    if (!flw.MobileMoney || typeof flw.MobileMoney.zambia !== 'function') {
-      throw new Error('Flutterwave MobileMoney.zambia method not available');
-    }
-
     let response;
     try {
-      console.log('Attempting Flutterwave MobileMoney.zambia call...');
-      response = await flw.MobileMoney.zambia(paymentData);
-      console.log('Flutterwave Initial Response:', response);
+      console.log('Attempting Flutterwave raw API call...');
+      response = await axios.post(
+        'https://api.flutterwave.com/v3/charges?type=mobile_money_zambia',
+        paymentData,
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      console.log('Flutterwave Initial Response:', response.data);
     } catch (flwError) {
-      console.error('Flutterwave API Error:', flwError.message, flwError.stack);
-      throw new Error(`Flutterwave request failed: ${flwError.message}`);
+      console.error('Flutterwave API Error:', flwError.response?.data || flwError.message, flwError.stack);
+      throw new Error(`Flutterwave request failed: ${flwError.response?.data?.message || flwError.message}`);
     }
 
-    if (!response) {
-      console.error('Flutterwave returned undefined response');
+    if (!response || !response.data) {
+      console.error('Flutterwave returned no valid response');
       throw new Error('Flutterwave returned no response');
     }
 
-    if (response.status === 'success') {
-      if (response.meta?.authorization?.mode === 'redirect') {
-        console.log('Redirect flow triggered:', response.meta.authorization);
+    const flwResponse = response.data;
+    if (flwResponse.status === 'success') {
+      if (flwResponse.meta?.authorization?.mode === 'redirect') {
+        console.log('Redirect flow triggered:', flwResponse.meta.authorization);
         return res.json({
           message: 'Redirect required. Please complete payment in the browser.',
-          redirectUrl: response.meta.authorization.redirect,
-          transactionId: response.tx_ref,
+          redirectUrl: flwResponse.meta.authorization.redirect,
+          transactionId: flwResponse.data?.id || flwResponse.tx_ref,
           status: 'pending',
         });
-      } else if (response.data?.status === 'pending' || response.data?.status === 'successful') {
-        console.log('Deposit initiated successfully:', response.data);
+      } else if (flwResponse.data?.status === 'pending' || flwResponse.data?.status === 'successful') {
+        console.log('Deposit initiated successfully:', flwResponse.data);
         return res.json({
           message: 'Deposit initiated. Please check your phone to enter your PIN.',
-          transactionId: response.data?.id || response.tx_ref,
+          transactionId: flwResponse.data?.id || flwResponse.tx_ref,
           status: 'pending',
         });
       } else {
-        console.log('Unexpected success state:', response);
+        console.log('Unexpected success state:', flwResponse);
         return res.json({
           message: 'Deposit initiated. Please check your phone to enter your PIN.',
-          transactionId: response.tx_ref,
+          transactionId: flwResponse.data?.id || flwResponse.tx_ref,
           status: 'pending',
         });
       }
-    } else if (response.status === 'error') {
-      console.log('Flutterwave failed:', response);
-      throw new Error(`Payment initiation failed: ${response.message}`);
+    } else if (flwResponse.status === 'error') {
+      console.log('Flutterwave failed:', flwResponse);
+      throw new Error(`Payment initiation failed: ${flwResponse.message}`);
     } else {
-      console.log('Unexpected Flutterwave response:', response);
+      console.log('Unexpected Flutterwave response:', flwResponse);
       throw new Error('Unexpected response from payment gateway');
     }
   } catch (error) {
     console.error('Deposit Error:', error.message, error.stack);
     res.status(500).json({ error: error.message || 'Deposit failed' });
   }
-});
-
-router.post('/webhook/flutterwave', async (req, res) => {
-  const secretHash = process.env.FLW_WEBHOOK_HASH;
-  const signature = req.headers['verif-hash'];
-  if (!signature || signature !== secretHash) {
-    console.log('Webhook signature mismatch');
-    return res.status(401).end();
-  }
-
-  const { event, data } = req.body;
-  console.log('Webhook Received:', { event, data });
-
-  if (event === 'charge.completed' && data.status === 'successful') {
-    const user = await User.findById(data.meta.userId);
-    if (!user) {
-      console.log('User not found for webhook:', data.meta.userId);
-      return res.status(404).end();
-    }
-
-    const amount = parseFloat(data.amount) - (data.amount * 0.015 + 0.5);
-    let creditedAmount = amount;
-    const isFirstDeposit = !user.transactions || user.transactions.every((tx) => tx.type !== 'deposited');
-    if (isFirstDeposit) {
-      const bonus = Math.min(amount * 0.05, 10);
-      creditedAmount += bonus;
-    }
-
-    user.balance += creditedAmount;
-    user.transactions.push({
-      type: 'deposited',
-      amount: creditedAmount,
-      toFrom: data.processor_response.includes('MTN') ? 'mobile-money-mtn' : 'mobile-money-airtel',
-      fee: data.amount - amount,
-      date: new Date(),
-    });
-
-    await user.save();
-    console.log('User updated from webhook:', { balance: user.balance });
-  }
-
-  res.status(200).end();
 });
 
 router.get('/test-flutterwave', async (req, res) => {
