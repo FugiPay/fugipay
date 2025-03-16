@@ -309,52 +309,71 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
 
 // POST /api/deposit
 router.post('/deposit', authenticateToken, async (req, res) => {
-  const { amount } = req.body; // No paymentMethod needed
-  const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
-
-  if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
-  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-
-  // Normalize and detect payment method
-  let phoneNumber = req.user.phoneNumber;
-  if (!phoneNumber.startsWith('+260')) {
-    if (phoneNumber.startsWith('0')) phoneNumber = '+26' + phoneNumber;
-    else if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
-  }
-  const mtnPrefixes = ['96', '76'];
-  const airtelPrefixes = ['97', '77'];
-  const prefix = phoneNumber.slice(4, 6);
-  let paymentMethod;
-  if (mtnPrefixes.includes(prefix)) {
-    paymentMethod = 'mobile-money-mtn';
-  } else if (airtelPrefixes.includes(prefix)) {
-    paymentMethod = 'mobile-money-airtel';
-  } else {
-    return res.status(400).json({ error: 'Phone number not supported for deposits' });
-  }
-
-  const gatewayFeePercentage = 0.015; // 1.5%
-  const gatewayFlatFee = 0.5; // 0.5 ZMW
-  const depositFee = amount * gatewayFeePercentage + gatewayFlatFee;
-  const totalCharge = amount + depositFee;
-
-  const paymentData = {
-    tx_ref: `zangena-deposit-${Date.now()}`,
-    amount: totalCharge,
-    currency: 'ZMW',
-    email: user.email || 'user@example.com', // Fallback if email isn’t set
-    phone_number: phoneNumber,
-    redirect_url: 'https://zangena.onrender.com/deposit-success',
-    payment_options: 'mobilemoneyzambia',
-  };
+  const { amount } = req.body;
+  console.log('Deposit Request Received:', { amount });
 
   try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+    if (!user || !user.isActive) {
+      console.log('User check failed:', { phoneNumber: req.user.phoneNumber });
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+
+    if (!amount || amount <= 0) {
+      console.log('Invalid amount:', amount);
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+
+    // Normalize and detect payment method
+    let phoneNumber = req.user.phoneNumber;
+    console.log('Raw Phone Number:', phoneNumber);
+    if (!phoneNumber.startsWith('+260')) {
+      if (phoneNumber.startsWith('0')) phoneNumber = '+26' + phoneNumber;
+      else if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
+    }
+    console.log('Normalized Phone Number:', phoneNumber);
+
+    const mtnPrefixes = ['96', '76'];
+    const airtelPrefixes = ['97', '77'];
+    const prefix = phoneNumber.slice(4, 6);
+    console.log('Extracted Prefix:', prefix);
+    console.log('MTN Prefixes:', mtnPrefixes);
+    console.log('Airtel Prefixes:', airtelPrefixes);
+
+    let paymentMethod;
+    if (mtnPrefixes.includes(prefix)) {
+      paymentMethod = 'mobile-money-mtn';
+      console.log('Payment Method Set: mobile-money-mtn');
+    } else if (airtelPrefixes.includes(prefix)) {
+      paymentMethod = 'mobile-money-airtel';
+      console.log('Payment Method Set: mobile-money-airtel');
+    } else {
+      console.log('Phone number not supported:', { prefix });
+      return res.status(400).json({ error: 'Phone number not supported for deposits' });
+    }
+
+    const gatewayFeePercentage = 0.015; // 1.5%
+    const gatewayFlatFee = 0.5; // 0.5 ZMW
+    const depositFee = amount * gatewayFeePercentage + gatewayFlatFee;
+    const totalCharge = amount + depositFee;
+
+    const paymentData = {
+      tx_ref: `zangena-deposit-${Date.now()}`,
+      amount: totalCharge,
+      currency: 'ZMW',
+      email: user.email || 'user@example.com',
+      phone_number: phoneNumber,
+      redirect_url: 'https://zangena.onrender.com/deposit-success',
+      payment_options: 'mobilemoneyzambia',
+    };
+    console.log('Payment Data:', paymentData);
+
     const response = await flw.Charge.mobilemoney(paymentData);
     console.log('Flutterwave Deposit Response:', response);
-    if (response.status !== 'success') throw new Error('Payment failed');
+    if (response.status !== 'success') throw new Error(`Payment failed: ${response.message || 'Unknown error'}`);
 
     let creditedAmount = amount;
-    const isFirstDeposit = user.transactions.every((tx) => tx.type !== 'deposited');
+    const isFirstDeposit = !user.transactions || user.transactions.every((tx) => tx.type !== 'deposited');
     if (isFirstDeposit) {
       const bonus = Math.min(amount * 0.05, 10); // 5% bonus, max 10 ZMW
       creditedAmount += bonus;
@@ -371,12 +390,13 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     });
 
     await user.save();
+    console.log('User updated:', { balance: user.balance });
     res.json({
       message: `Deposited ${creditedAmount.toFixed(2)} ZMW${isFirstDeposit ? ' (incl. bonus)' : ''}`,
       balance: user.balance,
     });
   } catch (error) {
-    console.error('Deposit Error:', error);
+    console.error('Deposit Error:', error.message, error.stack);
     res.status(500).json({ error: error.message || 'Deposit failed' });
   }
 });
