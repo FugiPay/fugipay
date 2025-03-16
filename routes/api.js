@@ -364,8 +364,14 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     };
     console.log('Payment Data:', paymentData);
 
+    console.log('Flutterwave instance:', !!flw, flw.MobileMoney ? 'MobileMoney exists' : 'MobileMoney missing');
+    if (!flw.MobileMoney || typeof flw.MobileMoney.zambia !== 'function') {
+      throw new Error('Flutterwave MobileMoney.zambia method not available');
+    }
+
     let response;
     try {
+      console.log('Attempting Flutterwave MobileMoney.zambia call...');
       response = await flw.MobileMoney.zambia(paymentData);
       console.log('Flutterwave Initial Response:', response);
     } catch (flwError) {
@@ -374,11 +380,12 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     }
 
     if (!response) {
+      console.error('Flutterwave returned undefined response');
       throw new Error('Flutterwave returned no response');
     }
 
     if (response.status === 'success') {
-      if (response.data.status === 'pending' || response.data.status === 'successful') {
+      if (response.data?.status === 'pending' || response.data?.status === 'successful') {
         console.log('Deposit initiated successfully:', response.data);
         return res.json({
           message: 'Deposit initiated. Please check your phone to enter your PIN.',
@@ -410,6 +417,7 @@ router.post('/deposit', authenticateToken, async (req, res) => {
   }
 });
 
+// Webhook endpoint (unchanged)
 router.post('/webhook/flutterwave', async (req, res) => {
   const secretHash = process.env.FLW_WEBHOOK_HASH;
   const signature = req.headers['verif-hash'];
