@@ -379,21 +379,30 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
 
   // Normalize phone number
   let phoneNumber = req.user.phoneNumber;
+  console.log('Raw Phone Number:', phoneNumber);
   if (!phoneNumber.startsWith('+260')) {
     if (phoneNumber.startsWith('0')) phoneNumber = '+26' + phoneNumber;
     else if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
   }
+  console.log('Normalized Phone Number:', phoneNumber);
 
-  // Determine payment method from normalized phone number
+  // Determine payment method
   const mtnPrefixes = ['96', '76'];
   const airtelPrefixes = ['97', '77'];
   const prefix = phoneNumber.slice(4, 6);
+  console.log('Extracted Prefix:', prefix);
+  console.log('MTN Prefixes:', mtnPrefixes);
+  console.log('Airtel Prefixes:', airtelPrefixes);
+
   let paymentMethod;
   if (mtnPrefixes.includes(prefix)) {
     paymentMethod = 'mobile-money-mtn';
+    console.log('Payment Method Set: mobile-money-mtn');
   } else if (airtelPrefixes.includes(prefix)) {
     paymentMethod = 'mobile-money-airtel';
+    console.log('Payment Method Set: mobile-money-airtel');
   } else {
+    console.log('Phone number not supported');
     return res.status(400).json({ error: 'Phone number not supported for withdrawals' });
   }
 
@@ -409,7 +418,7 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
     amount,
     currency: 'ZMW',
     account_bank: 'mobilemoneyzambia',
-    account_number: phoneNumber, // Use normalized phone number
+    account_number: phoneNumber,
     narration: 'Zangena Withdrawal',
   };
 
@@ -434,7 +443,6 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
     res.status(500).json({ error: error.message || 'Withdrawal failed' });
   }
 });
-
 // POST /api/payment-with-qr-pin
 router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, qrId, pin } = req.body;
