@@ -360,7 +360,6 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       email: user.email || 'user@example.com',
       phone_number: phoneNumber,
       network: paymentMethod === 'mobile-money-mtn' ? 'MTN' : 'AIRTEL',
-      redirect_url: 'https://zangena.onrender.com/deposit-success',
       meta: { userId: user._id.toString() },
     };
     console.log('Payment Data:', paymentData);
@@ -378,13 +377,26 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       throw new Error('Flutterwave returned no response');
     }
 
-    if (response.status === 'success' && (response.data.status === 'pending' || response.data.status === 'successful')) {
-      console.log('Deposit initiated successfully:', response.data);
-      return res.json({
-        message: 'Deposit initiated. Please check your phone to enter your PIN.',
-        transactionId: response.data.id,
-        status: 'pending',
-      });
+    if (response.status === 'success') {
+      if (response.data.status === 'pending' || response.data.status === 'successful') {
+        console.log('Deposit initiated successfully:', response.data);
+        return res.json({
+          message: 'Deposit initiated. Please check your phone to enter your PIN.',
+          transactionId: response.data.id,
+          status: 'pending',
+        });
+      } else if (response.meta?.authorization?.mode === 'redirect') {
+        console.log('Redirect flow triggered:', response.meta.authorization);
+        return res.json({
+          message: 'Redirect required. Please complete payment in the browser.',
+          redirectUrl: response.meta.authorization.redirect,
+          transactionId: response.data?.id || response.tx_ref,
+          status: 'pending',
+        });
+      } else {
+        console.log('Unexpected success state:', response);
+        throw new Error('Unexpected payment initiation state');
+      }
     } else if (response.status === 'error') {
       console.log('Flutterwave failed:', response);
       throw new Error(`Payment initiation failed: ${response.message}`);
@@ -398,7 +410,6 @@ router.post('/deposit', authenticateToken, async (req, res) => {
   }
 });
 
-// Webhook endpoint remains unchanged from previous version
 router.post('/webhook/flutterwave', async (req, res) => {
   const secretHash = process.env.FLW_WEBHOOK_HASH;
   const signature = req.headers['verif-hash'];
