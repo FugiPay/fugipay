@@ -449,6 +449,17 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
   }
 });
 
+router.get('/ip', async (req, res) => {
+  try {
+    const response = await axios.get('https://api.ipify.org?format=json');
+    console.log('Outbound IP:', response.data.ip);
+    res.json({ ip: response.data.ip });
+  } catch (error) {
+    console.error('IP Fetch Error:', error);
+    res.status(500).json({ error: 'Failed to fetch IP' });
+  }
+});
+
 // POST /api/payment-with-qr-pin
 router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, qrId, pin } = req.body;
