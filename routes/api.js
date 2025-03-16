@@ -348,6 +348,57 @@ router.post('/deposit/manual', authenticateToken, async (req, res) => {
   }
 });
 
+router.post('/admin/verify-withdrawal', authenticateToken, async (req, res) => {
+  const { userId, withdrawalIndex, approved } = req.body;
+  console.log('Verify Withdrawal Request:', { userId, withdrawalIndex, approved });
+
+  // Add admin role check here in production
+  if (!req.user.role || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      console.log('User not found:', userId);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const withdrawal = user.pendingWithdrawals[withdrawalIndex];
+    if (!withdrawal || withdrawal.status !== 'pending') {
+      console.log('Withdrawal not found or already processed:', { userId, withdrawalIndex });
+      return res.status(400).json({ error: 'Invalid or already processed withdrawal' });
+    }
+
+    if (approved) {
+      const withdrawFee = Math.max(withdrawal.amount * 0.01, 2);
+      const totalDeduction = withdrawal.amount + withdrawFee;
+      if (user.balance < totalDeduction) {
+        return res.status(400).json({ error: 'Insufficient balance' });
+      }
+      user.balance -= totalDeduction;
+      user.transactions = user.transactions || [];
+      user.transactions.push({
+        type: 'withdrawn',
+        amount: withdrawal.amount,
+        toFrom: 'manual-mobile-money',
+        fee: withdrawFee,
+        date: new Date(),
+      });
+      withdrawal.status = 'completed';
+    } else {
+      withdrawal.status = 'rejected';
+    }
+
+    await user.save();
+    console.log('Withdrawal verified:', { userId, withdrawalIndex, approved });
+    res.json({ message: `Withdrawal ${approved ? 'completed' : 'rejected'}` });
+  } catch (error) {
+    console.error('Verify Withdrawal Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to verify withdrawal' });
+  }
+});
+
 // Admin verification endpoint (manual for now)
 router.post('/admin/verify-deposit', authenticateToken, async (req, res) => {
   const { userId, transactionId, approved } = req.body;
@@ -790,39 +841,22 @@ router.put('/user/toggle-active', authenticateToken, async (req, res) => {
 
 // GET /api/users (Admin only)
 router.get('/users', authenticateToken, async (req, res) => {
+  const { page = 1, limit = 10, search = '' } = req.query;
+  const skip = (page - 1) * limit;
+  const query = search ? {
+    $or: [
+      { username: { $regex: search, $options: 'i' } },
+      { phoneNumber: { $regex: search, $options: 'i' } },
+      { email: { $regex: search, $options: 'i' } },
+      { name: { $regex: search, $options: 'i' } },
+    ],
+  } : {};
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized: Admins only' });
-    }
-    const { page = 1, limit = 10, search = '' } = req.query;
-    const pageNum = parseInt(page, 10);
-    const limitNum = parseInt(limit, 10);
-    const skip = (pageNum - 1) * limitNum;
-
-    const query = search
-      ? {
-          $or: [
-            { username: { $regex: search, $options: 'i' } },
-            { phoneNumber: { $regex: search, $options: 'i' } },
-          ],
-        }
-      : {};
-
+    const users = await User.find(query).skip(skip).limit(parseInt(limit));
     const total = await User.countDocuments(query);
-    const users = await User.find(query, { password: 0, idImageUrl: 0 })
-      .skip(skip)
-      .limit(limitNum);
-
-    res.json({
-      users,
-      total,
-      page: pageNum,
-      limit: limitNum,
-      totalPages: Math.ceil(total / limitNum),
-    });
+    res.json({ users, total });
   } catch (error) {
-    console.error('Fetch All Users Error:', error);
-    res.status(500).json({ error: 'Server error fetching users' });
+    res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
 
