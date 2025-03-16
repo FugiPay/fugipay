@@ -363,6 +363,7 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       meta: { userId: user._id.toString() },
     };
     console.log('Payment Data:', paymentData);
+    console.log('FLW_SECRET_KEY loaded:', !!process.env.FLW_SECRET_KEY);
 
     let response;
     try {
@@ -424,6 +425,48 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     console.error('Deposit Error:', error.message, error.stack);
     res.status(500).json({ error: error.message || 'Deposit failed' });
   }
+});
+
+router.post('/webhook/flutterwave', async (req, res) => {
+  const secretHash = process.env.FLW_WEBHOOK_HASH;
+  const signature = req.headers['verif-hash'];
+  if (!signature || signature !== secretHash) {
+    console.log('Webhook signature mismatch');
+    return res.status(401).end();
+  }
+
+  const { event, data } = req.body;
+  console.log('Webhook Received:', { event, data });
+
+  if (event === 'charge.completed' && data.status === 'successful') {
+    const user = await User.findById(data.meta.userId);
+    if (!user) {
+      console.log('User not found for webhook:', data.meta.userId);
+      return res.status(404).end();
+    }
+
+    const amount = parseFloat(data.amount) - (data.amount * 0.015 + 0.5);
+    let creditedAmount = amount;
+    const isFirstDeposit = !user.transactions || user.transactions.every((tx) => tx.type !== 'deposited');
+    if (isFirstDeposit) {
+      const bonus = Math.min(amount * 0.05, 10);
+      creditedAmount += bonus;
+    }
+
+    user.balance += creditedAmount;
+    user.transactions.push({
+      type: 'deposited',
+      amount: creditedAmount,
+      toFrom: data.processor_response.includes('MTN') ? 'mobile-money-mtn' : 'mobile-money-airtel',
+      fee: data.amount - amount,
+      date: new Date(),
+    });
+
+    await user.save();
+    console.log('User updated from webhook:', { balance: user.balance });
+  }
+
+  res.status(200).end();
 });
 
 router.get('/test-flutterwave', async (req, res) => {
