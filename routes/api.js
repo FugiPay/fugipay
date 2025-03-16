@@ -303,11 +303,24 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
 
 // POST /api/deposit
 router.post('/deposit', authenticateToken, async (req, res) => {
-  const { amount, paymentMethod } = req.body; // e.g., 'mobile-money-mtn'
+  const { amount } = req.body; // No paymentMethod needed
   const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
 
   if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+  // Determine payment method from user's phone number
+  const mtnPrefixes = ['96', '76'];
+  const airtelPrefixes = ['97', '77'];
+  const prefix = user.phoneNumber.slice(4, 6);
+  let paymentMethod;
+  if (mtnPrefixes.includes(prefix)) {
+    paymentMethod = 'mobile-money-mtn';
+  } else if (airtelPrefixes.includes(prefix)) {
+    paymentMethod = 'mobile-money-airtel';
+  } else {
+    return res.status(400).json({ error: 'Phone number not supported for deposits' });
+  }
 
   const gatewayFeePercentage = 0.015; // 1.5%
   const gatewayFlatFee = 0.5; // 0.5 ZMW
@@ -319,7 +332,7 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     amount: totalCharge,
     currency: 'ZMW',
     email: user.email,
-    phone_number: user.phoneNumber,
+    phone_number: user.phoneNumber, // Use stored phone number
     redirect_url: 'https://zangena.onrender.com/deposit-success',
     payment_options: 'mobilemoneyzambia',
   };
@@ -336,15 +349,20 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     }
 
     user.balance += creditedAmount;
+    user.transactions = user.transactions || [];
     user.transactions.push({
       type: 'deposited',
       amount: creditedAmount,
       toFrom: paymentMethod,
       fee: depositFee,
+      date: new Date(),
     });
 
     await user.save();
-    res.json({ message: `Deposited ${creditedAmount.toFixed(2)} ZMW${isFirstDeposit ? ' (incl. bonus)' : ''}`, balance: user.balance });
+    res.json({ 
+      message: `Deposited ${creditedAmount.toFixed(2)} ZMW${isFirstDeposit ? ' (incl. bonus)' : ''}`, 
+      balance: user.balance 
+    });
   } catch (error) {
     console.error('Deposit Error:', error);
     res.status(500).json({ error: error.message || 'Deposit failed' });
@@ -353,30 +371,26 @@ router.post('/deposit', authenticateToken, async (req, res) => {
 
 // POST /api/withdraw
 router.post('/withdraw', authenticateToken, async (req, res) => {
-  const { amount, phoneNumber, paymentMethod } = req.body;
+  const { amount } = req.body;
   const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
 
   if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-  if (!phoneNumber || !phoneNumber.match(/^\+260(9[5678]|7[34679])\d{7}$/)) {
-    return res.status(400).json({ error: 'Invalid Zambian phone number' });
-  }
-  if (!paymentMethod || !['mobile-money-mtn', 'mobile-money-airtel'].includes(paymentMethod)) {
-    return res.status(400).json({ error: 'Invalid payment method' });
+
+  // Determine payment method from user's phone number
+  const mtnPrefixes = ['96', '76']; // Corrected MTN prefixes
+  const airtelPrefixes = ['97', '77']; // Corrected Airtel prefixes
+  const prefix = user.phoneNumber.slice(4, 6);
+  let paymentMethod;
+  if (mtnPrefixes.includes(prefix)) {
+    paymentMethod = 'mobile-money-mtn';
+  } else if (airtelPrefixes.includes(prefix)) {
+    paymentMethod = 'mobile-money-airtel';
+  } else {
+    return res.status(400).json({ error: 'Phone number not supported for withdrawals' });
   }
 
-  // Validate phoneNumber against paymentMethod
-  const mtnPrefixes = ['96', '97', '95', '76']; // MTN Zambia
-  const airtelPrefixes = ['77', '94']; // Airtel Zambia
-  const prefix = phoneNumber.slice(4, 6); // e.g., "96" from "+26096xxxxxxx"
-  if (paymentMethod === 'mobile-money-mtn' && !mtnPrefixes.includes(prefix)) {
-    return res.status(400).json({ error: 'Phone number does not match MTN provider' });
-  }
-  if (paymentMethod === 'mobile-money-airtel' && !airtelPrefixes.includes(prefix)) {
-    return res.status(400).json({ error: 'Phone number does not match Airtel provider' });
-  }
-
-  const withdrawFee = Math.max(amount * 0.01, 2); // 1% or 2 ZMW min
+  const withdrawFee = Math.max(amount * 0.01, 2);
   const totalDeduction = amount + withdrawFee;
 
   if (user.balance < totalDeduction) {
@@ -388,7 +402,7 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
     amount,
     currency: 'ZMW',
     account_bank: 'mobilemoneyzambia',
-    account_number: phoneNumber,
+    account_number: user.phoneNumber,
     narration: 'Zangena Withdrawal',
   };
 
@@ -397,11 +411,13 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
     if (response.status !== 'success') throw new Error('Withdrawal failed');
 
     user.balance -= totalDeduction;
+    user.transactions = user.transactions || [];
     user.transactions.push({
       type: 'withdrawn',
       amount,
-      toFrom: `${phoneNumber} (${paymentMethod})`, // Log both for clarity
+      toFrom: `${user.phoneNumber} (${paymentMethod})`,
       fee: withdrawFee,
+      date: new Date(),
     });
 
     await user.save();
@@ -411,6 +427,8 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
     res.status(500).json({ error: error.message || 'Withdrawal failed' });
   }
 });
+
+module.exports = router;
 
 // POST /api/payment-with-qr-pin
 router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
