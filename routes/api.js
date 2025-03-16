@@ -315,10 +315,15 @@ router.post('/deposit', authenticateToken, async (req, res) => {
   if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
-  // Determine payment method from user's phone number
+  // Normalize and detect payment method
+  let phoneNumber = req.user.phoneNumber;
+  if (!phoneNumber.startsWith('+260')) {
+    if (phoneNumber.startsWith('0')) phoneNumber = '+26' + phoneNumber;
+    else if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
+  }
   const mtnPrefixes = ['96', '76'];
   const airtelPrefixes = ['97', '77'];
-  const prefix = user.phoneNumber.slice(4, 6);
+  const prefix = phoneNumber.slice(4, 6);
   let paymentMethod;
   if (mtnPrefixes.includes(prefix)) {
     paymentMethod = 'mobile-money-mtn';
@@ -337,18 +342,19 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     tx_ref: `zangena-deposit-${Date.now()}`,
     amount: totalCharge,
     currency: 'ZMW',
-    email: user.email,
-    phone_number: user.phoneNumber, // Use stored phone number
+    email: user.email || 'user@example.com', // Fallback if email isn’t set
+    phone_number: phoneNumber,
     redirect_url: 'https://zangena.onrender.com/deposit-success',
     payment_options: 'mobilemoneyzambia',
   };
 
   try {
     const response = await flw.Charge.mobilemoney(paymentData);
+    console.log('Flutterwave Deposit Response:', response);
     if (response.status !== 'success') throw new Error('Payment failed');
 
     let creditedAmount = amount;
-    const isFirstDeposit = user.transactions.every(tx => tx.type !== 'deposited');
+    const isFirstDeposit = user.transactions.every((tx) => tx.type !== 'deposited');
     if (isFirstDeposit) {
       const bonus = Math.min(amount * 0.05, 10); // 5% bonus, max 10 ZMW
       creditedAmount += bonus;
@@ -365,9 +371,9 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     });
 
     await user.save();
-    res.json({ 
-      message: `Deposited ${creditedAmount.toFixed(2)} ZMW${isFirstDeposit ? ' (incl. bonus)' : ''}`, 
-      balance: user.balance 
+    res.json({
+      message: `Deposited ${creditedAmount.toFixed(2)} ZMW${isFirstDeposit ? ' (incl. bonus)' : ''}`,
+      balance: user.balance,
     });
   } catch (error) {
     console.error('Deposit Error:', error);
