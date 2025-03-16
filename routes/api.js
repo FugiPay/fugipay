@@ -444,83 +444,77 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
   }
 });
 // POST /api/payment-with-qr-pin
-router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
-  const { fromUsername, toUsername, amount, qrId, pin } = req.body;
+router.post('/withdraw', authenticateToken, async (req, res) => {
+  const { amount } = req.body;
+  const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
 
-  if (!fromUsername || !toUsername || !amount || !qrId || !pin) {
-    return res.status(400).json({ error: 'All fields are required' });
+  if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+  // Normalize phone number
+  let phoneNumber = req.user.phoneNumber;
+  console.log('Raw Phone Number:', phoneNumber);
+  if (!phoneNumber.startsWith('+260')) {
+    if (phoneNumber.startsWith('0')) phoneNumber = '+26' + phoneNumber;
+    else if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
+  }
+  console.log('Normalized Phone Number:', phoneNumber);
+
+  // Determine payment method
+  const mtnPrefixes = ['96', '76'];
+  const airtelPrefixes = ['97', '77'];
+  const prefix = phoneNumber.slice(4, 6);
+  console.log('Extracted Prefix:', prefix);
+
+  let paymentMethod;
+  if (mtnPrefixes.includes(prefix)) {
+    paymentMethod = 'mobile-money-mtn';
+    console.log('Payment Method Set: mobile-money-mtn');
+  } else if (airtelPrefixes.includes(prefix)) {
+    paymentMethod = 'mobile-money-airtel';
+    console.log('Payment Method Set: mobile-money-airtel');
+  } else {
+    console.log('Phone number not supported');
+    return res.status(400).json({ error: 'Phone number not supported for withdrawals' });
   }
 
+  const withdrawFee = Math.max(amount * 0.01, 2);
+  const totalDeduction = amount + withdrawFee;
+
+  if (user.balance < totalDeduction) {
+    return res.status(400).json({ error: 'Insufficient balance' });
+  }
+
+  const paymentData = {
+    reference: `zangena-withdraw-${Date.now()}`, // Changed from tx_ref to reference
+    amount,
+    currency: 'ZMW',
+    account_bank: 'mobilemoneyzambia',
+    account_number: phoneNumber,
+    narration: 'Zangena Withdrawal',
+  };
+  console.log('Payment Data:', paymentData);
+
   try {
-    const sender = await User.findOne({ phoneNumber: req.user.phoneNumber });
-    if (!sender || !sender.isActive) return res.status(403).json({ error: 'Sender not found or inactive' });
-    if (sender.username !== fromUsername) return res.status(403).json({ error: 'Unauthorized sender' });
-    if (sender.role === 'admin') return res.status(403).json({ error: 'Admins cannot send payments' });
+    const response = await flw.Transfer.initiate(paymentData);
+    console.log('Flutterwave Response:', response);
+    if (response.status !== 'success') throw new Error('Withdrawal failed');
 
-    const receiver = await User.findOne({ username: toUsername });
-    if (!receiver || !receiver.isActive) return res.status(403).json({ error: 'Recipient not found or inactive' });
-
-    const qrPin = await QRPin.findOne({ qrId, pin });
-    if (!qrPin || qrPin.username !== toUsername) {
-      return res.status(400).json({ error: 'Invalid QR code or PIN' });
-    }
-
-    const paymentAmount = parseFloat(amount);
-    if (isNaN(paymentAmount) || paymentAmount <= 0) {
-      return res.status(400).json({ error: 'Amount must be a positive number' });
-    }
-    if (paymentAmount > 10000) {
-      return res.status(400).json({ error: 'You cannot send more than 10,000 ZMW in a single transaction' });
-    }
-
-    const sendingFee = getSendingFee(paymentAmount);
-    const receivingFee = getReceivingFee(paymentAmount);
-    const totalSenderDeduction = paymentAmount + sendingFee;
-
-    if (sender.balance < totalSenderDeduction) {
-      return res.status(400).json({ error: 'Insufficient balance to cover amount and sending fee' });
-    }
-
-    const admin = await User.findOne({ username: 'admin', role: 'admin' });
-    if (!admin) return res.status(500).json({ error: 'Admin account not found' });
-
-    sender.balance -= totalSenderDeduction;
-    receiver.balance += paymentAmount - receivingFee;
-    admin.balance += sendingFee + receivingFee;
-
-    sender.transactions.push({
-      type: 'sent',
-      amount: paymentAmount,
-      toFrom: toUsername,
-      fee: sendingFee,
-    });
-    receiver.transactions.push({
-      type: 'received',
-      amount: paymentAmount,
-      toFrom: fromUsername,
-      fee: receivingFee,
-    });
-    admin.transactions.push({
-      type: 'fee-collected',
-      amount: sendingFee + receivingFee,
-      toFrom: `${fromUsername} -> ${toUsername}`,
-      originalAmount: paymentAmount,
-      sendingFee,
-      receivingFee,
+    user.balance -= totalDeduction;
+    user.transactions = user.transactions || [];
+    user.transactions.push({
+      type: 'withdrawn',
+      amount,
+      toFrom: `${phoneNumber} (${paymentMethod})`,
+      fee: withdrawFee,
+      date: new Date(),
     });
 
-    await QRPin.deleteOne({ qrId });
-    await Promise.all([sender.save(), receiver.save(), admin.save()]);
-
-    res.json({
-      message: 'Payment successful',
-      sendingFee,
-      receivingFee,
-      amountReceived: paymentAmount - receivingFee,
-    });
+    await user.save();
+    res.json({ message: `Withdrew ${amount.toFixed(2)} ZMW (fee: ${withdrawFee.toFixed(2)} ZMW)`, balance: user.balance });
   } catch (error) {
-    console.error('QR Payment Error:', error);
-    res.status(500).json({ error: 'Server error during payment' });
+    console.error('Withdraw Error:', error);
+    res.status(500).json({ error: error.message || 'Withdrawal failed' });
   }
 });
 
