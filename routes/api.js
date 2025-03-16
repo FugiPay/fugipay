@@ -361,6 +361,7 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       phone_number: phoneNumber,
       network: paymentMethod === 'mobile-money-mtn' ? 'MTN' : 'AIRTEL',
       meta: { userId: user._id.toString() },
+      authorization: { mode: 'ussd' }, // Attempt to force USSD
     };
     console.log('Payment Data:', paymentData);
     console.log('FLW_SECRET_KEY loaded:', !!process.env.FLW_SECRET_KEY);
