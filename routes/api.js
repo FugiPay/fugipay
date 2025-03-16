@@ -324,12 +324,10 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Invalid amount' });
     }
 
-    // Normalize and detect payment method
     let phoneNumber = req.user.phoneNumber;
     console.log('Raw Phone Number:', phoneNumber);
     if (!phoneNumber.startsWith('+260')) {
-      if (phoneNumber.startsWith('0')) phoneNumber = '+26' + phoneNumber;
-      else if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
+      phoneNumber = '+260' + phoneNumber.replace(/^0/, '');
     }
     console.log('Normalized Phone Number:', phoneNumber);
 
@@ -359,25 +357,60 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       tx_ref: `zangena-deposit-${Date.now()}`,
       amount: totalCharge,
       currency: 'ZMW',
-      email: user.email || 'user@example.com', // Ensure email exists in DB
+      email: user.email || 'user@example.com',
       phone_number: phoneNumber,
-      redirect_url: 'https://zangena.onrender.com/deposit-success', // Optional for mobile money
-      network: paymentMethod === 'mobile-money-mtn' ? 'MTN' : 'AIRTEL', // Specific to Zambia
+      network: paymentMethod === 'mobile-money-mtn' ? 'MTN' : 'AIRTEL',
+      redirect_url: 'https://zangena.onrender.com/deposit-success', // For callback
+      meta: { userId: user._id.toString() }, // For webhook tracking
     };
     console.log('Payment Data:', paymentData);
 
     const response = await flw.MobileMoney.zambia(paymentData);
-    console.log('Flutterwave Deposit Response:', response);
+    console.log('Flutterwave Initial Response:', response);
 
-    if (response.status !== 'success') {
+    if (response.status === 'success' && response.data.status === 'pending') {
+      // Payment initiated, awaiting user confirmation
+      return res.json({
+        message: 'Deposit initiated. Please check your phone to enter your PIN.',
+        transactionId: response.data.id,
+        status: 'pending',
+      });
+    } else if (response.status === 'error') {
       console.log('Flutterwave failed:', response);
-      throw new Error(`Payment failed: ${response.message || 'Unknown error'}`);
+      throw new Error(`Payment initiation failed: ${response.message}`);
+    } else {
+      throw new Error('Unexpected response from payment gateway');
+    }
+  } catch (error) {
+    console.error('Deposit Error:', error.message, error.stack);
+    res.status(500).json({ error: error.message || 'Deposit failed' });
+  }
+});
+
+// Webhook to confirm payment (add this to your routes)
+router.post('/webhook/flutterwave', async (req, res) => {
+  const secretHash = process.env.FLW_WEBHOOK_HASH; // Set this in .env
+  const signature = req.headers['verif-hash'];
+  if (!signature || signature !== secretHash) {
+    console.log('Webhook signature mismatch');
+    return res.status(401).end();
+  }
+
+  const { event, data } = req.body;
+  console.log('Webhook Received:', { event, data });
+
+  if (event === 'charge.completed' && data.status === 'successful') {
+    const user = await User.findById(data.meta.userId);
+    if (!user) {
+      console.log('User not found for webhook:', data.meta.userId);
+      return res.status(404).end();
     }
 
+    const amount = parseFloat(data.amount) - (data.amount * 0.015 + 0.5); // Subtract fee
     let creditedAmount = amount;
     const isFirstDeposit = !user.transactions || user.transactions.every((tx) => tx.type !== 'deposited');
     if (isFirstDeposit) {
-      const bonus = Math.min(amount * 0.05, 10); // 5% bonus, max 10 ZMW
+      const bonus = Math.min(amount * 0.05, 10);
       creditedAmount += bonus;
     }
 
@@ -386,21 +419,17 @@ router.post('/deposit', authenticateToken, async (req, res) => {
     user.transactions.push({
       type: 'deposited',
       amount: creditedAmount,
-      toFrom: paymentMethod,
-      fee: depositFee,
+      toFrom: data.processor_response.includes('MTN') ? 'mobile-money-mtn' : 'mobile-money-airtel',
+      fee: data.amount - amount,
       date: new Date(),
     });
 
     await user.save();
-    console.log('User updated:', { balance: user.balance });
-    res.json({
-      message: `Deposited ${creditedAmount.toFixed(2)} ZMW${isFirstDeposit ? ' (incl. bonus)' : ''}`,
-      balance: user.balance,
-    });
-  } catch (error) {
-    console.error('Deposit Error:', error.message, error.stack);
-    res.status(500).json({ error: error.message || 'Deposit failed' });
+    console.log('User updated from webhook:', { balance: user.balance });
+    // TODO: Update admin balance here (e.g., increment a global ledger)
   }
+
+  res.status(200).end();
 });
 
 // POST /api/withdraw
