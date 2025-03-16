@@ -360,16 +360,26 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       email: user.email || 'user@example.com',
       phone_number: phoneNumber,
       network: paymentMethod === 'mobile-money-mtn' ? 'MTN' : 'AIRTEL',
-      redirect_url: 'https://zangena.onrender.com/deposit-success', // For callback
-      meta: { userId: user._id.toString() }, // For webhook tracking
+      redirect_url: 'https://zangena.onrender.com/deposit-success',
+      meta: { userId: user._id.toString() },
     };
     console.log('Payment Data:', paymentData);
 
-    const response = await flw.MobileMoney.zambia(paymentData);
-    console.log('Flutterwave Initial Response:', response);
+    let response;
+    try {
+      response = await flw.MobileMoney.zambia(paymentData);
+      console.log('Flutterwave Initial Response:', response);
+    } catch (flwError) {
+      console.error('Flutterwave API Error:', flwError.message, flwError.stack);
+      throw new Error(`Flutterwave request failed: ${flwError.message}`);
+    }
 
-    if (response.status === 'success' && response.data.status === 'pending') {
-      // Payment initiated, awaiting user confirmation
+    if (!response) {
+      throw new Error('Flutterwave returned no response');
+    }
+
+    if (response.status === 'success' && (response.data.status === 'pending' || response.data.status === 'successful')) {
+      console.log('Deposit initiated successfully:', response.data);
       return res.json({
         message: 'Deposit initiated. Please check your phone to enter your PIN.',
         transactionId: response.data.id,
@@ -379,6 +389,7 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       console.log('Flutterwave failed:', response);
       throw new Error(`Payment initiation failed: ${response.message}`);
     } else {
+      console.log('Unexpected Flutterwave response:', response);
       throw new Error('Unexpected response from payment gateway');
     }
   } catch (error) {
@@ -387,9 +398,9 @@ router.post('/deposit', authenticateToken, async (req, res) => {
   }
 });
 
-// Webhook to confirm payment (add this to your routes)
+// Webhook endpoint remains unchanged from previous version
 router.post('/webhook/flutterwave', async (req, res) => {
-  const secretHash = process.env.FLW_WEBHOOK_HASH; // Set this in .env
+  const secretHash = process.env.FLW_WEBHOOK_HASH;
   const signature = req.headers['verif-hash'];
   if (!signature || signature !== secretHash) {
     console.log('Webhook signature mismatch');
@@ -406,7 +417,7 @@ router.post('/webhook/flutterwave', async (req, res) => {
       return res.status(404).end();
     }
 
-    const amount = parseFloat(data.amount) - (data.amount * 0.015 + 0.5); // Subtract fee
+    const amount = parseFloat(data.amount) - (data.amount * 0.015 + 0.5);
     let creditedAmount = amount;
     const isFirstDeposit = !user.transactions || user.transactions.every((tx) => tx.type !== 'deposited');
     if (isFirstDeposit) {
@@ -415,7 +426,6 @@ router.post('/webhook/flutterwave', async (req, res) => {
     }
 
     user.balance += creditedAmount;
-    user.transactions = user.transactions || [];
     user.transactions.push({
       type: 'deposited',
       amount: creditedAmount,
@@ -426,10 +436,19 @@ router.post('/webhook/flutterwave', async (req, res) => {
 
     await user.save();
     console.log('User updated from webhook:', { balance: user.balance });
-    // TODO: Update admin balance here (e.g., increment a global ledger)
   }
 
   res.status(200).end();
+});
+
+router.get('/test-flutterwave', async (req, res) => {
+  try {
+    const testData = { tx_ref: 'test', amount: 10, currency: 'ZMW', email: 'test@example.com', phone_number: '+260972721581', network: 'AIRTEL' };
+    const result = await flw.MobileMoney.zambia(testData);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // POST /api/withdraw
