@@ -11,6 +11,12 @@ const Flutterwave = require('flutterwave-node-v3');
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const authenticateToken = require('../middleware/authenticateToken');
+let axios; // Define axios conditionally
+try {
+  axios = require('axios');
+} catch (e) {
+  console.error('Axios not installed. Please run `npm install axios`');
+}
 
 // Configure multer for temporary local storage
 const upload = multer({ dest: 'uploads/' });
