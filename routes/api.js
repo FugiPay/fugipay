@@ -302,7 +302,7 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
 });
 
 // POST /api/deposit
-router.post('/api/deposit', authenticateToken, async (req, res) => {
+router.post('/deposit', authenticateToken, async (req, res) => {
   const { amount, paymentMethod } = req.body; // e.g., 'mobile-money-mtn'
   const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
 
@@ -352,7 +352,7 @@ router.post('/api/deposit', authenticateToken, async (req, res) => {
 });
 
 // POST /api/withdraw
-router.post('/api/withdraw', authenticateToken, async (req, res) => {
+router.post('/withdraw', authenticateToken, async (req, res) => {
   const { amount, phoneNumber, paymentMethod } = req.body;
   const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
 
