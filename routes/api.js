@@ -308,9 +308,10 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
 });
 
 // POST /api/deposit
-router.post('/deposit', authenticateToken, async (req, res) => {
-  const { amount } = req.body;
-  console.log('Deposit Request Received:', { amount });
+// Manual deposit submission
+router.post('/deposit/manual', authenticateToken, async (req, res) => {
+  const { amount, transactionId } = req.body;
+  console.log('Manual Deposit Request:', { amount, transactionId });
 
   try {
     const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
@@ -324,150 +325,78 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Invalid amount' });
     }
 
-    let phoneNumber = req.user.phoneNumber;
-    console.log('Raw Phone Number:', phoneNumber);
-    if (!phoneNumber.startsWith('+260')) {
-      phoneNumber = '+260' + phoneNumber.replace(/^0/, '');
-    }
-    console.log('Normalized Phone Number:', phoneNumber);
-
-    const mtnPrefixes = ['96', '76'];
-    const airtelPrefixes = ['97', '77'];
-    const prefix = phoneNumber.slice(4, 6);
-    console.log('Extracted Prefix:', prefix);
-
-    let paymentMethod;
-    if (mtnPrefixes.includes(prefix)) {
-      paymentMethod = 'mobile-money-mtn';
-      console.log('Payment Method Set: mobile-money-mtn');
-    } else if (airtelPrefixes.includes(prefix)) {
-      paymentMethod = 'mobile-money-airtel';
-      console.log('Payment Method Set: mobile-money-airtel');
-    } else {
-      console.log('Phone number not supported:', { prefix });
-      return res.status(400).json({ error: 'Phone number not supported for deposits' });
+    if (!transactionId) {
+      console.log('Missing transaction ID');
+      return res.status(400).json({ error: 'Transaction ID required' });
     }
 
-    const gatewayFeePercentage = 0.015; // 1.5%
-    const gatewayFlatFee = 0.5; // 0.5 ZMW
-    const depositFee = amount * gatewayFeePercentage + gatewayFlatFee;
-    const totalCharge = amount + depositFee;
+    // Store pending deposit for manual verification
+    user.pendingDeposits = user.pendingDeposits || [];
+    user.pendingDeposits.push({
+      amount,
+      transactionId,
+      date: new Date(),
+      status: 'pending',
+    });
+    await user.save();
 
-    const paymentData = {
-      tx_ref: `zangena-deposit-${Date.now()}`,
-      amount: totalCharge,
-      currency: 'ZMW',
-      email: user.email || 'user@example.com',
-      phone_number: phoneNumber,
-      network: paymentMethod === 'mobile-money-mtn' ? 'MTN' : 'AIRTEL',
-      meta: { userId: user._id.toString() },
-      authorization: { mode: 'ussd' }, // Attempt to force USSD
-    };
-    console.log('Payment Data:', paymentData);
-    console.log('FLW_SECRET_KEY loaded:', !!process.env.FLW_SECRET_KEY);
-
-    let response;
-    try {
-      console.log('Attempting Flutterwave raw API call...');
-      response = await axios.post(
-        'https://api.flutterwave.com/v3/charges?type=mobile_money_zambia',
-        paymentData,
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      );
-      console.log('Flutterwave Initial Response:', response.data);
-    } catch (flwError) {
-      console.error('Flutterwave API Error:', flwError.response?.data || flwError.message, flwError.stack);
-      throw new Error(`Flutterwave request failed: ${flwError.response?.data?.message || flwError.message}`);
-    }
-
-    if (!response || !response.data) {
-      console.error('Flutterwave returned no valid response');
-      throw new Error('Flutterwave returned no response');
-    }
-
-    const flwResponse = response.data;
-    if (flwResponse.status === 'success') {
-      if (flwResponse.meta?.authorization?.mode === 'redirect') {
-        console.log('Redirect flow triggered:', flwResponse.meta.authorization);
-        return res.json({
-          message: 'Redirect required. Please complete payment in the browser.',
-          redirectUrl: flwResponse.meta.authorization.redirect,
-          transactionId: flwResponse.data?.id || flwResponse.tx_ref,
-          status: 'pending',
-        });
-      } else if (flwResponse.data?.status === 'pending' || flwResponse.data?.status === 'successful') {
-        console.log('Deposit initiated successfully:', flwResponse.data);
-        return res.json({
-          message: 'Deposit initiated. Please check your phone to enter your PIN.',
-          transactionId: flwResponse.data?.id || flwResponse.tx_ref,
-          status: 'pending',
-        });
-      } else {
-        console.log('Unexpected success state:', flwResponse);
-        return res.json({
-          message: 'Deposit initiated. Please check your phone to enter your PIN.',
-          transactionId: flwResponse.data?.id || flwResponse.tx_ref,
-          status: 'pending',
-        });
-      }
-    } else if (flwResponse.status === 'error') {
-      console.log('Flutterwave failed:', flwResponse);
-      throw new Error(`Payment initiation failed: ${flwResponse.message}`);
-    } else {
-      console.log('Unexpected Flutterwave response:', flwResponse);
-      throw new Error('Unexpected response from payment gateway');
-    }
+    console.log('Pending deposit saved:', { userId: user._id, transactionId });
+    res.json({ message: 'Deposit submitted for verification' });
   } catch (error) {
-    console.error('Deposit Error:', error.message, error.stack);
-    res.status(500).json({ error: error.message || 'Deposit failed' });
+    console.error('Manual Deposit Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to submit deposit' });
   }
 });
 
-router.post('/webhook/flutterwave', async (req, res) => {
-  const secretHash = process.env.FLW_WEBHOOK_HASH;
-  const signature = req.headers['verif-hash'];
-  if (!signature || signature !== secretHash) {
-    console.log('Webhook signature mismatch');
-    return res.status(401).end();
-  }
+// Admin verification endpoint (manual for now)
+router.post('/admin/verify-deposit', authenticateToken, async (req, res) => {
+  const { userId, transactionId, approved } = req.body;
+  // Add admin role check here in production
+  console.log('Verify Deposit Request:', { userId, transactionId, approved });
 
-  const { event, data } = req.body;
-  console.log('Webhook Received:', { event, data });
-
-  if (event === 'charge.completed' && data.status === 'successful') {
-    const user = await User.findById(data.meta.userId);
+  try {
+    const user = await User.findById(userId);
     if (!user) {
-      console.log('User not found for webhook:', data.meta.userId);
-      return res.status(404).end();
+      console.log('User not found:', userId);
+      return res.status(404).json({ error: 'User not found' });
     }
 
-    const amount = parseFloat(data.amount) - (data.amount * 0.015 + 0.5);
-    let creditedAmount = amount;
-    const isFirstDeposit = !user.transactions || user.transactions.every((tx) => tx.type !== 'deposited');
-    if (isFirstDeposit) {
-      const bonus = Math.min(amount * 0.05, 10);
-      creditedAmount += bonus;
+    const deposit = user.pendingDeposits.find((d) => d.transactionId === transactionId);
+    if (!deposit || deposit.status !== 'pending') {
+      console.log('Deposit not found or already processed:', transactionId);
+      return res.status(400).json({ error: 'Invalid or already processed deposit' });
     }
 
-    user.balance += creditedAmount;
-    user.transactions.push({
-      type: 'deposited',
-      amount: creditedAmount,
-      toFrom: data.processor_response.includes('MTN') ? 'mobile-money-mtn' : 'mobile-money-airtel',
-      fee: data.amount - amount,
-      date: new Date(),
-    });
+    if (approved) {
+      const amount = deposit.amount;
+      let creditedAmount = amount;
+      const isFirstDeposit = !user.transactions || user.transactions.every((tx) => tx.type !== 'deposited');
+      if (isFirstDeposit) {
+        const bonus = Math.min(amount * 0.05, 10);
+        creditedAmount += bonus;
+      }
+
+      user.balance += creditedAmount;
+      user.transactions = user.transactions || [];
+      user.transactions.push({
+        type: 'deposited',
+        amount: creditedAmount,
+        toFrom: 'manual-mobile-money',
+        fee: 0, // No gateway fee
+        date: new Date(),
+      });
+      deposit.status = 'approved';
+    } else {
+      deposit.status = 'rejected';
+    }
 
     await user.save();
-    console.log('User updated from webhook:', { balance: user.balance });
+    console.log('Deposit verified:', { userId, transactionId, approved });
+    res.json({ message: `Deposit ${approved ? 'approved' : 'rejected'}` });
+  } catch (error) {
+    console.error('Verify Deposit Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to verify deposit' });
   }
-
-  res.status(200).end();
 });
 
 router.get('/test-flutterwave', async (req, res) => {
@@ -477,6 +406,35 @@ router.get('/test-flutterwave', async (req, res) => {
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/withdraw/request', authenticateToken, async (req, res) => {
+  const { amount } = req.body;
+  console.log('Withdraw Request:', { amount });
+
+  try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+    if (!user || !user.isActive) {
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+
+    if (!amount || amount <= 0 || amount > user.balance) {
+      return res.status(400).json({ error: 'Invalid amount or insufficient balance' });
+    }
+
+    user.pendingWithdrawals = user.pendingWithdrawals || [];
+    user.pendingWithdrawals.push({
+      amount,
+      date: new Date(),
+      status: 'pending',
+    });
+    await user.save();
+
+    res.json({ message: 'Withdrawal requested. Processing soon.' });
+  } catch (error) {
+    console.error('Withdraw Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to request withdrawal' });
   }
 });
 

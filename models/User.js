@@ -34,6 +34,21 @@ const userSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: false },
   resetToken: { type: String },
   resetTokenExpiry: { type: Date },
+  pendingDeposits: [
+    {
+      amount: { type: Number, required: true },
+      transactionId: { type: String, required: true },
+      date: { type: Date, default: Date.now },
+      status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+    },
+  ],
+  pendingWithdrawals: [
+    {
+      amount: { type: Number, required: true },
+      date: { type: Date, default: Date.now },
+      status: { type: String, enum: ['pending', 'completed', 'rejected'], default: 'pending' },
+    },
+  ],
 });
 
 module.exports = mongoose.model('User', userSchema);
