@@ -376,8 +376,15 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
 
   try {
     const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
-    if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
-    if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+    if (!user || !user.isActive) {
+      console.log('User check failed:', { phoneNumber: req.user.phoneNumber });
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+
+    if (!amount || amount <= 0) {
+      console.log('Invalid amount:', amount);
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
 
     let phoneNumber = req.user.phoneNumber;
     console.log('Raw Phone Number:', phoneNumber);
@@ -416,7 +423,7 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
       reference: `zangena-withdraw-${Date.now()}`,
       amount,
       currency: 'ZMW',
-      account_bank: 'mobilemoneyzambia', // Verify this with Flutterwave for Airtel
+      account_bank: 'mobilemoneyzambia', // Verify this later
       account_number: phoneNumber,
       narration: 'Zangena Withdrawal',
     };
@@ -427,7 +434,7 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
 
     if (transferResponse.status !== 'success') {
       console.log('Flutterwave failed:', transferResponse);
-      throw new Error(`Withdrawal failed: ${transferResponse.message || 'Unknown error'}`);
+      throw new Error(`Withdrawal failed: ${transferResponse.message}`);
     }
 
     user.balance -= totalDeduction;
@@ -449,16 +456,18 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
   }
 });
 
+// Temporary endpoint to fetch outbound IP
 router.get('/ip', async (req, res) => {
   try {
     const response = await axios.get('https://api.ipify.org?format=json');
     console.log('Outbound IP:', response.data.ip);
     res.json({ ip: response.data.ip });
   } catch (error) {
-    console.error('IP Fetch Error:', error);
+    console.error('IP Fetch Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch IP' });
   }
 });
+
 
 // POST /api/payment-with-qr-pin
 router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
