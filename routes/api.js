@@ -371,16 +371,23 @@ router.post('/deposit', authenticateToken, async (req, res) => {
 
 // POST /api/withdraw
 router.post('/withdraw', authenticateToken, async (req, res) => {
-  const { amount } = req.body; // Ignore phoneNumber from body
+  const { amount } = req.body;
   const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
 
   if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
-  // Determine payment method from user's stored phone number
+  // Normalize phone number
+  let phoneNumber = req.user.phoneNumber;
+  if (!phoneNumber.startsWith('+260')) {
+    if (phoneNumber.startsWith('0')) phoneNumber = '+26' + phoneNumber;
+    else if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
+  }
+
+  // Determine payment method from normalized phone number
   const mtnPrefixes = ['96', '76'];
   const airtelPrefixes = ['97', '77'];
-  const prefix = user.phoneNumber.slice(4, 6);
+  const prefix = phoneNumber.slice(4, 6);
   let paymentMethod;
   if (mtnPrefixes.includes(prefix)) {
     paymentMethod = 'mobile-money-mtn';
@@ -402,7 +409,7 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
     amount,
     currency: 'ZMW',
     account_bank: 'mobilemoneyzambia',
-    account_number: user.phoneNumber, // Use stored phone number
+    account_number: phoneNumber, // Use normalized phone number
     narration: 'Zangena Withdrawal',
   };
 
@@ -415,7 +422,7 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
     user.transactions.push({
       type: 'withdrawn',
       amount,
-      toFrom: `${user.phoneNumber} (${paymentMethod})`,
+      toFrom: `${phoneNumber} (${paymentMethod})`,
       fee: withdrawFee,
       date: new Date(),
     });
