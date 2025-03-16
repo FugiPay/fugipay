@@ -14,7 +14,7 @@ const allowedOrigins = [
   'https://nzubo-admin.web.app',
   'https://kayah.net',
   'https://khah-334000.web.app',
-  'https://api.ipify.org?format=json',
+  'https://api.ipify.org',
 ];
 
 const corsOptions = {
