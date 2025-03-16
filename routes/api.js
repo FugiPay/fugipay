@@ -371,15 +371,15 @@ router.post('/deposit', authenticateToken, async (req, res) => {
 
 // POST /api/withdraw
 router.post('/withdraw', authenticateToken, async (req, res) => {
-  const { amount } = req.body;
+  const { amount } = req.body; // Ignore phoneNumber from body
   const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
 
   if (!user || !user.isActive) return res.status(403).json({ error: 'User not found or inactive' });
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
-  // Determine payment method from user's phone number
-  const mtnPrefixes = ['96', '76']; // Corrected MTN prefixes
-  const airtelPrefixes = ['97', '77']; // Corrected Airtel prefixes
+  // Determine payment method from user's stored phone number
+  const mtnPrefixes = ['96', '76'];
+  const airtelPrefixes = ['97', '77'];
   const prefix = user.phoneNumber.slice(4, 6);
   let paymentMethod;
   if (mtnPrefixes.includes(prefix)) {
@@ -402,7 +402,7 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
     amount,
     currency: 'ZMW',
     account_bank: 'mobilemoneyzambia',
-    account_number: user.phoneNumber,
+    account_number: user.phoneNumber, // Use stored phone number
     narration: 'Zangena Withdrawal',
   };
 
@@ -427,8 +427,6 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
     res.status(500).json({ error: error.message || 'Withdrawal failed' });
   }
 });
-
-module.exports = router;
 
 // POST /api/payment-with-qr-pin
 router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
