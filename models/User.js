@@ -34,6 +34,7 @@ const userSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: false },
   resetToken: { type: String },
   resetTokenExpiry: { type: Date },
+  pushToken: { type: String, default: null },
   pendingDeposits: [
     {
       amount: { type: Number, required: true },

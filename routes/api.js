@@ -65,13 +65,41 @@ const getReceivingFee = (amount) => {
   return 0; // Explicitly 0 for > 10,000, validation catches this
 };
 
+// Function to send push notifications
+async function sendPushNotification(pushToken, title, body, data = {}) {
+  if (!axios) {
+    console.error('Axios not available, cannot send push notification');
+    return;
+  }
+
+  const message = {
+    to: pushToken,
+    sound: 'default',
+    title,
+    body,
+    data: { type: 'pendingApproval', ...data },
+  };
+
+  try {
+    await axios.post('https://exp.host/--/api/v2/push/send', message, {
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+    });
+    console.log(`Push notification sent to ${pushToken}: ${title} - ${body}`);
+  } catch (error) {
+    console.error('Error sending push notification:', error.message);
+  }
+}
+
 // POST /api/register
 router.post('/register', upload.single('idImage'), async (req, res) => {
   const { name, phoneNumber, email, password } = req.body;
   const idImage = req.file;
 
   if (!name || !phoneNumber || !email || !password || !idImage) {
-    return res.status(400).json({ error: 'Name, phone number, email, password, and ID image are required' });
+    return res.status(400).json({ error: 'All fields and ID image are required' });
   }
 
   if (!phoneNumber.match(/^\+260(9[5678]|7[34679])\d{7}$/)) {
@@ -98,12 +126,6 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
 
     fs.unlinkSync(idImage.path);
 
-    const idData = { name, idNumber: 'pending_verification', dob: 'pending_verification' };
-    const isSanctioned = false; // Placeholder for sanctions check
-    if (isSanctioned) {
-      return res.status(403).json({ error: 'User is on sanctions list' });
-    }
-
     const hashedPassword = await bcrypt.hash(password, 10);
     const username = email.split('@')[0];
     const user = new User({
@@ -127,6 +149,17 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
       { expiresIn: '24h' }
     );
 
+    // Notify admin of new pending user
+    const admin = await User.findOne({ role: 'admin' });
+    if (admin && admin.pushToken) {
+      await sendPushNotification(
+        admin.pushToken,
+        'New User Registration',
+        `User ${username} needs KYC approval.`,
+        { userId: user._id }
+      );
+    }
+
     res.status(201).json({
       token,
       username: user.username,
@@ -135,6 +168,29 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   } catch (error) {
     console.error('Register Error:', error);
     res.status(500).json({ error: 'Server error during registration' });
+  }
+});
+
+// POST /api/save-push-token
+router.post('/save-push-token', authenticateToken, async (req, res) => {
+  const { pushToken } = req.body;
+
+  if (!pushToken) {
+    return res.status(400).json({ error: 'Push token is required' });
+  }
+
+  try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    user.pushToken = pushToken;
+    await user.save();
+    res.status(200).json({ message: 'Push token saved' });
+  } catch (error) {
+    console.error('Save Push Token Error:', error);
+    res.status(500).json({ error: 'Failed to save push token' });
   }
 });
 
@@ -316,21 +372,14 @@ router.post('/deposit/manual', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!user || !user.isActive) {
-      console.log('User check failed:', { phoneNumber: req.user.phoneNumber });
       return res.status(403).json({ error: 'User not found or inactive' });
     }
-
     if (!amount || amount <= 0) {
-      console.log('Invalid amount:', amount);
       return res.status(400).json({ error: 'Invalid amount' });
     }
-
     if (!transactionId) {
-      console.log('Missing transaction ID');
       return res.status(400).json({ error: 'Transaction ID required' });
     }
-
-    // Store pending deposit for manual verification
     user.pendingDeposits = user.pendingDeposits || [];
     user.pendingDeposits.push({
       amount,
@@ -340,7 +389,17 @@ router.post('/deposit/manual', authenticateToken, async (req, res) => {
     });
     await user.save();
 
-    console.log('Pending deposit saved:', { userId: user._id, transactionId });
+    // Notify admin of new pending deposit
+    const admin = await User.findOne({ role: 'admin' });
+    if (admin && admin.pushToken) {
+      await sendPushNotification(
+        admin.pushToken,
+        'New Deposit Request',
+        `Deposit of ${amount} ZMW from ${user.username} needs approval.`,
+        { userId: user._id, transactionId }
+      );
+    }
+
     res.json({ message: 'Deposit submitted for verification' });
   } catch (error) {
     console.error('Manual Deposit Error:', error.message, error.stack);
@@ -351,25 +410,18 @@ router.post('/deposit/manual', authenticateToken, async (req, res) => {
 router.post('/admin/verify-withdrawal', authenticateToken, async (req, res) => {
   const { userId, withdrawalIndex, approved } = req.body;
   console.log('Verify Withdrawal Request:', { userId, withdrawalIndex, approved });
-
-  // Add admin role check here in production
-  if (!req.user.role || req.user.role !== 'admin') {
+  if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
-
   try {
     const user = await User.findById(userId);
     if (!user) {
-      console.log('User not found:', userId);
       return res.status(404).json({ error: 'User not found' });
     }
-
     const withdrawal = user.pendingWithdrawals[withdrawalIndex];
     if (!withdrawal || withdrawal.status !== 'pending') {
-      console.log('Withdrawal not found or already processed:', { userId, withdrawalIndex });
       return res.status(400).json({ error: 'Invalid or already processed withdrawal' });
     }
-
     if (approved) {
       const withdrawFee = Math.max(withdrawal.amount * 0.01, 2);
       const totalDeduction = withdrawal.amount + withdrawFee;
@@ -389,35 +441,29 @@ router.post('/admin/verify-withdrawal', authenticateToken, async (req, res) => {
     } else {
       withdrawal.status = 'rejected';
     }
-
     await user.save();
-    console.log('Withdrawal verified:', { userId, withdrawalIndex, approved });
     res.json({ message: `Withdrawal ${approved ? 'completed' : 'rejected'}` });
   } catch (error) {
     console.error('Verify Withdrawal Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to verify withdrawal' });
   }
 });
-
 // Admin verification endpoint (manual for now)
 router.post('/admin/verify-deposit', authenticateToken, async (req, res) => {
   const { userId, transactionId, approved } = req.body;
-  // Add admin role check here in production
   console.log('Verify Deposit Request:', { userId, transactionId, approved });
-
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
   try {
     const user = await User.findById(userId);
     if (!user) {
-      console.log('User not found:', userId);
       return res.status(404).json({ error: 'User not found' });
     }
-
     const deposit = user.pendingDeposits.find((d) => d.transactionId === transactionId);
     if (!deposit || deposit.status !== 'pending') {
-      console.log('Deposit not found or already processed:', transactionId);
       return res.status(400).json({ error: 'Invalid or already processed deposit' });
     }
-
     if (approved) {
       const amount = deposit.amount;
       let creditedAmount = amount;
@@ -426,23 +472,20 @@ router.post('/admin/verify-deposit', authenticateToken, async (req, res) => {
         const bonus = Math.min(amount * 0.05, 10);
         creditedAmount += bonus;
       }
-
       user.balance += creditedAmount;
       user.transactions = user.transactions || [];
       user.transactions.push({
         type: 'deposited',
         amount: creditedAmount,
         toFrom: 'manual-mobile-money',
-        fee: 0, // No gateway fee
+        fee: 0,
         date: new Date(),
       });
       deposit.status = 'approved';
     } else {
       deposit.status = 'rejected';
     }
-
     await user.save();
-    console.log('Deposit verified:', { userId, transactionId, approved });
     res.json({ message: `Deposit ${approved ? 'approved' : 'rejected'}` });
   } catch (error) {
     console.error('Verify Deposit Error:', error.message, error.stack);
@@ -469,11 +512,9 @@ router.post('/withdraw/request', authenticateToken, async (req, res) => {
     if (!user || !user.isActive) {
       return res.status(403).json({ error: 'User not found or inactive' });
     }
-
     if (!amount || amount <= 0 || amount > user.balance) {
       return res.status(400).json({ error: 'Invalid amount or insufficient balance' });
     }
-
     user.pendingWithdrawals = user.pendingWithdrawals || [];
     user.pendingWithdrawals.push({
       amount,
@@ -482,7 +523,18 @@ router.post('/withdraw/request', authenticateToken, async (req, res) => {
     });
     await user.save();
 
-    res.json({ message: 'Withdrawal requested. Processing soon.' });
+    // Notify admin of new pending withdrawal
+    const admin = await User.findOne({ role: 'admin' });
+    if (admin && admin.pushToken) {
+      await sendPushNotification(
+        admin.pushToken,
+        'New Withdrawal Request',
+        `Withdrawal of ${amount} ZMW from ${user.username} needs approval.`,
+        { userId: user._id, withdrawalIndex: user.pendingWithdrawals.length - 1 }
+      );
+    }
+
+    res.json({ message: 'Withdrawal requested. Awaiting approval.' });
   } catch (error) {
     console.error('Withdraw Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to request withdrawal' });
@@ -841,6 +893,9 @@ router.put('/user/toggle-active', authenticateToken, async (req, res) => {
 
 // GET /api/users (Admin only)
 router.get('/users', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
   const { page = 1, limit = 10, search = '' } = req.query;
   const skip = (page - 1) * limit;
   const query = search ? {
@@ -951,6 +1006,52 @@ router.get('/admin/stats', async (req, res) => {
   } catch (error) {
     console.error('Stats Error:', error);
     res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+});
+
+router.get('/admin/pending', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const pendingUsers = await User.countDocuments({ kycStatus: 'pending' });
+    const pendingDeposits = await User.aggregate([
+      { $unwind: '$pendingDeposits' },
+      { $match: { 'pendingDeposits.status': 'pending' } },
+      { $count: 'count' },
+    ]).then(r => r[0]?.count || 0);
+    const pendingWithdrawals = await User.aggregate([
+      { $unwind: '$pendingWithdrawals' },
+      { $match: { 'pendingWithdrawals.status': 'pending' } },
+      { $count: 'count' },
+    ]).then(r => r[0]?.count || 0);
+    res.json({ users: pendingUsers, deposits: pendingDeposits, withdrawals: pendingWithdrawals });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch pending stats' });
+  }
+});
+
+router.get('/api/admin/pending-deposits', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const users = await User.find({ 'pendingDeposits.status': 'pending' });
+    const deposits = users.flatMap(user => user.pendingDeposits
+      .filter(d => d.status === 'pending')
+      .map(d => ({ userId: user._id, user: { username: user.username }, ...d.toObject() })));
+    res.json(deposits);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch pending deposits' });
+  }
+});
+
+router.get('/api/admin/pending-withdrawals', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const users = await User.find({ 'pendingWithdrawals.status': 'pending' });
+    const withdrawals = users.flatMap((user, uIndex) => user.pendingWithdrawals
+      .map((w, wIndex) => ({ userId: user._id, user: { username: user.username }, ...w.toObject(), index: wIndex }))
+      .filter(w => w.status === 'pending'));
+    res.json(withdrawals);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch pending withdrawals' });
   }
 });
 
