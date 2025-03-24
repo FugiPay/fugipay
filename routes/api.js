@@ -1038,7 +1038,7 @@ router.get('/api/admin/pending-deposits', authenticateToken, async (req, res) =>
       .map(d => ({ userId: user._id, user: { username: user.username }, ...d.toObject() })));
     res.json(deposits);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch pending deposits' });
+    res.status(500).json({ error: 'Failed to fetch pending deposits' }); 
   }
 });
 

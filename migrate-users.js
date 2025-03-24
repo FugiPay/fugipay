@@ -27,17 +27,6 @@ async function migrateUsers() {
     // Step 2: Update each user individually
     for (const user of users) {
       let updated = false;
-      const originalPhoneNumber = user.phoneNumber;
-      let newPhoneNumber = originalPhoneNumber;
-
-      // Normalize phoneNumber to +260 format
-      if (!newPhoneNumber.startsWith('+260')) {
-        newPhoneNumber = '+260' + newPhoneNumber.replace(/^0/, '');
-        if (newPhoneNumber !== originalPhoneNumber) {
-          user.phoneNumber = newPhoneNumber;
-          updated = true;
-        }
-      }
 
       // Reset balance to 0 if it’s not already 0
       if (user.balance !== 0) {
@@ -49,7 +38,7 @@ async function migrateUsers() {
       if (updated) {
         try {
           await user.save();
-          console.log(`Migrated user: ${user.username} (phoneNumber: ${user.phoneNumber}, balance: ${user.balance})`);
+          console.log(`Migrated user: ${user.username} (balance: ${user.balance})`);
         } catch (saveError) {
           console.error(`Failed to save user ${user.username}:`, saveError.message);
         }
