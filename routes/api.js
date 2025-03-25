@@ -223,7 +223,12 @@ router.post('/login', async (req, res) => {
       JWT_SECRET,
       { expiresIn: '24h' }
     );
-    res.json({ token, username: user.username, role: user.role });
+    res.json({
+      token,
+      username: user.username,
+      role: user.role,
+      kycStatus: user.kycStatus, // Add kycStatus to response
+    });
   } catch (error) {
     console.error('Login Error:', error);
     res.status(500).json({ error: 'Server error during login' });
