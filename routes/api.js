@@ -98,6 +98,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   const { name, phoneNumber, email, password } = req.body;
   const idImage = req.file;
 
+  console.time('Register Total');
   if (!name || !phoneNumber || !email || !password || !idImage) {
     return res.status(400).json({ error: 'All fields and ID image are required' });
   }
@@ -111,11 +112,14 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   }
 
   try {
+    console.time('Check Existing User');
     const existingUser = await User.findOne({ $or: [{ email }, { phoneNumber }] });
+    console.timeEnd('Check Existing User');
     if (existingUser) {
       return res.status(400).json({ error: 'Email or phone number already exists' });
     }
 
+    console.time('S3 Upload');
     const fileStream = fs.createReadStream(idImage.path);
     const s3Key = `id-images/${Date.now()}-${idImage.originalname}`;
     const params = {
@@ -128,7 +132,9 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
     const s3Response = await s3.upload(params).promise();
     const idImageUrl = s3Response.Location;
     fs.unlinkSync(idImage.path);
+    console.timeEnd('S3 Upload');
 
+    console.time('User Creation');
     const hashedPassword = await bcrypt.hash(password, 10);
     const username = email.split('@')[0];
     const user = new User({
@@ -145,9 +151,11 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
       isActive: false,
     });
     await user.save();
+    console.timeEnd('User Creation');
 
     const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
 
+    console.time('Push Notification');
     if (axios) {
       const admin = await User.findOne({ role: 'admin' });
       if (admin && admin.pushToken) {
@@ -159,12 +167,14 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
         );
       }
     }
+    console.timeEnd('Push Notification');
 
+    console.timeEnd('Register Total');
     res.status(201).json({
       token,
       username: user.username,
       role: user.role,
-      kycStatus: user.kycStatus, // Include for consistency
+      kycStatus: user.kycStatus,
     });
   } catch (error) {
     console.error('Register Error:', error.message, error.stack);
