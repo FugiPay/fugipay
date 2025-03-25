@@ -103,7 +103,11 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   }
 
   if (!phoneNumber.match(/^\+260(9[5678]|7[34679])\d{7}$/)) {
-    return res.status(400).json({ error: 'Invalid Zambian phone number (e.g., +260 971 234 567)' });
+    return res.status(400).json({ error: 'Invalid Zambian phone number (e.g., +260971234567)' });
+  }
+
+  if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
+    return res.status(400).json({ error: 'Invalid email format' });
   }
 
   try {
@@ -112,18 +116,17 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
       return res.status(400).json({ error: 'Email or phone number already exists' });
     }
 
-    const fileContent = fs.readFileSync(idImage.path);
+    const fileStream = fs.createReadStream(idImage.path);
     const s3Key = `id-images/${Date.now()}-${idImage.originalname}`;
     const params = {
       Bucket: S3_BUCKET,
       Key: s3Key,
-      Body: fileContent,
+      Body: fileStream,
       ContentType: idImage.mimetype,
       ACL: 'private',
     };
     const s3Response = await s3.upload(params).promise();
     const idImageUrl = s3Response.Location;
-
     fs.unlinkSync(idImage.path);
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -143,31 +146,29 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
     });
     await user.save();
 
-    const token = jwt.sign(
-      { phoneNumber: user.phoneNumber, role: user.role },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
 
-    // Notify admin of new pending user
-    const admin = await User.findOne({ role: 'admin' });
-    if (admin && admin.pushToken) {
-      await sendPushNotification(
-        admin.pushToken,
-        'New User Registration',
-        `User ${username} needs KYC approval.`,
-        { userId: user._id }
-      );
+    if (axios) {
+      const admin = await User.findOne({ role: 'admin' });
+      if (admin && admin.pushToken) {
+        await sendPushNotification(
+          admin.pushToken,
+          'New User Registration',
+          `User ${username} needs KYC approval.`,
+          { userId: user._id }
+        );
+      }
     }
 
     res.status(201).json({
       token,
       username: user.username,
       role: user.role,
+      kycStatus: user.kycStatus, // Include for consistency
     });
   } catch (error) {
-    console.error('Register Error:', error);
-    res.status(500).json({ error: 'Server error during registration' });
+    console.error('Register Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error during registration', details: error.message });
   }
 });
 
