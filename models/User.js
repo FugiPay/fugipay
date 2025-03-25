@@ -50,6 +50,7 @@ const userSchema = new mongoose.Schema({
       status: { type: String, enum: ['pending', 'completed', 'rejected'], default: 'pending' },
     },
   ],
+  lastLogin: { type: Date, default: null }, // Added for tracking first login
 });
 
 module.exports = mongoose.model('User', userSchema);

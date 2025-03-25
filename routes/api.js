@@ -208,44 +208,63 @@ router.post('/save-push-token', authenticateToken, async (req, res) => {
 // POST /api/login
 router.post('/login', async (req, res) => {
   const { identifier, password } = req.body;
+
+  // Input validation
   if (!identifier || !password) {
     return res.status(400).json({ error: 'Username or phone number and password are required' });
   }
-  if (!JWT_SECRET) {
+
+  // Check JWT_SECRET
+  if (!process.env.JWT_SECRET) {
     console.error('JWT_SECRET is not defined');
     return res.status(500).json({ error: 'Server configuration error' });
   }
+
   try {
-    const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
+    // Find user by username or phone number
+    const user = await User.findOne({
+      $or: [{ username: identifier }, { phoneNumber: identifier }],
+    });
     if (!user) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
+
+    // Verify password
     let isMatch;
     if (user.password.startsWith('$2')) {
       isMatch = await bcrypt.compare(password, user.password);
     } else {
-      isMatch = password === user.password; // Plaintext fallback
+      isMatch = password === user.password; // Plaintext fallback (for legacy users)
     }
     if (!isMatch) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
+
+    // Generate JWT
     const token = jwt.sign(
       { phoneNumber: user.phoneNumber, role: user.role },
-      JWT_SECRET,
+      process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
-    res.json({
+
+    // Determine if first login and update lastLogin
+    const isFirstLogin = !user.lastLogin; // True if null
+    user.lastLogin = new Date();
+    await user.save();
+
+    // Send response
+    res.status(200).json({
       token,
       username: user.username,
       role: user.role,
-      kycStatus: user.kycStatus, // Add kycStatus to response
+      kycStatus: user.kycStatus,
+      isFirstLogin, // Include for frontend greeting
     });
   } catch (error) {
-    console.error('Login Error:', error);
-    res.status(500).json({ error: 'Server error during login' });
+    console.error('Login Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error during login', details: error.message });
   }
 });
-
 // POST /api/forgot-password
 router.post('/forgot-password', async (req, res) => {
   const { identifier } = req.body;
