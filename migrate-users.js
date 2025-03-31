@@ -3,7 +3,7 @@ const User = require('./models/User'); // Adjust path to your User model
 require('dotenv').config();
 
 // MongoDB connection string from .env
-const MONGODB_URI = process.env.MONGO_URI;
+const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
 
 async function connectToDatabase() {
   try {
@@ -20,36 +20,30 @@ async function connectToDatabase() {
 
 async function migrateUsers() {
   try {
-    // Step 1: Find all users
-    const users = await User.find({});
-    console.log(`Found ${users.length} users to migrate`);
+    // Step 1: Find all users without a pin
+    const users = await User.find({ pin: { $exists: false } });
+    console.log(`Found ${users.length} users without a PIN to migrate`);
 
-    // Step 2: Update each user individually
+    if (users.length === 0) {
+      console.log('No users need migration. All users already have a PIN.');
+      return;
+    }
+
+    // Step 2: Update each user with a default PIN
+    const defaultPin = '1234'; // Default PIN
     for (const user of users) {
-      let updated = false;
-
-      // Reset balance to 0 if it’s not already 0
-      if (user.balance !== 0) {
-        user.balance = 0;
-        updated = true;
-      }
-
-      // Save the user if any changes were made
-      if (updated) {
-        try {
-          await user.save();
-          console.log(`Migrated user: ${user.username} (balance: ${user.balance})`);
-        } catch (saveError) {
-          console.error(`Failed to save user ${user.username}:`, saveError.message);
-        }
-      } else {
-        console.log(`No changes needed for user: ${user.username}`);
+      user.pin = defaultPin;
+      try {
+        await user.save();
+        console.log(`Added PIN to user: ${user.username} (PIN: ${user.pin})`);
+      } catch (saveError) {
+        console.error(`Failed to save user ${user.username}:`, saveError.message);
       }
     }
 
     // Step 3: Verify counts
-    const totalUpdated = users.filter(user => user.isModified()).length;
-    console.log(`Migration complete. Processed ${users.length} users, updated ${totalUpdated}.`);
+    const updatedUsers = await User.find({ pin: defaultPin });
+    console.log(`Migration complete. Processed ${users.length} users, set PIN to "${defaultPin}" for ${updatedUsers.length}.`);
   } catch (error) {
     console.error('Migration error:', error);
   } finally {
