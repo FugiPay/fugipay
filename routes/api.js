@@ -1126,6 +1126,7 @@ router.get('/user', authenticateToken, async (req, res) => {
 });
 
 // POST /api/transfer (ZambiaCoin: ZMC transfer)
+// POST /api/transfer
 router.post('/transfer', authenticateToken, async (req, res) => {
   const { sender, receiver, amount, pin } = req.body;
   if (!sender || !receiver || !amount || !pin) {
@@ -1137,11 +1138,13 @@ router.post('/transfer', authenticateToken, async (req, res) => {
     if (!senderUser || senderUser.username !== req.user.username) {
       return res.status(403).json({ error: 'Unauthorized sender' });
     }
+    if (!senderUser.isActive) return res.status(403).json({ error: 'Sender account is inactive' });
     if (senderUser.pin !== pin) return res.status(400).json({ error: 'Invalid PIN' });
     if (senderUser.zambiaCoinBalance < amount) return res.status(400).json({ error: 'Insufficient ZMC balance' });
 
     const receiverUser = await User.findOne({ username: receiver });
     if (!receiverUser) return res.status(400).json({ error: 'Receiver not found' });
+    if (!receiverUser.isActive) return res.status(403).json({ error: 'Receiver account is inactive' });
 
     const paymentAmount = parseFloat(amount);
     if (isNaN(paymentAmount) || paymentAmount <= 0) {
@@ -1150,7 +1153,7 @@ router.post('/transfer', authenticateToken, async (req, res) => {
 
     senderUser.zambiaCoinBalance -= paymentAmount;
     receiverUser.zambiaCoinBalance += paymentAmount;
-    const txId = crypto.randomBytes(16).toString('hex'); // Unique transaction ID
+    const txId = crypto.randomBytes(16).toString('hex');
     senderUser.transactions.push({ type: 'zmc-sent', amount: paymentAmount, toFrom: receiver, date: new Date(), _id: txId });
     receiverUser.transactions.push({ type: 'zmc-received', amount: paymentAmount, toFrom: sender, date: new Date() });
 
