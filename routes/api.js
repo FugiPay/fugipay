@@ -1224,4 +1224,18 @@ router.post('/airdrop', authenticateToken, async (req, res) => {
   }
 });
 
+router.post('/credit-zmc', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { toUsername, amount } = req.body;
+  const user = await User.findOne({ username: toUsername });
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
+  const creditAmount = parseFloat(amount);
+  if (isNaN(creditAmount) || creditAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+  user.zambiaCoinBalance += creditAmount;
+  user.transactions.push({ type: 'zmc-received', amount: creditAmount, toFrom: 'admin', date: new Date() });
+  await user.save();
+  res.json({ message: 'ZMC credited successfully' });
+});
+
 module.exports = router;
