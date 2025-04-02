@@ -17,7 +17,8 @@ const userSchema = new mongoose.Schema({
   role: { type: String, default: 'user', enum: ['user', 'admin'] },
   balance: { type: Number, default: 0 }, // Zangena ZMW balance
   zambiaCoinBalance: { type: Number, default: 0 }, // ZMC balance
-  trustScore: { type: Number, default: 0, min: 0, max: 100 },
+  trustScore: { type: Number, default: 0, min: 0, max: 5 }, // Adjusted to 0-5 scale
+  ratingCount: { type: Number, default: 0 }, // Added to track number of ratings
   transactions: [
     {
       _id: { type: String }, // Explicitly define as String for custom IDs
@@ -35,7 +36,7 @@ const userSchema = new mongoose.Schema({
       originalAmount: { type: Number },
       sendingFee: { type: Number },
       receivingFee: { type: Number },
-      trustRating: { type: Number, min: 1, max: 5 },
+      trustRating: { type: Number, min: 1, max: 5 }, // Optional: store rating per transaction
     },
   ],
   kycStatus: { type: String, default: 'pending', enum: ['pending', 'verified', 'rejected'] },

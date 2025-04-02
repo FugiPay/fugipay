@@ -1189,38 +1189,52 @@ router.post('/generate-qr', authenticateToken, async (req, res) => {
 // POST /api/rate (ZambiaCoin: Rate a transaction)
 router.post('/rate', authenticateToken, async (req, res) => {
   const { transactionId, rating, raterUsername } = req.body;
+
   if (!transactionId || !rating || !raterUsername) {
     return res.status(400).json({ error: 'Transaction ID, rating, and rater username are required' });
   }
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ error: 'Rating must be an integer between 1 and 5' });
+  }
 
   try {
-    const transactionUser = await User.findOne({ 'transactions._id': transactionId });
-    if (!transactionUser) return res.status(404).json({ error: 'Transaction not found' });
-
-    const tx = transactionUser.transactions.id(transactionId);
-    if (!['zmc-sent', 'zmc-received'].includes(tx.type)) {
-      return res.status(400).json({ error: 'Invalid transaction type' });
-    }
-    if (tx.trustRating) {
-      return res.status(400).json({ error: 'Transaction already rated' });
+    // Ensure the rater is authenticated
+    if (raterUsername !== req.user.username) {
+      return res.status(403).json({ error: 'Unauthorized rater' });
     }
 
-    tx.trustRating = rating;
+    // Find the sender (rater) and verify the transaction
+    const senderUser = await User.findOne({ username: raterUsername });
+    if (!senderUser) return res.status(404).json({ error: 'Rater not found' });
 
-    const otherParty = tx.type === 'zmc-sent' ? tx.toFrom : raterUsername;
-    const ratedUser = await User.findOne({ username: otherParty });
-    if (!ratedUser) return res.status(404).json({ error: 'Rated user not found' });
+    const transaction = senderUser.transactions.find(tx => tx._id === transactionId && tx.type === 'zmc-sent');
+    if (!transaction) {
+      return res.status(404).json({ error: 'Transaction not found or not sent by this user' });
+    }
 
-    const ratings = ratedUser.transactions
-      .filter(t => t.trustRating && ['zmc-sent', 'zmc-received'].includes(t.type))
-      .map(t => t.trustRating);
-    ratedUser.trustScore = ratings.length ? (ratings.reduce((a, b) => a + b, 0) / ratings.length) * 20 : 0;
+    // Find the receiver to update their trust score
+    const receiverUser = await User.findOne({ username: transaction.toFrom });
+    if (!receiverUser) return res.status(404).json({ error: 'Receiver not found' });
 
-    await Promise.all([transactionUser.save(), ratedUser.save()]);
-    res.json({ message: 'Rating submitted', trustScore: ratedUser.trustScore });
+    // Update the transaction with the rating (optional)
+    transaction.trustRating = rating;
+
+    // Calculate new trust score on a 0-100 scale
+    const newRatingCount = (receiverUser.ratingCount || 0) + 1;
+    const currentAverage = receiverUser.trustScore ? (receiverUser.trustScore / 100) * 5 : 0; // Convert back to 1-5 scale
+    const newAverage = ((currentAverage * (newRatingCount - 1)) + rating) / newRatingCount;
+    const newTrustScore = (newAverage / 5) * 100; // Scale to 0-100
+
+    receiverUser.trustScore = newTrustScore;
+    receiverUser.ratingCount = newRatingCount;
+
+    // Save both users
+    await Promise.all([senderUser.save(), receiverUser.save()]);
+
+    res.json({ message: 'Rating submitted successfully', trustScore: newTrustScore });
   } catch (error) {
-    console.error('ZMC Rate Error:', error);
-    res.status(500).json({ error: 'Rating failed' });
+    console.error('Rating Error:', error);
+    res.status(500).json({ error: 'Failed to submit rating' });
   }
 });
 
