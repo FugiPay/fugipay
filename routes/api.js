@@ -1165,6 +1165,27 @@ router.post('/transfer', authenticateToken, async (req, res) => {
   }
 });
 
+// POST /api/generate-qr (new endpoint)
+router.post('/generate-qr', authenticateToken, async (req, res) => {
+  const { pin } = req.body;
+  if (!pin || pin.length !== 4 || !/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'A valid 4-digit PIN is required' });
+  }
+
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.isActive) return res.status(403).json({ error: 'Account is inactive' });
+    if (user.pin !== pin) return res.status(400).json({ error: 'Invalid PIN' });
+
+    // PIN is valid; frontend will generate the QR payload
+    res.json({ message: 'PIN validated successfully' });
+  } catch (error) {
+    console.error('QR Generation Error:', error);
+    res.status(500).json({ error: 'Failed to validate PIN' });
+  }
+});
+
 // POST /api/rate (ZambiaCoin: Rate a transaction)
 router.post('/rate', authenticateToken, async (req, res) => {
   const { transactionId, rating, raterUsername } = req.body;
