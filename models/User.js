@@ -12,16 +12,16 @@ const userSchema = new mongoose.Schema({
   },
   email: { type: String, required: true, unique: true, index: true },
   password: { type: String, required: true, minlength: 6 }, // Hashed
-  pin: { type: String, required: true, minlength: 4, maxlength: 4 }, // New 4-digit PIN
+  pin: { type: String, required: true, minlength: 4, maxlength: 4 }, // 4-digit PIN
   idImageUrl: { type: String },
   role: { type: String, default: 'user', enum: ['user', 'admin'] },
   balance: { type: Number, default: 0 }, // Zangena ZMW balance
   zambiaCoinBalance: { type: Number, default: 0 }, // ZMC balance
-  trustScore: { type: Number, default: 0, min: 0, max: 5 }, // Adjusted to 0-5 scale
-  ratingCount: { type: Number, default: 0 }, // Added to track number of ratings
+  trustScore: { type: Number, default: 0, min: 0, max: 100 }, // Updated to 0-100 scale
+  ratingCount: { type: Number, default: 0 }, // Tracks number of ratings
   transactions: [
     {
-      _id: { type: String }, // Explicitly define as String for custom IDs
+      _id: { type: String }, // Custom transaction ID
       type: {
         type: String,
         enum: [
@@ -36,7 +36,7 @@ const userSchema = new mongoose.Schema({
       originalAmount: { type: Number },
       sendingFee: { type: Number },
       receivingFee: { type: Number },
-      trustRating: { type: Number, min: 1, max: 5 }, // Optional: store rating per transaction
+      trustRating: { type: Number, min: 1, max: 5 }, // Rating per transaction remains 1-5
     },
   ],
   kycStatus: { type: String, default: 'pending', enum: ['pending', 'verified', 'rejected'] },

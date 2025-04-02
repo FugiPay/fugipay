@@ -237,27 +237,27 @@ router.post('/login', async (req, res) => {
     if (user.password.startsWith('$2')) {
       isMatch = await bcrypt.compare(password, user.password);
     } else {
-      isMatch = password === user.password; // Plaintext fallback
+      isMatch = password === user.password; // Plaintext fallback (consider removing)
     }
     if (!isMatch) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
 
     const token = jwt.sign(
-      { phoneNumber: user.phoneNumber, role: user.role, username: user.username }, // Added username for ZambiaCoin
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
 
     const isFirstLogin = !user.lastLogin;
     user.lastLogin = new Date();
-    await user.save();
+    await user.save(); // Now works with trustScore up to 100
 
     res.status(200).json({
       token,
       username: user.username,
-      role: user.role,
-      kycStatus: user.kycStatus,
+      role: user.role || 'user', // Default to 'user' if undefined
+      kycStatus: user.kycStatus || 'pending',
       isFirstLogin,
     });
   } catch (error) {
@@ -1198,12 +1198,12 @@ router.post('/rate', authenticateToken, async (req, res) => {
   }
 
   try {
-    // Ensure the rater is authenticated
+    // Verify rater authentication
     if (raterUsername !== req.user.username) {
       return res.status(403).json({ error: 'Unauthorized rater' });
     }
 
-    // Find the sender (rater) and verify the transaction
+    // Find sender (rater) and transaction
     const senderUser = await User.findOne({ username: raterUsername });
     if (!senderUser) return res.status(404).json({ error: 'Rater not found' });
 
@@ -1212,18 +1212,18 @@ router.post('/rate', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Transaction not found or not sent by this user' });
     }
 
-    // Find the receiver to update their trust score
+    // Find receiver to update trust score
     const receiverUser = await User.findOne({ username: transaction.toFrom });
     if (!receiverUser) return res.status(404).json({ error: 'Receiver not found' });
 
-    // Update the transaction with the rating (optional)
+    // Store rating in transaction (optional)
     transaction.trustRating = rating;
 
-    // Calculate new trust score on a 0-100 scale
+    // Calculate new trust score (0-100 scale)
     const newRatingCount = (receiverUser.ratingCount || 0) + 1;
-    const currentAverage = receiverUser.trustScore ? (receiverUser.trustScore / 100) * 5 : 0; // Convert back to 1-5 scale
+    const currentAverage = receiverUser.trustScore ? (receiverUser.trustScore / 100) * 5 : 0; // Convert 0-100 to 0-5
     const newAverage = ((currentAverage * (newRatingCount - 1)) + rating) / newRatingCount;
-    const newTrustScore = (newAverage / 5) * 100; // Scale to 0-100
+    const newTrustScore = Math.round((newAverage / 5) * 100); // Scale to 0-100, rounded
 
     receiverUser.trustScore = newTrustScore;
     receiverUser.ratingCount = newRatingCount;
@@ -1231,10 +1231,14 @@ router.post('/rate', authenticateToken, async (req, res) => {
     // Save both users
     await Promise.all([senderUser.save(), receiverUser.save()]);
 
-    res.json({ message: 'Rating submitted successfully', trustScore: newTrustScore });
+    res.json({ 
+      message: 'Rating submitted successfully', 
+      trustScore: newTrustScore,
+      ratingCount: newRatingCount 
+    });
   } catch (error) {
-    console.error('Rating Error:', error);
-    res.status(500).json({ error: 'Failed to submit rating' });
+    console.error('Rating Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to submit rating', details: error.message });
   }
 });
 
