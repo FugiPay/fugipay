@@ -37,7 +37,10 @@ app.get('/health', (req, res) => {
 });
 
 // Routes
-app.use('/api', require('./routes/api'));
+const apiRoutes = require('./routes/api'); // Assuming this exists
+const businessRoutes = require('./routes/business'); // Import business routes
+
+app.use('/api', apiRoutes);
 app.use('/api/business', businessRoutes); // Mount business routes
 
 // MongoDB Connection
