@@ -13,69 +13,84 @@ const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
 // Business Signup
 router.post('/signup', async (req, res) => {
   const { businessId, name, ownerUsername, pin } = req.body;
-  try {
-    if (!businessId || !name || !ownerUsername || !pin) {
-      return res.status(400).json({ error: 'All fields are required' });
-    }
-    if (!/^\d{4}$/.test(pin)) {
-      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-    }
 
-    const existingBusiness = await Business.findOne({ businessId });
+  if (!businessId || !name || !ownerUsername || !pin) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+
+  // Validate TPIN (10 digits)
+  if (!/^\d{10}$/.test(businessId)) {
+    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+  }
+
+  // Validate PIN (4 digits)
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
+
+  try {
+    // Check for existing TPIN or ownerUsername
+    const existingBusiness = await Business.findOne({ $or: [{ businessId }, { ownerUsername }] });
     if (existingBusiness) {
-      return res.status(400).json({ error: 'Business ID already exists' });
-    }
-    const owner = await User.findOne({ username: ownerUsername });
-    if (!owner) {
-      return res.status(400).json({ error: 'Owner username not found' });
+      return res.status(409).json({ error: 'Business ID (TPIN) or Owner Username already registered' });
     }
 
     const hashedPin = await bcrypt.hash(pin, 10);
-    const qrCode = JSON.stringify({ type: 'business_payment', businessId, businessName: name });
     const business = new Business({
-      businessId,
+      businessId, // TPIN
       name,
-      owner: ownerUsername,
+      ownerUsername,
       pin: hashedPin,
       balance: 0,
-      qrCode,
       transactions: [],
       pendingDeposits: [],
       pendingWithdrawals: [],
     });
+
+    const token = jwt.sign({ id: business._id, role: 'business' }, process.env.JWT_SECRET, { expiresIn: '30d' });
     await business.save();
 
-    const token = jwt.sign({ businessId, type: 'business' }, JWT_SECRET, { expiresIn: '24h' });
-    res.status(201).json({ token, business: { businessId, name } });
+    res.json({ token, business: { businessId: business.businessId, name: business.name } });
   } catch (error) {
-    console.error('Business Sign-Up Error:', error.message);
-    res.status(500).json({ error: 'Server error during sign-up' });
+    console.error('Business Signup Error:', error);
+    res.status(500).json({ error: 'Server error during signup' });
   }
 });
 
 // Business Signin
 router.post('/signin', async (req, res) => {
   const { businessId, pin } = req.body;
-  try {
-    if (!businessId || !pin) {
-      return res.status(400).json({ error: 'Business ID and PIN are required' });
-    }
 
+  if (!businessId || !pin) {
+    return res.status(400).json({ error: 'Business ID and PIN are required' });
+  }
+
+  // Validate TPIN format
+  if (!/^\d{10}$/.test(businessId)) {
+    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+  }
+
+  // Validate PIN format
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
+
+  try {
     const business = await Business.findOne({ businessId });
     if (!business) {
-      return res.status(400).json({ error: 'Invalid Business ID or PIN' });
+      return res.status(404).json({ error: 'Business not found' });
     }
 
     const isMatch = await bcrypt.compare(pin, business.pin);
     if (!isMatch) {
-      return res.status(400).json({ error: 'Invalid Business ID or PIN' });
+      return res.status(401).json({ error: 'Invalid PIN' });
     }
 
-    const token = jwt.sign({ businessId, type: 'business' }, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, business: { businessId, name: business.name } });
+    const token = jwt.sign({ id: business._id, role: 'business' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+    res.json({ token, business: { businessId: business.businessId, name: business.name } });
   } catch (error) {
-    console.error('Business Sign-In Error:', error.message);
-    res.status(500).json({ error: 'Server error during sign-in' });
+    console.error('Business Signin Error:', error);
+    res.status(500).json({ error: 'Server error during signin' });
   }
 });
 
