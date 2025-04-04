@@ -38,6 +38,7 @@ app.get('/health', (req, res) => {
 
 // Routes
 app.use('/api', require('./routes/api'));
+app.use('/api/business', businessRoutes); // Mount business routes
 
 // MongoDB Connection
 const mongoUri = process.env.MONGO_URI;

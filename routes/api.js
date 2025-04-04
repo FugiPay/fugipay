@@ -1034,17 +1034,64 @@ router.get('/transactions/:username', authenticateToken, async (req, res) => {
 // GET /api/admin/stats (Unchanged)
 router.get('/admin/stats', async (req, res) => {
   try {
+    // User Stats
     const totalUsers = await User.countDocuments();
-    const totalBalance = await User.aggregate([
+    const totalUserBalance = await User.aggregate([
       { $group: { _id: null, total: { $sum: '$balance' } } },
     ]).then(result => result[0]?.total || 0);
-    const recentTxCount = await User.aggregate([
+    const recentUserTxCount = await User.aggregate([
       { $unwind: '$transactions' },
       { $match: { 'transactions.date': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } },
       { $count: 'recentTxCount' },
     ]).then(result => result[0]?.recentTxCount || 0);
+    const pendingUserDepositsCount = await User.aggregate([
+      { $unwind: '$pendingDeposits' },
+      { $match: { 'pendingDeposits.status': 'pending' } },
+      { $count: 'pendingDepositsCount' },
+    ]).then(result => result[0]?.pendingDepositsCount || 0);
+    const pendingUserWithdrawalsCount = await User.aggregate([
+      { $unwind: '$pendingWithdrawals' },
+      { $match: { 'pendingWithdrawals.status': 'pending' } },
+      { $count: 'pendingWithdrawalsCount' },
+    ]).then(result => result[0]?.pendingWithdrawalsCount || 0);
 
-    res.json({ totalUsers, totalBalance, recentTxCount });
+    // Business Stats
+    const totalBusinesses = await Business.countDocuments();
+    const totalBusinessBalance = await Business.aggregate([
+      { $group: { _id: null, total: { $sum: '$balance' } } },
+    ]).then(result => result[0]?.total || 0);
+    const recentBusinessTxCount = await Business.aggregate([
+      { $unwind: '$transactions' },
+      { $match: { 'transactions.date': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } },
+      { $count: 'recentTxCount' },
+    ]).then(result => result[0]?.recentTxCount || 0);
+    const pendingBusinessDepositsCount = await Business.aggregate([
+      { $unwind: '$pendingDeposits' },
+      { $match: { 'pendingDeposits.status': 'pending' } }, // Assuming status field exists or is added
+      { $count: 'pendingDepositsCount' },
+    ]).then(result => result[0]?.pendingDepositsCount || 0);
+    const pendingBusinessWithdrawalsCount = await Business.aggregate([
+      { $unwind: '$pendingWithdrawals' },
+      { $match: { 'pendingWithdrawals.status': 'pending' } },
+      { $count: 'pendingWithdrawalsCount' },
+    ]).then(result => result[0]?.pendingWithdrawalsCount || 0);
+
+    // Combined Stats
+    const totalBalance = totalUserBalance + totalBusinessBalance;
+    const recentTxCount = recentUserTxCount + recentBusinessTxCount;
+
+    res.json({
+      totalUsers,
+      totalUserBalance,
+      pendingUserDepositsCount,
+      pendingUserWithdrawalsCount,
+      totalBusinesses,
+      totalBusinessBalance,
+      pendingBusinessDepositsCount,
+      pendingBusinessWithdrawalsCount,
+      totalBalance,
+      recentTxCount,
+    });
   } catch (error) {
     console.error('Stats Error:', error);
     res.status(500).json({ error: 'Failed to fetch stats' });
