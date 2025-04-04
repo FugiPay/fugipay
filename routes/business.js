@@ -18,18 +18,15 @@ router.post('/signup', async (req, res) => {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
-  // Validate TPIN (10 digits)
   if (!/^\d{10}$/.test(businessId)) {
     return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
   }
 
-  // Validate PIN (4 digits)
   if (!/^\d{4}$/.test(pin)) {
     return res.status(400).json({ error: 'PIN must be a 4-digit number' });
   }
 
   try {
-    // Check for existing TPIN or ownerUsername
     const existingBusiness = await Business.findOne({ $or: [{ businessId }, { ownerUsername }] });
     if (existingBusiness) {
       return res.status(409).json({ error: 'Business ID (TPIN) or Owner Username already registered' });
@@ -45,9 +42,10 @@ router.post('/signup', async (req, res) => {
       transactions: [],
       pendingDeposits: [],
       pendingWithdrawals: [],
+      qrCode: JSON.stringify({ type: 'business_payment', businessId, businessName: name }), // Initial QR code
     });
 
-    const token = jwt.sign({ id: business._id, role: 'business' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+    const token = jwt.sign({ id: business._id, role: 'business' }, JWT_SECRET, { expiresIn: '30d' });
     await business.save();
 
     res.json({ token, business: { businessId: business.businessId, name: business.name } });
@@ -65,12 +63,10 @@ router.post('/signin', async (req, res) => {
     return res.status(400).json({ error: 'Business ID and PIN are required' });
   }
 
-  // Validate TPIN format
   if (!/^\d{10}$/.test(businessId)) {
     return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
   }
 
-  // Validate PIN format
   if (!/^\d{4}$/.test(pin)) {
     return res.status(400).json({ error: 'PIN must be a 4-digit number' });
   }
@@ -86,7 +82,7 @@ router.post('/signin', async (req, res) => {
       return res.status(401).json({ error: 'Invalid PIN' });
     }
 
-    const token = jwt.sign({ id: business._id, role: 'business' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+    const token = jwt.sign({ id: business._id, role: 'business' }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ token, business: { businessId: business.businessId, name: business.name } });
   } catch (error) {
     console.error('Business Signin Error:', error);
@@ -99,16 +95,20 @@ router.get('/:businessId', authenticateToken, async (req, res) => {
   try {
     const business = await Business.findOne({ businessId: req.params.businessId });
     if (!business) return res.status(404).json({ error: 'Business not found' });
-    if (req.user.businessId !== business.businessId && req.user.role !== 'admin') {
+
+    // Authorization: Allow business owner or admin
+    if (req.user.role !== 'admin' && req.user.id !== business._id.toString()) {
       return res.status(403).json({ error: 'Unauthorized' });
     }
+
     res.json({
       businessId: business.businessId,
       name: business.name,
       balance: business.balance,
       qrCode: business.qrCode,
       transactions: business.transactions,
-      pendingWithdrawals: business.pendingWithdrawals, // Added for BusinessHome
+      pendingWithdrawals: business.pendingWithdrawals,
+      pendingDeposits: business.pendingDeposits,
     });
   } catch (error) {
     console.error('Business Fetch Error:', error);
@@ -119,18 +119,22 @@ router.get('/:businessId', authenticateToken, async (req, res) => {
 // Regenerate QR Code
 router.post('/regenerate-qr', authenticateToken, async (req, res) => {
   const { businessId } = req.body;
+
+  if (!businessId) return res.status(400).json({ error: 'Business ID is required' });
+
   try {
     const business = await Business.findOne({ businessId });
-    if (!business || business.businessId !== req.user.businessId) {
+    if (!business || business._id.toString() !== req.user.id) {
       return res.status(403).json({ error: 'Unauthorized' });
     }
+
     const qrCode = JSON.stringify({ type: 'business_payment', businessId, businessName: business.name });
     business.qrCode = qrCode;
     await business.save();
     res.json({ qrCode });
   } catch (error) {
     console.error('QR Regeneration Error:', error);
-    res.status(500).json({ error: 'Failed to generate QR' });
+    res.status(500).json({ error: 'Failed to regenerate QR code' });
   }
 });
 
@@ -146,16 +150,18 @@ router.post('/transfer/business', authenticateToken, async (req, res) => {
     const user = await User.findOne({ username: sender });
     const business = await Business.findOne({ businessId });
     if (!user || !business) return res.status(404).json({ error: 'User or business not found' });
-    if (user.phoneNumber !== req.user.phoneNumber) return res.status(403).json({ error: 'Unauthorized sender' });
-    if (user.pin !== pin) return res.status(401).json({ error: 'Invalid PIN' });
+    if (user._id.toString() !== req.user.id) return res.status(403).json({ error: 'Unauthorized sender' });
+
+    const isPinMatch = await bcrypt.compare(pin, user.pin);
+    if (!isPinMatch) return res.status(401).json({ error: 'Invalid PIN' });
 
     const paymentAmount = parseFloat(amount);
     if (isNaN(paymentAmount) || paymentAmount <= 0) {
       return res.status(400).json({ error: 'Amount must be a positive number' });
     }
 
-    const sendingFee = require('../routes/index').getSendingFee(paymentAmount);
-    const receivingFee = require('../routes/index').getReceivingFee(paymentAmount);
+    const sendingFee = Math.max(paymentAmount * 0.01, 2); // 1% fee, minimum 2 ZMW
+    const receivingFee = Math.max(paymentAmount * 0.01, 2); // Same for receiver
     const totalSenderDeduction = paymentAmount + sendingFee;
 
     if (user.balance < totalSenderDeduction) {
@@ -220,7 +226,7 @@ router.post('/transfer/business', authenticateToken, async (req, res) => {
   }
 });
 
-// Business Deposit (Unchanged from your code)
+// Business Deposit
 router.post('/deposit', authenticateToken, async (req, res) => {
   const { businessId, amount, transactionId } = req.body;
 
@@ -230,15 +236,21 @@ router.post('/deposit', authenticateToken, async (req, res) => {
 
   try {
     const business = await Business.findOne({ businessId });
-    if (!business || business.businessId !== req.user.businessId) {
+    if (!business || business._id.toString() !== req.user.id) {
       return res.status(403).json({ error: 'Unauthorized or business not found' });
     }
+
     const paymentAmount = parseFloat(amount);
     if (isNaN(paymentAmount) || paymentAmount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
     }
 
-    business.pendingDeposits.push({ amount: paymentAmount, transactionId, date: new Date() });
+    business.pendingDeposits.push({
+      amount: paymentAmount,
+      transactionId,
+      date: new Date(),
+      status: 'pending',
+    });
     await business.save();
 
     const admin = await User.findOne({ role: 'admin' });
@@ -268,9 +280,10 @@ router.post('/withdrawal', authenticateToken, async (req, res) => {
 
   try {
     const business = await Business.findOne({ businessId });
-    if (!business || business.businessId !== req.user.businessId) {
+    if (!business || business._id.toString() !== req.user.id) {
       return res.status(403).json({ error: 'Unauthorized or business not found' });
     }
+
     const withdrawalAmount = parseFloat(amount);
     if (isNaN(withdrawalAmount) || withdrawalAmount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
@@ -287,7 +300,7 @@ router.post('/withdrawal', authenticateToken, async (req, res) => {
       amount: withdrawalAmount,
       fee: withdrawalFee,
       date: new Date(),
-      status: 'pending', // Explicitly set status
+      status: 'pending',
     });
     await business.save();
 
@@ -309,9 +322,9 @@ router.post('/withdrawal', authenticateToken, async (req, res) => {
       );
     }
 
-    res.json({ 
-      message: 'Withdrawal request submitted', 
-      withdrawalFee 
+    res.json({
+      message: 'Withdrawal request submitted',
+      withdrawalFee,
     });
   } catch (error) {
     console.error('Business Withdrawal Error:', error);
@@ -319,20 +332,29 @@ router.post('/withdrawal', authenticateToken, async (req, res) => {
   }
 });
 
-// Admin Verify Business Withdrawal
-router.post('/admin/verify-business-withdrawal', authenticateToken, async (req, res) => {
+// Admin Verify Business Withdrawal (Updated for BusinessWithdrawals.js)
+router.post('/verify-withdrawal', authenticateToken, async (req, res) => {
   const { businessId, withdrawalIndex, approved } = req.body;
+
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
 
+  if (!businessId || withdrawalIndex === undefined || approved === undefined) {
+    return res.status(400).json({ error: 'Business ID, withdrawal index, and approval status are required' });
+  }
+
   try {
-    const business = await Business.findOne({ businessId });
+    const business = await Business.findById(businessId); // Use _id instead of businessId for consistency
     if (!business) return res.status(404).json({ error: 'Business not found' });
 
+    if (withdrawalIndex >= business.pendingWithdrawals.length) {
+      return res.status(404).json({ error: 'Withdrawal not found' });
+    }
+
     const withdrawal = business.pendingWithdrawals[withdrawalIndex];
-    if (!withdrawal || withdrawal.status !== 'pending') {
-      return res.status(400).json({ error: 'Invalid or already processed withdrawal' });
+    if (withdrawal.status !== 'pending') {
+      return res.status(400).json({ error: 'Withdrawal already processed' });
     }
 
     const admin = await User.findOne({ role: 'admin' });
@@ -358,15 +380,15 @@ router.post('/admin/verify-business-withdrawal', authenticateToken, async (req, 
         _id: crypto.randomBytes(16).toString('hex'),
         type: 'fee-collected',
         amount: withdrawal.fee,
-        toFrom: `Withdrawal from ${businessId}`,
+        toFrom: `Withdrawal from ${business.businessId}`,
         date: new Date(),
       });
       withdrawal.status = 'completed';
     } else {
       withdrawal.status = 'rejected';
     }
-    await Promise.all([business.save(), admin.save()]);
 
+    await Promise.all([business.save(), admin.save()]);
     if (business.pushToken) {
       await sendPushNotification(
         business.pushToken,
@@ -374,7 +396,7 @@ router.post('/admin/verify-business-withdrawal', authenticateToken, async (req, 
         approved
           ? `Your withdrawal of ${withdrawal.amount.toFixed(2)} ZMW has been approved`
           : `Your withdrawal of ${withdrawal.amount.toFixed(2)} ZMW was rejected`,
-        { businessId, withdrawalIndex }
+        { businessId: business.businessId, withdrawalIndex }
       );
     }
 
@@ -385,27 +407,36 @@ router.post('/admin/verify-business-withdrawal', authenticateToken, async (req, 
   }
 });
 
-// Fetch All Businesses (for Admin)
-router.get('/all', authenticateToken, async (req, res) => {
+// Fetch All Businesses (for Admin and BusinessWithdrawals.js)
+router.get('/businesses', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+
   try {
-    const businesses = await Business.find();
-    res.json(businesses);
+    const { page = 1, limit = 10, search = '' } = req.query;
+    const query = search ? { name: { $regex: search, $options: 'i' } } : {};
+    const businesses = await Business.find(query)
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+    const total = await Business.countDocuments(query);
+    res.json({ businesses, total });
   } catch (error) {
-    console.error('Fetch All Businesses Error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Fetch Businesses Error:', error);
+    res.status(500).json({ error: 'Failed to fetch businesses' });
   }
 });
 
 // Save Push Token
 router.post('/save-push-token', authenticateToken, async (req, res) => {
   const { businessId, pushToken } = req.body;
+
   if (!businessId || !pushToken) return res.status(400).json({ error: 'Business ID and push token required' });
+
   try {
     const business = await Business.findOne({ businessId });
-    if (!business || business.businessId !== req.user.businessId) {
+    if (!business || business._id.toString() !== req.user.id) {
       return res.status(403).json({ error: 'Unauthorized' });
     }
+
     business.pushToken = pushToken;
     await business.save();
     res.json({ message: 'Push token saved' });

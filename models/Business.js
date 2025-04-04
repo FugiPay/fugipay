@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const businessSchema = new mongoose.Schema({
-  businessId: { type: String, required: true, unique: true },
+  businessId: { type: String, required: true, unique: true }, // TPIN
   name: { type: String, required: true },
   owner: { type: String, required: true }, // Username of owner from User model
   pin: { type: String, required: true }, // Hashed PIN for authentication
