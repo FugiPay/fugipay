@@ -1,19 +1,20 @@
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const businessSchema = new mongoose.Schema({
   businessId: { type: String, required: true, unique: true }, // TPIN
   name: { type: String, required: true },
-  owner: { type: String, required: true }, // Username of owner from User model
-  pin: { type: String, required: true }, // Hashed PIN for authentication
-  balance: { type: Number, default: 0 }, // ZMW balance
-  qrCode: { type: String }, // Permanent QR code
+  ownerUsername: { type: String, required: true }, // Align with business.js
+  pin: { type: String, required: true },
+  balance: { type: Number, default: 0 },
+  qrCode: { type: String },
   transactions: [
     {
-      _id: { type: String, default: () => require('crypto').randomBytes(16).toString('hex') },
-      type: { type: String, enum: ['received', 'deposited', 'withdrawn', 'fee-collected'] },
+      _id: { type: String, default: () => crypto.randomBytes(16).toString('hex') },
+      type: { type: String, enum: ['received', 'deposited', 'withdrawn'] }, // No fee-collected for business
       amount: { type: Number },
       toFrom: { type: String },
-      fee: { type: Number, default: 0 }, // Fee for sending/receiving
+      fee: { type: Number, default: 0 },
       date: { type: Date, default: Date.now },
     },
   ],
@@ -28,13 +29,13 @@ const businessSchema = new mongoose.Schema({
   pendingWithdrawals: [
     {
       amount: { type: Number, required: true },
-      fee: { type: Number, default: 0 }, // Added fee field
+      fee: { type: Number, default: 0 },
       date: { type: Date, default: Date.now },
       status: { type: String, enum: ['pending', 'completed', 'rejected'], default: 'pending' },
     },
   ],
-  pushToken: { type: String }, // For notifications
-  isActive: { type: Boolean, default: true }, // Business account status
+  pushToken: { type: String },
+  isActive: { type: Boolean, default: true },
 });
 
 module.exports = mongoose.model('Business', businessSchema);
