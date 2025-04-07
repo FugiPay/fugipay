@@ -59,7 +59,7 @@ router.post('/signin', async (req, res) => {
   try {
     const business = await Business.findOne({ businessId });
     if (!business) {
-      return res.status(404).json({ error: 'Business not found' });
+      return res.status(404).json({ error: 'Business not found, check your 10 digit ID (TPIN)' });
     }
     const isMatch = await bcrypt.compare(pin, business.pin);
     if (!isMatch) {
