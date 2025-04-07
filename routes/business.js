@@ -93,6 +93,39 @@ router.get('/:businessId', authenticateToken, async (req, res) => {
   }
 });
 
+// Add this after other routes in business.js
+router.put('/:businessId', authenticateToken, async (req, res) => {
+  const { name, ownerUsername } = req.body;
+  if (!name && !ownerUsername) {
+    return res.status(400).json({ error: 'At least one field (name or ownerUsername) is required' });
+  }
+
+  try {
+    const business = await Business.findOne({ businessId: req.params.businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    if (business._id.toString() !== req.user.id) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    if (name) business.name = name;
+    if (ownerUsername) {
+      const existingBusiness = await Business.findOne({ ownerUsername });
+      if (existingBusiness && existingBusiness.businessId !== business.businessId) {
+        return res.status(409).json({ error: 'Owner Username already taken' });
+      }
+      business.ownerUsername = ownerUsername;
+    }
+
+    await business.save();
+    res.json({ message: 'Profile updated successfully', business: { businessId: business.businessId, name: business.name, ownerUsername: business.ownerUsername } });
+  } catch (error) {
+    console.error('Business Profile Update Error:', error);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
 // Regenerate QR Code
 router.post('/regenerate-qr', authenticateToken, async (req, res) => {
   const { businessId } = req.body;
