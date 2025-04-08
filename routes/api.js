@@ -352,7 +352,12 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
   console.log(`[${req.method}] ${req.path} - Starting fetch for ${req.params.username}`);
 
   try {
-    // Use projection to fetch only necessary fields and limit transactions
+    // Test MongoDB connection speed
+    console.time(`[${req.method}] ${req.path} - MongoDB ping`);
+    await mongoose.connection.db.admin().ping();
+    console.timeEnd(`[${req.method}] ${req.path} - MongoDB ping`);
+
+    console.time(`[${req.method}] ${req.path} - User query`);
     const user = await User.findOne(
       { username: req.params.username },
       {
@@ -363,15 +368,14 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
         balance: 1,
         zambiaCoinBalance: 1,
         trustScore: 1,
-        transactions: { $slice: -10 }, // Last 10 transactions only
+        transactions: { $slice: -10 },
         kycStatus: 1,
         isActive: 1,
       }
     )
-      .lean() // Faster processing
-      .exec(); // Explicit execution
-
-    console.log(`[${req.method}] ${req.path} - Query took ${Date.now() - start}ms`);
+      .lean()
+      .exec();
+    console.timeEnd(`[${req.method}] ${req.path} - User query`);
 
     if (!user) {
       console.log(`[${req.method}] ${req.path} - User not found`);
@@ -391,7 +395,7 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
       balance: user.balance,
       zambiaCoinBalance: user.zambiaCoinBalance,
       trustScore: user.trustScore,
-      transactions: user.transactions, // Limited to last 10
+      transactions: user.transactions,
       kycStatus: user.kycStatus,
       isActive: user.isActive,
     };
