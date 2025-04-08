@@ -347,29 +347,39 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-// GET /api/user/:username (Updated for ZambiaCoin)
 router.get('/user/:username', authenticateToken, async (req, res) => {
+  const start = Date.now();
+  console.log(`[${req.method}] ${req.path} - Starting fetch for ${req.params.username}`);
   try {
-    const user = await User.findOne({ username: req.params.username });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const user = await User.findOne({ username: req.params.username }, '-__v') // Exclude version field
+      .lean() // Faster processing
+      .exec(); // Explicit execution
+    console.log(`[${req.method}] ${req.path} - Query took ${Date.now() - start}ms`);
+    if (!user) {
+      console.log(`[${req.method}] ${req.path} - User not found`);
+      return res.status(404).json({ error: 'User not found' });
+    }
     if (req.user.phoneNumber !== user.phoneNumber && req.user.role !== 'admin') {
+      console.log(`[${req.method}] ${req.path} - Unauthorized access by ${req.user.phoneNumber}`);
       return res.status(403).json({ error: 'Unauthorized' });
     }
-    res.json({
+    const responseData = {
       username: user.username,
       name: user.name,
       phoneNumber: user.phoneNumber,
       email: user.email,
       balance: user.balance,
-      zambiaCoinBalance: user.zambiaCoinBalance, // Added for ZambiaCoin
-      trustScore: user.trustScore, // Added for ZambiaCoin
-      transactions: user.transactions,
+      zambiaCoinBalance: user.zambiaCoinBalance,
+      trustScore: user.trustScore,
+      transactions: user.transactions, // Consider limiting this
       kycStatus: user.kycStatus,
       isActive: user.isActive,
-    });
+    };
+    console.log(`[${req.method}] ${req.path} - Total time: ${Date.now() - start}ms`);
+    res.json(responseData);
   } catch (error) {
-    console.error('User Fetch Error:', error);
-    res.status(500).json({ error: 'Server error fetching user' });
+    console.error(`[${req.method}] ${req.path} - User Fetch Error:`, error);
+    res.status(500).json({ error: 'Server error fetching user', duration: `${Date.now() - start}ms` });
   }
 });
 
