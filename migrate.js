@@ -4,11 +4,11 @@ const Business = require('./models/Business'); // Adjust path to your Business m
 require('dotenv').config();
 
 // MongoDB connection string from .env
-const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
+const MONGO_URI = process.env.MONGO_URI || process.env.MONGO_URI;
 
 async function connectToDatabase() {
   try {
-    await mongoose.connect(MONGODB_URI, {
+    await mongoose.connect(MONGO_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
