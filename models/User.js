@@ -1,65 +1,50 @@
 const mongoose = require('mongoose');
 
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true, index: true },
-  name: { type: String, required: true },
-  phoneNumber: {
-    type: String,
-    required: true,
-    unique: true,
-    index: true,
-    match: /^\+260(9[5678]|7[34679])\d{7}$/,
-  },
-  email: { type: String, required: true, unique: true, index: true },
-  password: { type: String, required: true, minlength: 6 }, // Hashed
-  pin: { type: String, required: true, minlength: 4, maxlength: 4 }, // 4-digit PIN
-  idImageUrl: { type: String },
-  role: { type: String, default: 'user', enum: ['user', 'admin'] },
-  balance: { type: Number, default: 0 }, // Zangena ZMW balance
-  zambiaCoinBalance: { type: Number, default: 0 }, // ZMC balance
-  trustScore: { type: Number, default: 0, min: 0, max: 100 }, // Updated to 0-100 scale
-  ratingCount: { type: Number, default: 0 }, // Tracks number of ratings
-  transactions: [
-    {
-      _id: { type: String }, // Custom transaction ID
-      type: {
-        type: String,
-        enum: [
-          'sent', 'received', 'credited', 'deposited', 'withdrawn', 'fee-collected', 'pending-pin',
-          'zmc-sent', 'zmc-received',
-        ],
-      },
-      amount: { type: Number },
-      toFrom: { type: String },
-      date: { type: Date, default: Date.now, index: true },
-      fee: { type: Number },
-      originalAmount: { type: Number },
-      sendingFee: { type: Number },
-      receivingFee: { type: Number },
-      trustRating: { type: Number, min: 1, max: 5 }, // Rating per transaction remains 1-5
-    },
-  ],
-  kycStatus: { type: String, default: 'pending', enum: ['pending', 'verified', 'rejected'] },
-  isActive: { type: Boolean, default: false },
-  resetToken: { type: String },
-  resetTokenExpiry: { type: Date },
-  pushToken: { type: String, default: null },
-  pendingDeposits: [
-    {
-      amount: { type: Number, required: true },
-      transactionId: { type: String, required: true },
-      date: { type: Date, default: Date.now },
-      status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
-    },
-  ],
-  pendingWithdrawals: [
-    {
-      amount: { type: Number, required: true },
-      date: { type: Date, default: Date.now },
-      status: { type: String, enum: ['pending', 'completed', 'rejected'], default: 'pending' },
-    },
-  ],
-  lastLogin: { type: Date, default: null },
+const transactionSchema = new mongoose.Schema({
+  type: { type: String, required: true }, // e.g., "deposited", "withdrawn", "zmc-received"
+  amount: { type: Number, required: true },
+  toFrom: { type: String, required: true }, // e.g., "admin", "manual-mobile-money"
+  fee: { type: Number, default: 0 },
+  date: { type: Date, default: Date.now },
+  trustRating: { type: Number }, // Optional, for zmc-sent
 });
 
-module.exports = mongoose.model('User', userSchema);
+const pendingDepositSchema = new mongoose.Schema({
+  amount: { type: Number, required: true },
+  transactionId: { type: String, required: true },
+  date: { type: Date, default: Date.now },
+  status: { type: String, enum: ['pending', 'approved'], default: 'pending' },
+});
+
+const pendingWithdrawalSchema = new mongoose.Schema({
+  amount: { type: Number, required: true },
+  date: { type: Date, default: Date.now },
+  status: { type: String, enum: ['pending', 'completed'], default: 'pending' },
+});
+
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true, trim: true },
+  phoneNumber: { type: String, required: true, unique: true, trim: true },
+  password: { type: String, required: true },
+  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+  balance: { type: Number, default: 0 },
+  zambiaCoinBalance: { type: Number, default: 0 },
+  kycStatus: { type: String, enum: ['pending', 'verified'], default: 'pending' },
+  isFirstLogin: { type: Boolean, default: true },
+  email: { type: String, trim: true },
+  name: { type: String, trim: true },
+  transactions: [transactionSchema],
+  pendingDeposits: [pendingDepositSchema],
+  pendingWithdrawals: [pendingWithdrawalSchema],
+  lastLogin: { type: Date },
+  pin: { type: String },
+  trustScore: { type: Number, default: 0 },
+  ratingCount: { type: Number, default: 0 },
+  isActive: { type: Boolean, default: true },
+}, { timestamps: true });
+
+// Ensure unique indexes
+userSchema.index({ username: 1 }, { unique: true });
+userSchema.index({ phoneNumber: 1 }, { unique: true });
+
+module.exports = mongoose.models.User || mongoose.model('User', userSchema);
