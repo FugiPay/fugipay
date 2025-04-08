@@ -25,7 +25,7 @@ const User = mongoose.models.User || mongoose.model('User', userSchema);
 async function checkUser() {
   try {
     // Connect to MongoDB using the environment variable
-    const mongoUri = process.env.MONGODB_URI;
+    const mongoUri = process.env.MONGO_URI;
     if (!mongoUri) {
       throw new Error('MONGODB_URI environment variable not set');
     }
