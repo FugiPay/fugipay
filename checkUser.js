@@ -16,6 +16,28 @@ const userSchema = new mongoose.Schema({
     fee: { type: Number },
     date: { type: Date, default: Date.now },
   }],
+  airtelBalance: { type: Number, default: 0 },
+  mtnBalance: { type: Number, default: 0 },
+  moneyunifyBalance: { type: Number, default: 0 },
+  isActive: { type: Boolean, default: true },
+  email: { type: String },
+  name: { type: String },
+  pendingDeposits: [{
+    amount: { type: Number },
+    transactionId: { type: String },
+    date: { type: Date },
+    status: { type: String },
+  }],
+  pendingWithdrawals: [{
+    amount: { type: Number },
+    date: { type: Date },
+    status: { type: String },
+  }],
+  lastLogin: { type: Date },
+  pin: { type: String },
+  trustScore: { type: Number },
+  zambiaCoinBalance: { type: Number },
+  ratingCount: { type: Number },
 }, { timestamps: true });
 
 // Create the User model
@@ -25,9 +47,9 @@ const User = mongoose.models.User || mongoose.model('User', userSchema);
 async function checkUser() {
   try {
     // Connect to MongoDB using the environment variable
-    const mongoUri = process.env.MONGO_URI;
+    const mongoUri = process.env.MONGODB_URI; // Changed to MONGODB_URI to match Heroku convention
     if (!mongoUri) {
-      throw new Error('MONGO_URI environment variable not set');
+      throw new Error('MONGODB_URI environment variable not set');
     }
 
     console.log('Connecting to MongoDB...');
@@ -40,12 +62,27 @@ async function checkUser() {
     // Check connection state
     console.log('MongoDB connection state:', mongoose.connection.readyState); // 1 = connected
 
-    // Query for user "Anthony"
-    const user = await User.findOne({ username: 'Anthony' }, { password: 0, __v: 0 });
-    if (!user) {
+    // Count users with username "Anthony"
+    const count = await User.countDocuments({ username: 'Anthony' });
+    console.log(`Total users with username "Anthony": ${count}`);
+
+    // Query all users with username "Anthony"
+    const users = await User.find({ username: 'Anthony' }, { password: 0, __v: 0 });
+    if (users.length === 0) {
       console.log('User "Anthony" not found in the database');
     } else {
-      console.log('Found user:', user);
+      console.log(`Found ${users.length} user(s) with username "Anthony":`);
+      users.forEach((user, index) => {
+        console.log(`User ${index + 1}:`, user);
+      });
+
+      // If duplicates exist, keep the most recent by lastLogin and delete others
+      if (users.length > 1) {
+        const keep = users.sort((a, b) => (b.lastLogin || 0) - (a.lastLogin || 0))[0]; // Keep latest login
+        const removeIds = users.filter(u => u._id.toString() !== keep._id.toString()).map(u => u._id);
+        await User.deleteMany({ _id: { $in: removeIds } });
+        console.log(`Deleted ${removeIds.length} duplicate users. Kept user with _id: ${keep._id}`);
+      }
     }
 
     // Query by phoneNumber as a fallback
