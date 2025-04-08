@@ -1032,51 +1032,49 @@ router.get('/transactions/:username', authenticateToken, async (req, res) => {
 });
 
 // GET /api/admin/stats (Unchanged)
-router.get('/admin/stats', async (req, res) => {
+router.get('/admin/stats', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    // User Stats
     const totalUsers = await User.countDocuments();
     const totalUserBalance = await User.aggregate([
-      { $group: { _id: null, total: { $sum: '$balance' } } },
+      { $group: { _id: null, total: { $sum: { $ifNull: ['$balance', 0] } } } },
     ]).then(result => result[0]?.total || 0);
     const recentUserTxCount = await User.aggregate([
-      { $unwind: '$transactions' },
+      { $unwind: { path: '$transactions', preserveNullAndEmptyArrays: true } },
       { $match: { 'transactions.date': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } },
       { $count: 'recentTxCount' },
     ]).then(result => result[0]?.recentTxCount || 0);
     const pendingUserDepositsCount = await User.aggregate([
-      { $unwind: '$pendingDeposits' },
+      { $unwind: { path: '$pendingDeposits', preserveNullAndEmptyArrays: true } },
       { $match: { 'pendingDeposits.status': 'pending' } },
       { $count: 'pendingDepositsCount' },
     ]).then(result => result[0]?.pendingDepositsCount || 0);
     const pendingUserWithdrawalsCount = await User.aggregate([
-      { $unwind: '$pendingWithdrawals' },
+      { $unwind: { path: '$pendingWithdrawals', preserveNullAndEmptyArrays: true } },
       { $match: { 'pendingWithdrawals.status': 'pending' } },
       { $count: 'pendingWithdrawalsCount' },
     ]).then(result => result[0]?.pendingWithdrawalsCount || 0);
 
-    // Business Stats
     const totalBusinesses = await Business.countDocuments();
     const totalBusinessBalance = await Business.aggregate([
-      { $group: { _id: null, total: { $sum: '$balance' } } },
+      { $group: { _id: null, total: { $sum: { $ifNull: ['$balance', 0] } } } },
     ]).then(result => result[0]?.total || 0);
     const recentBusinessTxCount = await Business.aggregate([
-      { $unwind: '$transactions' },
+      { $unwind: { path: '$transactions', preserveNullAndEmptyArrays: true } },
       { $match: { 'transactions.date': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } },
       { $count: 'recentTxCount' },
     ]).then(result => result[0]?.recentTxCount || 0);
     const pendingBusinessDepositsCount = await Business.aggregate([
-      { $unwind: '$pendingDeposits' },
-      { $match: { 'pendingDeposits.status': 'pending' } }, // Assuming status field exists or is added
+      { $unwind: { path: '$pendingDeposits', preserveNullAndEmptyArrays: true } },
+      { $match: { 'pendingDeposits.status': 'pending' } },
       { $count: 'pendingDepositsCount' },
     ]).then(result => result[0]?.pendingDepositsCount || 0);
     const pendingBusinessWithdrawalsCount = await Business.aggregate([
-      { $unwind: '$pendingWithdrawals' },
+      { $unwind: { path: '$pendingWithdrawals', preserveNullAndEmptyArrays: true } },
       { $match: { 'pendingWithdrawals.status': 'pending' } },
       { $count: 'pendingWithdrawalsCount' },
     ]).then(result => result[0]?.pendingWithdrawalsCount || 0);
 
-    // Combined Stats
     const totalBalance = totalUserBalance + totalBusinessBalance;
     const recentTxCount = recentUserTxCount + recentBusinessTxCount;
 
@@ -1093,8 +1091,8 @@ router.get('/admin/stats', async (req, res) => {
       recentTxCount,
     });
   } catch (error) {
-    console.error('Stats Error:', error);
-    res.status(500).json({ error: 'Failed to fetch stats' });
+    console.error('Stats Error:', { message: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to fetch stats', details: error.message });
   }
 });
 
