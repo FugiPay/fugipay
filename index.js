@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
-// const businessRoutes = require('./routes/business'); // Import business routes
+const businessRoutes = require('./routes/business'); // Import business routes
 
 const app = express();
 app.use(express.json());
@@ -40,7 +40,7 @@ app.get('/health', (req, res) => {
 
 // Routes
 app.use('/api', require('./routes/api'));
-// app.use('/api/business', businessRoutes); // Mount business routes
+app.use('/api/business', businessRoutes); // Mount business routes
 
 // MongoDB Connection
 const mongoUri = process.env.MONGO_URI;
