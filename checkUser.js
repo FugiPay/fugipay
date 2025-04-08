@@ -1,14 +1,22 @@
 const mongoose = require('mongoose');
 
 // Define the User schema (match your actual schema in models/User.js)
-// Add to checkUser.js
-const users = await User.find({ username: 'Anthony' });
-if (users.length > 1) {
-  const keep = users.sort((a, b) => b.lastLogin - a.lastLogin)[0]; // Keep latest login
-  const removeIds = users.filter(u => u._id !== keep._id).map(u => u._id);
-  await User.deleteMany({ _id: { $in: removeIds } });
-  console.log(`Deleted ${removeIds.length} duplicate users`);
-}
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  phoneNumber: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  role: { type: String, default: 'user' },
+  balance: { type: Number, default: 0 },
+  kycStatus: { type: String, default: 'pending' },
+  isFirstLogin: { type: Boolean, default: true },
+  transactions: [{
+    type: { type: String },
+    amount: { type: Number },
+    toFrom: { type: String },
+    fee: { type: Number },
+    date: { type: Date, default: Date.now },
+  }],
+}, { timestamps: true });
 
 // Create the User model
 const User = mongoose.models.User || mongoose.model('User', userSchema);
