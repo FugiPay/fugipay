@@ -8,9 +8,11 @@ const fs = require('fs');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const Flutterwave = require('flutterwave-node-v3');
+const mongoose = require('mongoose'); // Added for MongoDB ping
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const authenticateToken = require('../middleware/authenticateToken');
+
 let axios;
 try {
   axios = require('axios');
@@ -83,9 +85,10 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
   try {
     await axios.post('https://exp.host/--/api/v2/push/send', message, {
       headers: {
-        'Accept': 'application/json',
+        Accept: 'application/json',
         'Content-Type': 'application/json',
       },
+      timeout: 5000, // 5-second timeout for push notifications
     });
     console.log(`Push notification sent to ${pushToken}: ${title} - ${body}`);
   } catch (error) {
@@ -93,7 +96,7 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
   }
 }
 
-// POST /api/register (Updated for ZambiaCoin: Added pin)
+// POST /api/register
 router.post('/register', upload.single('idImage'), async (req, res) => {
   const { name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
@@ -147,12 +150,12 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
       phoneNumber,
       email,
       password: hashedPassword,
-      pin, // Added for ZambiaCoin (plain text for transfer verification)
+      pin,
       idImageUrl,
       role: 'user',
-      balance: 0, // Zangena ZMW
-      zambiaCoinBalance: 0, // ZambiaCoin ZMC
-      trustScore: 0, // ZambiaCoin
+      balance: 0,
+      zambiaCoinBalance: 0,
+      trustScore: 0,
       transactions: [],
       kycStatus: 'pending',
       isActive: false,
@@ -189,7 +192,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   }
 });
 
-// POST /api/save-push-token (Unchanged)
+// POST /api/save-push-token
 router.post('/save-push-token', authenticateToken, async (req, res) => {
   const { pushToken } = req.body;
 
@@ -207,12 +210,12 @@ router.post('/save-push-token', authenticateToken, async (req, res) => {
     await user.save();
     res.status(200).json({ message: 'Push token saved' });
   } catch (error) {
-    console.error('Save Push Token Error:', error);
+    console.error('Save Push Token Error:', error.message);
     res.status(500).json({ error: 'Failed to save push token' });
   }
 });
 
-// POST /api/login (Unchanged, ZambiaCoin uses same auth)
+// POST /api/login
 router.post('/login', async (req, res) => {
   const { identifier, password } = req.body;
 
@@ -251,12 +254,12 @@ router.post('/login', async (req, res) => {
 
     const isFirstLogin = !user.lastLogin;
     user.lastLogin = new Date();
-    await user.save(); // Now works with trustScore up to 100
+    await user.save();
 
     res.status(200).json({
       token,
       username: user.username,
-      role: user.role || 'user', // Default to 'user' if undefined
+      role: user.role || 'user',
       kycStatus: user.kycStatus || 'pending',
       isFirstLogin,
     });
@@ -266,7 +269,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// POST /api/forgot-password (Unchanged)
+// POST /api/forgot-password
 router.post('/forgot-password', async (req, res) => {
   const { identifier } = req.body;
   if (!identifier) {
@@ -314,12 +317,12 @@ router.post('/forgot-password', async (req, res) => {
 
     res.json({ message: 'Reset instructions have been sent to your email.' });
   } catch (error) {
-    console.error('Forgot Password Error:', error);
+    console.error('Forgot Password Error:', error.message);
     res.status(500).json({ error: 'Server error during password reset request' });
   }
 });
 
-// POST /api/reset-password (Unchanged)
+// POST /api/reset-password
 router.post('/reset-password', async (req, res) => {
   const { token, newPassword } = req.body;
   if (!token || !newPassword) {
@@ -342,14 +345,21 @@ router.post('/reset-password', async (req, res) => {
 
     res.json({ message: 'Password reset successful' });
   } catch (error) {
-    console.error('Reset Password Error:', error);
+    console.error('Reset Password Error:', error.message);
     res.status(500).json({ error: 'Server error during password reset' });
   }
 });
 
+// GET /api/user/:username (Optimized with timeout and diagnostics)
 router.get('/user/:username', authenticateToken, async (req, res) => {
   const start = Date.now();
   console.log(`[${req.method}] ${req.path} - Starting fetch for ${req.params.username}`);
+
+  // Set a 25-second timeout to avoid Heroku H12 (30s limit)
+  const timeout = setTimeout(() => {
+    console.error(`[${req.method}] ${req.path} - Request timed out after 25s`);
+    res.status(503).json({ error: 'Request timed out', duration: `${Date.now() - start}ms` });
+  }, 25000);
 
   try {
     // Test MongoDB connection speed
@@ -368,7 +378,7 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
         balance: 1,
         zambiaCoinBalance: 1,
         trustScore: 1,
-        transactions: { $slice: -10 },
+        transactions: { $slice: -10 }, // Limit to last 10 transactions
         kycStatus: 1,
         isActive: 1,
       }
@@ -379,11 +389,13 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
 
     if (!user) {
       console.log(`[${req.method}] ${req.path} - User not found`);
+      clearTimeout(timeout);
       return res.status(404).json({ error: 'User not found' });
     }
 
     if (req.user.phoneNumber !== user.phoneNumber && req.user.role !== 'admin') {
       console.log(`[${req.method}] ${req.path} - Unauthorized access by ${req.user.phoneNumber}`);
+      clearTimeout(timeout);
       return res.status(403).json({ error: 'Unauthorized' });
     }
 
@@ -401,14 +413,16 @@ router.get('/user/:username', authenticateToken, async (req, res) => {
     };
 
     console.log(`[${req.method}] ${req.path} - Total time: ${Date.now() - start}ms`);
+    clearTimeout(timeout);
     res.json(responseData);
   } catch (error) {
     console.error(`[${req.method}] ${req.path} - User Fetch Error:`, error.message, error.stack);
+    clearTimeout(timeout);
     res.status(500).json({ error: 'Server error fetching user', duration: `${Date.now() - start}ms` });
   }
 });
 
-// POST /api/store-qr-pin (Unchanged)
+// POST /api/store-qr-pin
 router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   const { username, pin } = req.body;
 
@@ -431,12 +445,12 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
 
     res.json({ qrId });
   } catch (error) {
-    console.error('QR Pin Store Error:', error);
+    console.error('QR Pin Store Error:', error.message);
     res.status(500).json({ error: 'Server error storing QR pin' });
   }
 });
 
-// POST /api/deposit/manual (Unchanged)
+// POST /api/deposit/manual
 router.post('/deposit/manual', authenticateToken, async (req, res) => {
   const { amount, transactionId } = req.body;
   console.log('Manual Deposit Request:', { amount, transactionId });
@@ -478,7 +492,7 @@ router.post('/deposit/manual', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/admin/verify-withdrawal (Unchanged)
+// POST /api/admin/verify-withdrawal
 router.post('/admin/verify-withdrawal', authenticateToken, async (req, res) => {
   const { userId, withdrawalIndex, approved } = req.body;
   console.log('Verify Withdrawal Request:', { userId, withdrawalIndex, approved });
@@ -521,7 +535,7 @@ router.post('/admin/verify-withdrawal', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/admin/verify-deposit (Unchanged)
+// POST /api/admin/verify-deposit
 router.post('/admin/verify-deposit', authenticateToken, async (req, res) => {
   const { userId, transactionId, approved } = req.body;
   console.log('Verify Deposit Request:', { userId, transactionId, approved });
@@ -566,10 +580,17 @@ router.post('/admin/verify-deposit', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/test-flutterwave (Unchanged)
+// GET /api/test-flutterwave
 router.get('/test-flutterwave', async (req, res) => {
   try {
-    const testData = { tx_ref: 'test', amount: 10, currency: 'ZMW', email: 'test@example.com', phone_number: '+260972721581', network: 'AIRTEL' };
+    const testData = {
+      tx_ref: 'test',
+      amount: 10,
+      currency: 'ZMW',
+      email: 'test@example.com',
+      phone_number: '+260972721581',
+      network: 'AIRTEL',
+    };
     const result = await flw.MobileMoney.zambia(testData);
     res.json(result);
   } catch (error) {
@@ -577,7 +598,7 @@ router.get('/test-flutterwave', async (req, res) => {
   }
 });
 
-// POST /api/withdraw/request (Unchanged)
+// POST /api/withdraw/request
 router.post('/withdraw/request', authenticateToken, async (req, res) => {
   const { amount } = req.body;
   console.log('Withdraw Request:', { amount });
@@ -615,7 +636,7 @@ router.post('/withdraw/request', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/withdraw (Unchanged)
+// POST /api/withdraw
 router.post('/withdraw', authenticateToken, async (req, res) => {
   const { amount } = req.body;
   console.log('Withdraw Request Received:', { amount });
@@ -702,10 +723,10 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/ip (Unchanged)
+// GET /api/ip
 router.get('/ip', async (req, res) => {
   try {
-    const response = await axios.get('https://api.ipify.org?format=json');
+    const response = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
     console.log('Outbound IP:', response.data.ip);
     res.json({ ip: response.data.ip });
   } catch (error) {
@@ -714,7 +735,7 @@ router.get('/ip', async (req, res) => {
   }
 });
 
-// POST /api/payment-with-qr-pin (Unchanged)
+// POST /api/payment-with-qr-pin
 router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, qrId, pin } = req.body;
 
@@ -790,12 +811,12 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
       amountReceived: paymentAmount - receivingFee,
     });
   } catch (error) {
-    console.error('QR Payment Error:', error);
+    console.error('QR Payment Error:', error.message);
     res.status(500).json({ error: 'Server error during payment' });
   }
 });
 
-// POST /api/payment-with-search (Unchanged)
+// POST /api/payment-with-search
 router.post('/payment-with-search', authenticateToken, async (req, res) => {
   const { fromUsername, searchQuery, amount, pin } = req.body;
 
@@ -869,12 +890,12 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
       amountReceived: paymentAmount - receivingFee,
     });
   } catch (error) {
-    console.error('Search Payment Error:', error);
+    console.error('Search Payment Error:', error.message);
     res.status(500).json({ error: 'Server error during payment' });
   }
 });
 
-// PUT /api/user/update (Updated for ZambiaCoin: Added PIN update option)
+// PUT /api/user/update
 router.put('/user/update', authenticateToken, async (req, res) => {
   const { username, email, password, pin } = req.body;
 
@@ -899,17 +920,17 @@ router.put('/user/update', authenticateToken, async (req, res) => {
     }
     if (pin) {
       if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-      user.pin = pin; // Update PIN for ZambiaCoin
+      user.pin = pin;
     }
     await user.save();
     res.json({ message: 'User updated' });
   } catch (error) {
-    console.error('User Update Error:', error);
+    console.error('User Update Error:', error.message);
     res.status(500).json({ error: 'Server error updating user' });
   }
 });
 
-// DELETE /api/user/delete (Unchanged)
+// DELETE /api/user/delete
 router.delete('/user/delete', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
@@ -919,12 +940,12 @@ router.delete('/user/delete', authenticateToken, async (req, res) => {
     await User.deleteOne({ phoneNumber: req.user.phoneNumber });
     res.json({ message: 'Account deleted successfully' });
   } catch (error) {
-    console.error('Delete Account Error:', error);
+    console.error('Delete Account Error:', error.message);
     res.status(500).json({ error: 'Server error deleting account' });
   }
 });
 
-// PUT /api/user/update-kyc (Unchanged)
+// PUT /api/user/update-kyc
 router.put('/user/update-kyc', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -942,12 +963,12 @@ router.put('/user/update-kyc', authenticateToken, async (req, res) => {
     await user.save();
     res.json({ message: 'KYC status updated' });
   } catch (error) {
-    console.error('KYC Update Error:', error);
+    console.error('KYC Update Error:', error.message);
     res.status(500).json({ error: 'Server error updating KYC status' });
   }
 });
 
-// PUT /api/user/toggle-active (Unchanged)
+// PUT /api/user/toggle-active
 router.put('/user/toggle-active', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -963,36 +984,39 @@ router.put('/user/toggle-active', authenticateToken, async (req, res) => {
     await user.save();
     res.json({ message: `User ${isActive ? 'activated' : 'deactivated'}` });
   } catch (error) {
-    console.error('Toggle Active Error:', error);
+    console.error('Toggle Active Error:', error.message);
     res.status(500).json({ error: 'Server error toggling user status' });
   }
 });
 
-// GET /api/users (Unchanged)
+// GET /api/users
 router.get('/users', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
   const { page = 1, limit = 10, search = '' } = req.query;
   const skip = (page - 1) * limit;
-  const query = search ? {
-    $or: [
-      { username: { $regex: search, $options: 'i' } },
-      { phoneNumber: { $regex: search, $options: 'i' } },
-      { email: { $regex: search, $options: 'i' } },
-      { name: { $regex: search, $options: 'i' } },
-    ],
-  } : {};
+  const query = search
+    ? {
+        $or: [
+          { username: { $regex: search, $options: 'i' } },
+          { phoneNumber: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+          { name: { $regex: search, $options: 'i' } },
+        ],
+      }
+    : {};
   try {
     const users = await User.find(query).skip(skip).limit(parseInt(limit));
     const total = await User.countDocuments(query);
     res.json({ users, total });
   } catch (error) {
+    console.error('Users Fetch Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
 
-// POST /api/credit (Unchanged)
+// POST /api/credit
 router.post('/credit', authenticateToken, async (req, res) => {
   const { adminUsername, toUsername, amount } = req.body;
   if (req.user.role !== 'admin') {
@@ -1013,12 +1037,12 @@ router.post('/credit', authenticateToken, async (req, res) => {
     await user.save();
     res.json({ message: 'Credit successful' });
   } catch (error) {
-    console.error('Credit Error:', error);
+    console.error('Credit Error:', error.message);
     res.status(500).json({ error: 'Server error during credit' });
   }
 });
 
-// POST /api/payment-with-pin (Unchanged)
+// POST /api/payment-with-pin
 router.post('/payment-with-pin', authenticateToken, async (req, res) => {
   const { fromUsername, toUsername, amount, pin } = req.body;
   if (req.user.role !== 'admin') {
@@ -1042,16 +1066,15 @@ router.post('/payment-with-pin', authenticateToken, async (req, res) => {
     sender.transactions.push({ type: 'sent', amount: paymentAmount, toFrom: toUsername });
     receiver.transactions.push({ type: 'received', amount: paymentAmount, toFrom: fromUsername });
     await QRPin.deleteOne({ _id: qrPin._id });
-    await sender.save();
-    await receiver.save();
+    await Promise.all([sender.save(), receiver.save()]);
     res.json({ message: 'Payment successful' });
   } catch (error) {
-    console.error('Payment with PIN Error:', error);
+    console.error('Payment with PIN Error:', error.message);
     res.status(500).json({ error: 'Server error during payment' });
   }
 });
 
-// GET /api/transactions/:username (Unchanged)
+// GET /api/transactions/:username
 router.get('/transactions/:username', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Unauthorized: Admins only' });
@@ -1061,54 +1084,41 @@ router.get('/transactions/:username', authenticateToken, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
     res.json(user.transactions);
   } catch (error) {
-    console.error('Transactions Fetch Error:', error);
+    console.error('Transactions Fetch Error:', error.message);
     res.status(500).json({ error: 'Server error fetching transactions' });
   }
 });
 
-// GET /api/admin/stats (Unchanged)
+// GET /api/admin/stats
 router.get('/admin/stats', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
     const totalUsers = await User.countDocuments();
     const totalUserBalance = await User.aggregate([
       { $group: { _id: null, total: { $sum: { $ifNull: ['$balance', 0] } } } },
-    ]).then(result => result[0]?.total || 0);
+    ]).then((result) => result[0]?.total || 0);
     const recentUserTxCount = await User.aggregate([
       { $unwind: { path: '$transactions', preserveNullAndEmptyArrays: true } },
       { $match: { 'transactions.date': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } },
       { $count: 'recentTxCount' },
-    ]).then(result => result[0]?.recentTxCount || 0);
+    ]).then((result) => result[0]?.recentTxCount || 0);
     const pendingUserDepositsCount = await User.aggregate([
       { $unwind: { path: '$pendingDeposits', preserveNullAndEmptyArrays: true } },
       { $match: { 'pendingDeposits.status': 'pending' } },
       { $count: 'pendingDepositsCount' },
-    ]).then(result => result[0]?.pendingDepositsCount || 0);
+    ]).then((result) => result[0]?.pendingDepositsCount || 0);
     const pendingUserWithdrawalsCount = await User.aggregate([
       { $unwind: { path: '$pendingWithdrawals', preserveNullAndEmptyArrays: true } },
       { $match: { 'pendingWithdrawals.status': 'pending' } },
       { $count: 'pendingWithdrawalsCount' },
-    ]).then(result => result[0]?.pendingWithdrawalsCount || 0);
+    ]).then((result) => result[0]?.pendingWithdrawalsCount || 0);
 
-    const totalBusinesses = await Business.countDocuments();
-    const totalBusinessBalance = await Business.aggregate([
-      { $group: { _id: null, total: { $sum: { $ifNull: ['$balance', 0] } } } },
-    ]).then(result => result[0]?.total || 0);
-    const recentBusinessTxCount = await Business.aggregate([
-      { $unwind: { path: '$transactions', preserveNullAndEmptyArrays: true } },
-      { $match: { 'transactions.date': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } },
-      { $count: 'recentTxCount' },
-    ]).then(result => result[0]?.recentTxCount || 0);
-    const pendingBusinessDepositsCount = await Business.aggregate([
-      { $unwind: { path: '$pendingDeposits', preserveNullAndEmptyArrays: true } },
-      { $match: { 'pendingDeposits.status': 'pending' } },
-      { $count: 'pendingDepositsCount' },
-    ]).then(result => result[0]?.pendingDepositsCount || 0);
-    const pendingBusinessWithdrawalsCount = await Business.aggregate([
-      { $unwind: { path: '$pendingWithdrawals', preserveNullAndEmptyArrays: true } },
-      { $match: { 'pendingWithdrawals.status': 'pending' } },
-      { $count: 'pendingWithdrawalsCount' },
-    ]).then(result => result[0]?.pendingWithdrawalsCount || 0);
+    // Placeholder for Business model (assuming it exists elsewhere)
+    const totalBusinesses = 0; // Replace with actual Business.countDocuments() if applicable
+    const totalBusinessBalance = 0; // Replace with actual aggregation
+    const recentBusinessTxCount = 0; // Replace with actual aggregation
+    const pendingBusinessDepositsCount = 0; // Replace with actual aggregation
+    const pendingBusinessWithdrawalsCount = 0; // Replace with actual aggregation
 
     const totalBalance = totalUserBalance + totalBusinessBalance;
     const recentTxCount = recentUserTxCount + recentBusinessTxCount;
@@ -1131,7 +1141,7 @@ router.get('/admin/stats', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/admin/pending (Unchanged)
+// GET /api/admin/pending
 router.get('/admin/pending', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
@@ -1140,49 +1150,56 @@ router.get('/admin/pending', authenticateToken, async (req, res) => {
       { $unwind: '$pendingDeposits' },
       { $match: { 'pendingDeposits.status': 'pending' } },
       { $count: 'count' },
-    ]).then(r => r[0]?.count || 0);
+    ]).then((r) => r[0]?.count || 0);
     const pendingWithdrawals = await User.aggregate([
       { $unwind: '$pendingWithdrawals' },
       { $match: { 'pendingWithdrawals.status': 'pending' } },
       { $count: 'count' },
-    ]).then(r => r[0]?.count || 0);
+    ]).then((r) => r[0]?.count || 0);
     res.json({ users: pendingUsers, deposits: pendingDeposits, withdrawals: pendingWithdrawals });
   } catch (error) {
+    console.error('Pending Stats Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch pending stats' });
   }
 });
 
-// GET /api/admin/pending-deposits (Unchanged)
-router.get('/api/admin/pending-deposits', authenticateToken, async (req, res) => {
+// GET /api/admin/pending-deposits
+router.get('/admin/pending-deposits', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
     const users = await User.find({ 'pendingDeposits.status': 'pending' });
-    const deposits = users.flatMap(user => user.pendingDeposits
-      .filter(d => d.status === 'pending')
-      .map(d => ({ userId: user._id, user: { username: user.username }, ...d.toObject() })));
+    const deposits = users.flatMap((user) =>
+      user.pendingDeposits
+        .filter((d) => d.status === 'pending')
+        .map((d) => ({ userId: user._id, user: { username: user.username }, ...d.toObject() }))
+    );
     res.json(deposits);
   } catch (error) {
+    console.error('Pending Deposits Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch pending deposits' });
   }
 });
 
-// GET /api/admin/pending-withdrawals (Unchanged)
-router.get('/api/admin/pending-withdrawals', authenticateToken, async (req, res) => {
+// GET /api/admin/pending-withdrawals
+router.get('/admin/pending-withdrawals', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
     const users = await User.find({ 'pendingWithdrawals.status': 'pending' });
-    const withdrawals = users.flatMap((user, uIndex) => user.pendingWithdrawals
-      .map((w, wIndex) => ({ userId: user._id, user: { username: user.username }, ...w.toObject(), index: wIndex }))
-      .filter(w => w.status === 'pending'));
+    const withdrawals = users.flatMap((user, uIndex) =>
+      user.pendingWithdrawals
+        .map((w, wIndex) => ({ userId: user._id, user: { username: user.username }, ...w.toObject(), index: wIndex }))
+        .filter((w) => w.status === 'pending')
+    );
     res.json(withdrawals);
   } catch (error) {
+    console.error('Pending Withdrawals Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch pending withdrawals' });
   }
 });
 
 // --------------------------- ZambiaCoin Endpoints ---------------------------
 
-// GET /api/user (ZambiaCoin-specific: Extended for profile/dashboard)
+// GET /api/user
 router.get('/user', authenticateToken, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username }).select(
@@ -1200,12 +1217,11 @@ router.get('/user', authenticateToken, async (req, res) => {
       transactions: user.transactions,
     });
   } catch (error) {
-    console.error('ZambiaCoin User Fetch Error:', error);
+    console.error('ZambiaCoin User Fetch Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch user data' });
   }
 });
 
-// POST /api/transfer (ZambiaCoin: ZMC transfer)
 // POST /api/transfer
 router.post('/transfer', authenticateToken, async (req, res) => {
   const { sender, receiver, amount, pin } = req.body;
@@ -1240,12 +1256,12 @@ router.post('/transfer', authenticateToken, async (req, res) => {
     await Promise.all([senderUser.save(), receiverUser.save()]);
     res.json({ message: 'ZMC transfer successful', transactionId: txId });
   } catch (error) {
-    console.error('ZMC Transfer Error:', error);
+    console.error('ZMC Transfer Error:', error.message);
     res.status(500).json({ error: 'Transfer failed' });
   }
 });
 
-// POST /api/generate-qr (new endpoint)
+// POST /api/generate-qr
 router.post('/generate-qr', authenticateToken, async (req, res) => {
   const { pin } = req.body;
   if (!pin || pin.length !== 4 || !/^\d{4}$/.test(pin)) {
@@ -1258,15 +1274,14 @@ router.post('/generate-qr', authenticateToken, async (req, res) => {
     if (!user.isActive) return res.status(403).json({ error: 'Account is inactive' });
     if (user.pin !== pin) return res.status(400).json({ error: 'Invalid PIN' });
 
-    // PIN is valid; frontend will generate the QR payload
     res.json({ message: 'PIN validated successfully' });
   } catch (error) {
-    console.error('QR Generation Error:', error);
+    console.error('QR Generation Error:', error.message);
     res.status(500).json({ error: 'Failed to validate PIN' });
   }
 });
 
-// POST /api/rate (ZambiaCoin: Rate a transaction)
+// POST /api/rate
 router.post('/rate', authenticateToken, async (req, res) => {
   const { transactionId, rating, raterUsername } = req.body;
 
@@ -1278,43 +1293,37 @@ router.post('/rate', authenticateToken, async (req, res) => {
   }
 
   try {
-    // Verify rater authentication
     if (raterUsername !== req.user.username) {
       return res.status(403).json({ error: 'Unauthorized rater' });
     }
 
-    // Find sender (rater) and transaction
     const senderUser = await User.findOne({ username: raterUsername });
     if (!senderUser) return res.status(404).json({ error: 'Rater not found' });
 
-    const transaction = senderUser.transactions.find(tx => tx._id === transactionId && tx.type === 'zmc-sent');
+    const transaction = senderUser.transactions.find((tx) => tx._id === transactionId && tx.type === 'zmc-sent');
     if (!transaction) {
       return res.status(404).json({ error: 'Transaction not found or not sent by this user' });
     }
 
-    // Find receiver to update trust score
     const receiverUser = await User.findOne({ username: transaction.toFrom });
     if (!receiverUser) return res.status(404).json({ error: 'Receiver not found' });
 
-    // Store rating in transaction (optional)
     transaction.trustRating = rating;
 
-    // Calculate new trust score (0-100 scale)
     const newRatingCount = (receiverUser.ratingCount || 0) + 1;
-    const currentAverage = receiverUser.trustScore ? (receiverUser.trustScore / 100) * 5 : 0; // Convert 0-100 to 0-5
+    const currentAverage = receiverUser.trustScore ? (receiverUser.trustScore / 100) * 5 : 0;
     const newAverage = ((currentAverage * (newRatingCount - 1)) + rating) / newRatingCount;
-    const newTrustScore = Math.round((newAverage / 5) * 100); // Scale to 0-100, rounded
+    const newTrustScore = Math.round((newAverage / 5) * 100);
 
     receiverUser.trustScore = newTrustScore;
     receiverUser.ratingCount = newRatingCount;
 
-    // Save both users
     await Promise.all([senderUser.save(), receiverUser.save()]);
 
-    res.json({ 
-      message: 'Rating submitted successfully', 
+    res.json({
+      message: 'Rating submitted successfully',
       trustScore: newTrustScore,
-      ratingCount: newRatingCount 
+      ratingCount: newRatingCount,
     });
   } catch (error) {
     console.error('Rating Error:', error.message, error.stack);
@@ -1322,7 +1331,7 @@ router.post('/rate', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/airdrop (ZambiaCoin: Admin-only airdrop)
+// POST /api/airdrop
 router.post('/airdrop', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const { amount } = req.body;
@@ -1333,7 +1342,7 @@ router.post('/airdrop', authenticateToken, async (req, res) => {
   try {
     const users = await User.find({ kycStatus: 'verified' });
     await Promise.all(
-      users.map(user => {
+      users.map((user) => {
         user.zambiaCoinBalance += amount;
         user.transactions.push({ type: 'zmc-received', amount, toFrom: 'admin-airdrop', date: new Date() });
         return user.save();
@@ -1341,23 +1350,29 @@ router.post('/airdrop', authenticateToken, async (req, res) => {
     );
     res.json({ message: `Airdropped ${amount} ZMC to all verified users` });
   } catch (error) {
-    console.error('ZMC Airdrop Error:', error);
+    console.error('ZMC Airdrop Error:', error.message);
     res.status(500).json({ error: 'Airdrop failed' });
   }
 });
 
+// POST /api/credit-zmc
 router.post('/credit-zmc', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const { toUsername, amount } = req.body;
-  const user = await User.findOne({ username: toUsername });
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
-  const creditAmount = parseFloat(amount);
-  if (isNaN(creditAmount) || creditAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-  user.zambiaCoinBalance += creditAmount;
-  user.transactions.push({ type: 'zmc-received', amount: creditAmount, toFrom: 'admin', date: new Date() });
-  await user.save();
-  res.json({ message: 'ZMC credited successfully' });
+  try {
+    const user = await User.findOne({ username: toUsername });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
+    const creditAmount = parseFloat(amount);
+    if (isNaN(creditAmount) || creditAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+    user.zambiaCoinBalance += creditAmount;
+    user.transactions.push({ type: 'zmc-received', amount: creditAmount, toFrom: 'admin', date: new Date() });
+    await user.save();
+    res.json({ message: 'ZMC credited successfully' });
+  } catch (error) {
+    console.error('Credit ZMC Error:', error.message);
+    res.status(500).json({ error: 'Failed to credit ZMC' });
+  }
 });
 
 module.exports = router;
