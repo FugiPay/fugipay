@@ -43,9 +43,9 @@ app.use('/api', require('./routes/api'));
 app.use('/api/business', businessRoutes); // Mount business routes
 
 // MongoDB Connection
-const mongoUri = process.env.MONGO_URI;
+const mongoUri = process.env.MONGODB_URI;
 if (!mongoUri) {
-  console.error('MONGO_URI is not defined');
+  console.error('MONGODB_URI is not defined');
   process.exit(1);
 }
 mongoose.connect(mongoUri, {
