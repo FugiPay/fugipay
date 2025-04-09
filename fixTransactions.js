@@ -9,25 +9,28 @@ async function fixTransactions() {
     });
     console.log('Connected to MongoDB');
 
-    // Find users with invalid transaction _ids
-    const users = await User.find({ 'transactions._id': { $type: 'string' } });
-    console.log(`Found ${users.length} users with string _ids in transactions`);
+    const users = await User.find({ 'transactions._id': { $exists: true } });
+    console.log(`Found ${users.length} users with transactions`);
 
     for (const user of users) {
       const validTransactions = user.transactions.filter(tx => {
-        try {
-          mongoose.Types.ObjectId(tx._id); // Test if _id is a valid ObjectId
-          return true;
-        } catch (e) {
-          console.log(`Invalid _id in transaction for ${user.username}: ${tx._id}`);
+        if (!tx._id) {
+          console.log(`Removing transaction for ${user.username} with undefined _id`);
           return false;
         }
+        if (typeof tx._id === 'string' && /^[0-9a-fA-F]{24}$/.test(tx._id)) {
+          return true; // Keep valid ObjectId strings
+        }
+        console.log(`Removing invalid _id in transaction for ${user.username}: ${tx._id}`);
+        return false;
       });
 
       if (validTransactions.length !== user.transactions.length) {
         user.transactions = validTransactions;
         await user.save();
-        console.log(`Cleaned transactions for ${user.username}. Kept ${validTransactions.length} valid entries.`);
+        console.log(`Cleaned transactions for ${user.username}. Kept ${validTransactions.length} of ${user.transactions.length} entries.`);
+      } else {
+        console.log(`No changes needed for ${user.username}`);
       }
     }
 
