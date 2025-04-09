@@ -95,12 +95,16 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
 
 // POST /api/register
 router.post('/register', upload.single('idImage'), async (req, res) => {
-  const { name, phoneNumber, email, password, pin } = req.body;
+  const { username, name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
 
   console.time('Register Total');
-  if (!name || !phoneNumber || !email || !password || !idImage || !pin) {
+  if (!username || !name || !phoneNumber || !email || !password || !idImage || !pin) {
     return res.status(400).json({ error: 'All fields, ID image, and PIN are required' });
+  }
+
+  if (!username.match(/^[a-zA-Z0-9_]{3,20}$/)) {
+    return res.status(400).json({ error: 'Username must be 3-20 characters, alphanumeric with underscores only' });
   }
 
   if (!phoneNumber.match(/^\+260(9[5678]|7[34679])\d{7}$/)) {
@@ -117,15 +121,15 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
 
   try {
     console.time('Check Existing User');
-    const existingUser = await User.findOne({ $or: [{ email }, { phoneNumber }] }).lean();
+    const existingUser = await User.findOne({ $or: [{ username }, { email }, { phoneNumber }] }).lean();
     console.timeEnd('Check Existing User');
     if (existingUser) {
-      return res.status(400).json({ error: 'Email or phone number already exists' });
+      return res.status(400).json({ error: 'Username, email, or phone number already exists' });
     }
 
     console.time('S3 Upload');
     const fileStream = fs.createReadStream(idImage.path);
-    const s3Key = `id-images/${Date.now()}-${idImage.originalname}`;
+    const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
     const params = { Bucket: S3_BUCKET, Key: s3Key, Body: fileStream, ContentType: idImage.mimetype, ACL: 'private' };
     const s3Response = await s3.upload(params).promise();
     const idImageUrl = s3Response.Location;
@@ -134,11 +138,22 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
 
     console.time('User Creation');
     const hashedPassword = await bcrypt.hash(password, 10);
-    const username = email.split('@')[0];
     const user = new User({
-      username, name, phoneNumber, email, password: hashedPassword, pin, idImageUrl,
-      role: 'user', balance: 0, zambiaCoinBalance: 0, trustScore: 0, ratingCount: 0,
-      transactions: [], kycStatus: 'pending', isActive: false,
+      username: username.trim(),
+      name: name.trim(),
+      phoneNumber,
+      email,
+      password: hashedPassword,
+      pin,
+      idImageUrl,
+      role: 'user',
+      balance: 0,
+      zambiaCoinBalance: 0,
+      trustScore: 0,
+      ratingCount: 0,
+      transactions: [],
+      kycStatus: 'pending',
+      isActive: false,
     });
     await user.save();
     console.timeEnd('User Creation');
