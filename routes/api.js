@@ -434,44 +434,44 @@ router.get('/business/:businessId', authenticateToken(['business', 'admin']), as
 // POST /api/store-qr-pin
 router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   const { username, pin } = req.body;
-  console.log('Request received:', { username, pin });
+  console.log('[STORE-QR-PIN] Request:', { username, pin });
 
   if (!username || !pin) {
-    console.log('Missing fields');
+    console.log('[STORE-QR-PIN] Missing fields');
     return res.status(400).json({ error: 'Username and PIN are required' });
   }
 
   try {
-    console.log('Finding user with phone:', req.user.phoneNumber);
+    console.log('[STORE-QR-PIN] Finding user:', req.user.phoneNumber);
     const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!user) {
-      console.log('User not found');
+      console.log('[STORE-QR-PIN] User not found');
       return res.status(404).json({ error: 'User not found' });
     }
     if (!user.isActive) {
-      console.log('User inactive');
+      console.log('[STORE-QR-PIN] User inactive');
       return res.status(403).json({ error: 'User is inactive' });
     }
     if (username !== user.username) {
-      console.log('Unauthorized username');
+      console.log('[STORE-QR-PIN] Unauthorized');
       return res.status(403).json({ error: 'Unauthorized' });
     }
 
     const qrId = crypto.randomBytes(16).toString('hex');
-    console.log('Generated qrId:', qrId);
-    const qrPin = new QRPin({ username, qrId, pin });
-    console.log('Saving QRPin...');
+    console.log('[STORE-QR-PIN] Generated qrId:', qrId);
+    const qrPin = new QRPin({ username, qrId, temp_pin: pin });  // Use temp_pin
+    console.log('[STORE-QR-PIN] Saving QRPin...');
     await qrPin.save();
-    console.log('QRPin saved');
+    console.log('[STORE-QR-PIN] QRPin saved');
 
-    console.log('Updating user transactions...');
+    console.log('[STORE-QR-PIN] Updating user...');
     user.transactions.push({ type: 'pending-pin', amount: 0, toFrom: 'Self' });
     await user.save();
-    console.log('User updated');
+    console.log('[STORE-QR-PIN] User updated');
 
     res.json({ qrId });
   } catch (error) {
-    console.error('QR Pin Store Error:', error.message, error.stack);
+    console.error('[STORE-QR-PIN] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Server error storing QR pin' });
   }
 });

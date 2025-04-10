@@ -4,28 +4,27 @@ const qrPinSchema = new mongoose.Schema({
   username: {
     type: String,
     required: true,
-    ref: 'User', // Reference to User model
-    index: true, // Explicit index for queries by username
+    ref: 'User',
+    index: true,
   },
   qrId: {
     type: String,
     required: true,
-    unique: true, // Ensures QR codes are unique
-    index: true, // Explicit for clarity
+    unique: true,
+    index: true,
   },
-  pin: {
+  temp_pin: {  // Renamed from pin
     type: String,
     required: true,
-    match: /^\d{4}$/, // Enforces 4-digit numeric PIN
+    match: /^\d{4}$/,
   },
   createdAt: {
     type: Date,
     default: Date.now,
-    expires: 900, // Expires after 15 minutes (900 seconds)
+    expires: 900,
   },
 });
 
-// Compound index (optional if qrId uniqueness is sufficient)
 qrPinSchema.index({ username: 1, qrId: 1 });
 
 module.exports = mongoose.model('QRPin', qrPinSchema);
