@@ -36,6 +36,12 @@ app.get('/health', (req, res) => {
   res.send('OK');
 });
 
+// Wake Endpoint
+app.get('/wake', (req, res) => {
+  console.log('[WAKE] Server pinged');
+  res.send('Awake');
+});
+
 // Routes
 app.use('/api', require('./routes/api'));
 
