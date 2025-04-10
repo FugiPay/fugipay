@@ -14,13 +14,14 @@ const Business = require('../models/Business'); // Added Business model
 const QRPin = require('../models/QRPin');
 const AdminLedger = require('../models/AdminLedger'); // Added for balance tracking
 const authenticateToken = require('../middleware/authenticateToken');
+const axios = require('axios');
 
-let axios;
+/* let axios;
 try {
   axios = require('axios');
 } catch (e) {
   console.error('Axios not installed. Please run `npm install axios`');
-}
+} */
 
 // Configure multer for temporary local storage
 const upload = multer({ dest: 'uploads/' });
