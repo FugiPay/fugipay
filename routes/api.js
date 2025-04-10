@@ -448,7 +448,7 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   }, 25000);
 
   try {
-    // Check MongoDB connection
+    // Verify MongoDB connection
     console.time(`[${req.method}] ${req.path} - MongoDB ping`);
     await mongoose.connection.db.admin().ping();
     console.timeEnd(`[${req.method}] ${req.path} - MongoDB ping`);
@@ -457,7 +457,7 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
     console.time(`[${req.method}] ${req.path} - User query`);
     const user = await User.findOne(
       { username: req.user.username },
-      { username: 1, isActive: 1, transactions: 1 }
+      { username: 1, isActive: 1 }
     ).lean().exec();
     console.timeEnd(`[${req.method}] ${req.path} - User query`);
 
@@ -486,11 +486,11 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
     await qrPin.save();
     console.timeEnd(`[${req.method}] ${req.path} - QR pin save`);
 
-    // Update user transactions
+    // Update transactions separately
     console.time(`[${req.method}] ${req.path} - User update`);
     await User.updateOne(
       { username: req.user.username },
-      { $push: { transactions: { type: 'pending-pin', amount: 0, toFrom: 'Self' } } }
+      { $push: { transactions: { type: 'pending-pin', amount: 0, toFrom: 'Self', date: new Date() } } }
     );
     console.timeEnd(`[${req.method}] ${req.path} - User update`);
 
@@ -500,7 +500,15 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error(`[${req.method}] ${req.path} - QR Pin Store Error:`, error.message, error.stack);
     clearTimeout(timeout);
-    res.status(500).json({ error: 'Server error storing QR pin', details: error.message, duration: `${Date.now() - start}ms` });
+
+    // Mimic index.tsx's error handling
+    if (error.code === 'ECONNABORTED') {
+      res.status(503).json({ error: 'Server timeout', duration: `${Date.now() - start}ms` });
+    } else if (error.name === 'MongoNetworkError' || error.name === 'MongooseServerSelectionError') {
+      res.status(503).json({ error: 'Database unavailable', details: error.message, duration: `${Date.now() - start}ms` });
+    } else {
+      res.status(500).json({ error: 'Server error storing QR pin', details: error.message, duration: `${Date.now() - start}ms` });
+    }
   }
 });
 
