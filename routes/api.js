@@ -434,81 +434,45 @@ router.get('/business/:businessId', authenticateToken(['business', 'admin']), as
 // POST /api/store-qr-pin
 router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   const { username, pin } = req.body;
-  const start = Date.now();
-  console.log(`[${req.method}] ${req.path} - Starting QR pin store for ${username}`);
+  console.log('Request received:', { username, pin });
 
   if (!username || !pin) {
-    console.log(`[${req.method}] ${req.path} - Missing required fields`);
+    console.log('Missing fields');
     return res.status(400).json({ error: 'Username and PIN are required' });
   }
 
-  const timeout = setTimeout(() => {
-    console.error(`[${req.method}] ${req.path} - Request timed out after 25s`);
-    res.status(503).json({ error: 'Request timed out', duration: `${Date.now() - start}ms` });
-  }, 25000);
-
   try {
-    // Verify MongoDB connection
-    console.time(`[${req.method}] ${req.path} - MongoDB ping`);
-    await mongoose.connection.db.admin().ping();
-    console.timeEnd(`[${req.method}] ${req.path} - MongoDB ping`);
-
-    // Fetch user with minimal fields
-    console.time(`[${req.method}] ${req.path} - User query`);
-    const user = await User.findOne(
-      { username: req.user.username },
-      { username: 1, isActive: 1 }
-    ).lean().exec();
-    console.timeEnd(`[${req.method}] ${req.path} - User query`);
-
+    console.log('Finding user with phone:', req.user.phoneNumber);
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!user) {
-      console.log(`[${req.method}] ${req.path} - User not found`);
-      clearTimeout(timeout);
+      console.log('User not found');
       return res.status(404).json({ error: 'User not found' });
     }
-
     if (!user.isActive) {
-      console.log(`[${req.method}] ${req.path} - User inactive`);
-      clearTimeout(timeout);
+      console.log('User inactive');
       return res.status(403).json({ error: 'User is inactive' });
     }
-
     if (username !== user.username) {
-      console.log(`[${req.method}] ${req.path} - Unauthorized access by ${req.user.username}`);
-      clearTimeout(timeout);
+      console.log('Unauthorized username');
       return res.status(403).json({ error: 'Unauthorized' });
     }
 
-    // Generate and store QR pin
-    console.time(`[${req.method}] ${req.path} - QR pin save`);
     const qrId = crypto.randomBytes(16).toString('hex');
+    console.log('Generated qrId:', qrId);
     const qrPin = new QRPin({ username, qrId, pin });
+    console.log('Saving QRPin...');
     await qrPin.save();
-    console.timeEnd(`[${req.method}] ${req.path} - QR pin save`);
+    console.log('QRPin saved');
 
-    // Update transactions separately
-    console.time(`[${req.method}] ${req.path} - User update`);
-    await User.updateOne(
-      { username: req.user.username },
-      { $push: { transactions: { type: 'pending-pin', amount: 0, toFrom: 'Self', date: new Date() } } }
-    );
-    console.timeEnd(`[${req.method}] ${req.path} - User update`);
+    console.log('Updating user transactions...');
+    user.transactions.push({ type: 'pending-pin', amount: 0, toFrom: 'Self' });
+    await user.save();
+    console.log('User updated');
 
-    console.log(`[${req.method}] ${req.path} - Total time: ${Date.now() - start}ms`);
-    clearTimeout(timeout);
     res.json({ qrId });
   } catch (error) {
-    console.error(`[${req.method}] ${req.path} - QR Pin Store Error:`, error.message, error.stack);
-    clearTimeout(timeout);
-
-    // Mimic index.tsx's error handling
-    if (error.code === 'ECONNABORTED') {
-      res.status(503).json({ error: 'Server timeout', duration: `${Date.now() - start}ms` });
-    } else if (error.name === 'MongoNetworkError' || error.name === 'MongooseServerSelectionError') {
-      res.status(503).json({ error: 'Database unavailable', details: error.message, duration: `${Date.now() - start}ms` });
-    } else {
-      res.status(500).json({ error: 'Server error storing QR pin', details: error.message, duration: `${Date.now() - start}ms` });
-    }
+    console.error('QR Pin Store Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error storing QR pin' });
   }
 });
 
