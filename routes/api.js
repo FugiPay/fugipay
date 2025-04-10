@@ -434,30 +434,73 @@ router.get('/business/:businessId', authenticateToken(['business', 'admin']), as
 // POST /api/store-qr-pin
 router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   const { username, pin } = req.body;
+  const start = Date.now();
+  console.log(`[${req.method}] ${req.path} - Starting QR pin store for ${username}`);
 
   if (!username || !pin) {
+    console.log(`[${req.method}] ${req.path} - Missing required fields`);
     return res.status(400).json({ error: 'Username and PIN are required' });
   }
 
-  try {
-    // Use username from token for lookup, consistent with frontend
-    const user = await User.findOne({ username: req.user.username });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
-    if (username !== user.username) return res.status(403).json({ error: 'Unauthorized' });
+  const timeout = setTimeout(() => {
+    console.error(`[${req.method}] ${req.path} - Request timed out after 25s`);
+    res.status(503).json({ error: 'Request timed out', duration: `${Date.now() - start}ms` });
+  }, 25000);
 
+  try {
+    // Check MongoDB connection
+    console.time(`[${req.method}] ${req.path} - MongoDB ping`);
+    await mongoose.connection.db.admin().ping();
+    console.timeEnd(`[${req.method}] ${req.path} - MongoDB ping`);
+
+    // Fetch user with minimal fields
+    console.time(`[${req.method}] ${req.path} - User query`);
+    const user = await User.findOne(
+      { username: req.user.username },
+      { username: 1, isActive: 1, transactions: 1 }
+    ).lean().exec();
+    console.timeEnd(`[${req.method}] ${req.path} - User query`);
+
+    if (!user) {
+      console.log(`[${req.method}] ${req.path} - User not found`);
+      clearTimeout(timeout);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (!user.isActive) {
+      console.log(`[${req.method}] ${req.path} - User inactive`);
+      clearTimeout(timeout);
+      return res.status(403).json({ error: 'User is inactive' });
+    }
+
+    if (username !== user.username) {
+      console.log(`[${req.method}] ${req.path} - Unauthorized access by ${req.user.username}`);
+      clearTimeout(timeout);
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    // Generate and store QR pin
+    console.time(`[${req.method}] ${req.path} - QR pin save`);
     const qrId = crypto.randomBytes(16).toString('hex');
     const qrPin = new QRPin({ username, qrId, pin });
     await qrPin.save();
+    console.timeEnd(`[${req.method}] ${req.path} - QR pin save`);
 
-    // Match old transaction format, no manual _id
-    user.transactions.push({ type: 'pending-pin', amount: 0, toFrom: 'Self' });
-    await user.save();
+    // Update user transactions
+    console.time(`[${req.method}] ${req.path} - User update`);
+    await User.updateOne(
+      { username: req.user.username },
+      { $push: { transactions: { type: 'pending-pin', amount: 0, toFrom: 'Self' } } }
+    );
+    console.timeEnd(`[${req.method}] ${req.path} - User update`);
 
+    console.log(`[${req.method}] ${req.path} - Total time: ${Date.now() - start}ms`);
+    clearTimeout(timeout);
     res.json({ qrId });
   } catch (error) {
-    console.error('QR Pin Store Error:', error.message);
-    res.status(500).json({ error: 'Server error storing QR pin' });
+    console.error(`[${req.method}] ${req.path} - QR Pin Store Error:`, error.message, error.stack);
+    clearTimeout(timeout);
+    res.status(500).json({ error: 'Server error storing QR pin', details: error.message, duration: `${Date.now() - start}ms` });
   }
 });
 
