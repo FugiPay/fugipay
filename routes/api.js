@@ -362,52 +362,33 @@ router.post('/reset-password', async (req, res) => {
 });
 
 // GET /api/user/:username
-router.get('/user/:username', authenticateToken, async (req, res) => {
+router.get('/user/:username', authenticateToken(), async (req, res) => {
   const start = Date.now();
-  console.log(`[${req.method}] ${req.path} - Starting fetch for ${req.params.username}`);
-
-  const timeout = setTimeout(() => {
-    console.error(`[${req.method}] ${req.path} - Request timed out after 25s`);
-    res.status(503).json({ error: 'Request timed out', duration: `${Date.now() - start}ms` });
-  }, 25000);
-
+  const timeout = setTimeout(() => res.status(503).json({ error: 'Request timed out', duration: `${Date.now() - start}ms` }), 25000);
   try {
-    console.time(`[${req.method}] ${req.path} - MongoDB ping`);
+    console.log('Fetching user:', req.params.username);
+    console.time('MongoDB ping');
     await mongoose.connection.db.admin().ping();
-    console.timeEnd(`[${req.method}] ${req.path} - MongoDB ping`);
+    console.timeEnd('MongoDB ping');
 
-    console.time(`[${req.method}] ${req.path} - User query`);
     const user = await User.findOne(
       { username: req.params.username },
       { username: 1, name: 1, phoneNumber: 1, email: 1, balance: 1, zambiaCoinBalance: 1, trustScore: 1, transactions: { $slice: -10 }, kycStatus: 1, isActive: 1 }
     ).lean().exec();
-    console.timeEnd(`[${req.method}] ${req.path} - User query`);
 
-    if (!user) {
-      console.log(`[${req.method}] ${req.path} - User not found`);
-      clearTimeout(timeout);
-      return res.status(404).json({ error: 'User not found' });
-    }
+    console.log('User found:', user);
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
-    if (req.user.phoneNumber !== user.phoneNumber && !['admin', 'business'].includes(req.user.role)) {
-      console.log(`[${req.method}] ${req.path} - Unauthorized access by ${req.user.phoneNumber}`);
-      clearTimeout(timeout);
+    if (req.user.username !== req.params.username && req.user.role !== 'admin' && req.user.role !== 'business') {
       return res.status(403).json({ error: 'Unauthorized' });
     }
 
-    const responseData = {
-      username: user.username, name: user.name, phoneNumber: user.phoneNumber, email: user.email,
-      balance: user.balance, zambiaCoinBalance: user.zambiaCoinBalance, trustScore: user.trustScore,
-      transactions: user.transactions, kycStatus: user.kycStatus, isActive: user.isActive,
-    };
-
-    console.log(`[${req.method}] ${req.path} - Total time: ${Date.now() - start}ms`);
     clearTimeout(timeout);
-    res.json(responseData);
+    res.json(user);
   } catch (error) {
-    console.error(`[${req.method}] ${req.path} - User Fetch Error:`, error.message, error.stack);
     clearTimeout(timeout);
-    res.status(500).json({ error: 'Server error fetching user', duration: `${Date.now() - start}ms` });
+    console.error('User Fetch Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
 
