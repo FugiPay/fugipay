@@ -19,6 +19,7 @@ const allowedOrigins = [
   'https://kayah.net',
   'https://khah-334000.web.app',
   'https://api.ipify.org',
+  'https://zangena-e33a7e55637a.herokuapp.com',
 ];
 
 const corsOptions = {
