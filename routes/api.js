@@ -440,6 +440,7 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
   }
 
   try {
+    // Use username from token for lookup, consistent with frontend
     const user = await User.findOne({ username: req.user.username });
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
@@ -449,7 +450,8 @@ router.post('/store-qr-pin', authenticateToken, async (req, res) => {
     const qrPin = new QRPin({ username, qrId, pin });
     await qrPin.save();
 
-    user.transactions.push({ _id: crypto.randomBytes(16).toString('hex'), type: 'pending-pin', amount: 0, toFrom: 'Self' });
+    // Match old transaction format, no manual _id
+    user.transactions.push({ type: 'pending-pin', amount: 0, toFrom: 'Self' });
     await user.save();
 
     res.json({ qrId });
