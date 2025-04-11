@@ -104,8 +104,8 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
       username: user.username,
       email: user.email,
       name: user.name,
-      balance: user.balance,
-      transactions: user.transactions,
+      balance: user.balance || 0,
+      transactions: user.transactions || [],
       kycStatus: user.kycStatus,
       role: user.role,
     });
