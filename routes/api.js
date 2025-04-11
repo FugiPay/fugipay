@@ -464,8 +464,7 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
   }
 
   try {
-    // Use username from token for lookup, consistent with frontend
-    const user = await User.findOne({ username: req.user.username });
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
     if (username !== user.username) return res.status(403).json({ error: 'Unauthorized' });
@@ -474,13 +473,12 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
     const qrPin = new QRPin({ username, qrId, pin });
     await qrPin.save();
 
-    // Match old transaction format, no manual _id
     user.transactions.push({ type: 'pending-pin', amount: 0, toFrom: 'Self' });
     await user.save();
 
     res.json({ qrId });
   } catch (error) {
-    console.error('QR Pin Store Error:', error.message);
+    console.error('QR Pin Store Error:', error);
     res.status(500).json({ error: 'Server error storing QR pin' });
   }
 });
