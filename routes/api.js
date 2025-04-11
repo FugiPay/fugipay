@@ -94,6 +94,18 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
   }
 }
 
+router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => {
+  try {
+    const user = await User.findOne({ phoneNumber: req.params.phoneNumber });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.phoneNumber !== req.user.phoneNumber) return res.status(403).json({ error: 'Unauthorized' });
+    res.json(user);
+  } catch (error) {
+    console.error('[USER] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // POST /api/register
 router.post('/register', upload.single('idImage'), async (req, res) => {
   const { username, name, phoneNumber, email, password, pin } = req.body;
@@ -219,7 +231,7 @@ router.post('/business/register', authenticateToken(['user']), upload.single('qr
 });
 
 // POST /api/save-push-token
-router.post('/save-push-token', authenticateToken, async (req, res) => {
+router.post('/save-push-token', authenticateToken(), async (req, res) => {
   const { pushToken } = req.body;
   if (!pushToken) return res.status(400).json({ error: 'Push token is required' });
   try {
@@ -462,7 +474,7 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
 });
 
 // POST /api/deposit/manual
-router.post('/deposit/manual', authenticateToken, async (req, res) => {
+router.post('/deposit/manual', authenticateToken(), async (req, res) => {
   const { amount, transactionId } = req.body;
   console.log('Manual Deposit Request:', { amount, transactionId });
 
@@ -657,7 +669,7 @@ router.get('/test-flutterwave', async (req, res) => {
 });
 
 // POST /api/withdraw/request
-router.post('/withdraw/request', authenticateToken, async (req, res) => {
+router.post('/withdraw/request', authenticateToken(), async (req, res) => {
   const { amount } = req.body;
   console.log('Withdraw Request:', { amount });
 
@@ -714,7 +726,7 @@ router.post('/business/withdraw/request', authenticateToken(['business']), async
 });
 
 // POST /api/withdraw
-router.post('/api/withdraw', authenticateToken, async (req, res) => {
+router.post('/api/withdraw', authenticateToken(), async (req, res) => {
   const { amount } = req.body;
   console.log('Withdraw Request Received:', { amount });
 
@@ -814,7 +826,7 @@ router.get('/ip', async (req, res) => {
 });
 
 // POST /api/payment-with-qr-pin
-router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
+router.post('/payment-with-qr-pin', authenticateToken(), async (req, res) => {
   const { fromUsername, toUsername, amount, qrId, pin } = req.body;
 
   if (!fromUsername || !toUsername || !amount || !qrId || !pin) {
@@ -881,7 +893,7 @@ router.post('/payment-with-qr-pin', authenticateToken, async (req, res) => {
 });
 
 // POST /api/business/payment-to-business
-router.post('/business/payment-to-business', authenticateToken, async (req, res) => {
+router.post('/business/payment-to-business', authenticateToken(), async (req, res) => {
   const { fromUsername, businessId, amount } = req.body;
 
   if (!fromUsername || !businessId || !amount) {
@@ -939,7 +951,7 @@ router.post('/business/payment-to-business', authenticateToken, async (req, res)
 });
 
 // POST /api/payment-with-search
-router.post('/payment-with-search', authenticateToken, async (req, res) => {
+router.post('/payment-with-search', authenticateToken(), async (req, res) => {
   const { fromUsername, searchQuery, amount, pin } = req.body;
 
   if (!fromUsername || !searchQuery || !amount || !pin) {
@@ -1004,7 +1016,7 @@ router.post('/payment-with-search', authenticateToken, async (req, res) => {
 });
 
 // PUT /api/user/update
-router.put('/user/update', authenticateToken, async (req, res) => {
+router.put('/user/update', authenticateToken(), async (req, res) => {
   const { username, email, password, pin } = req.body;
 
   try {
@@ -1039,7 +1051,7 @@ router.put('/user/update', authenticateToken, async (req, res) => {
 });
 
 // DELETE /api/user/delete
-router.delete('/user/delete', authenticateToken, async (req, res) => {
+router.delete('/user/delete', authenticateToken(), async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -1450,7 +1462,7 @@ router.get('/api/admin/pending-withdrawals', authenticateToken(['admin']), async
 });
 
 // GET /api/user
-router.get('/user', authenticateToken, async (req, res) => {
+router.get('/user', authenticateToken(), async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username })
       .select('username name phoneNumber email kycStatus zambiaCoinBalance trustScore transactions');
@@ -1467,7 +1479,7 @@ router.get('/user', authenticateToken, async (req, res) => {
 });
 
 // POST /api/transfer
-router.post('/transfer', authenticateToken, async (req, res) => {
+router.post('/transfer', authenticateToken(), async (req, res) => {
   const { sender, receiver, amount, pin } = req.body;
   if (!sender || !receiver || !amount || !pin) {
     return res.status(400).json({ error: 'Sender, receiver, amount, and PIN are required' });
@@ -1506,7 +1518,7 @@ router.post('/transfer', authenticateToken, async (req, res) => {
 });
 
 // POST /api/generate-qr
-router.post('/generate-qr', authenticateToken, async (req, res) => {
+router.post('/generate-qr', authenticateToken(), async (req, res) => {
   const { pin } = req.body;
   if (!pin || pin.length !== 4 || !/^\d{4}$/.test(pin)) {
     return res.status(400).json({ error: 'A valid 4-digit PIN is required' });
@@ -1526,7 +1538,7 @@ router.post('/generate-qr', authenticateToken, async (req, res) => {
 });
 
 // POST /api/rate
-router.post('/rate', authenticateToken, async (req, res) => {
+router.post('/rate', authenticateToken(), async (req, res) => {
   const { transactionId, rating, raterUsername } = req.body;
 
   if (!transactionId || !rating || !raterUsername) {
