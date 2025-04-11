@@ -841,7 +841,7 @@ router.get('/ip', async (req, res) => {
 });
 
 // POST /api/payment-with-qr-pin
-router.post('/payment-with-qr-pin', authenticateToken(), async (req, res) => {
+/* router.post('/payment-with-qr-pin', authenticateToken(), async (req, res) => {
   const { fromUsername, toUsername, amount, qrId, pin } = req.body;
 
   if (!fromUsername || !toUsername || !amount || !qrId || !pin) {
@@ -904,6 +904,67 @@ router.post('/payment-with-qr-pin', authenticateToken(), async (req, res) => {
   } catch (error) {
     console.error('QR Payment Error:', error.message);
     res.status(500).json({ error: 'Server error during payment' });
+  }
+}); */
+
+router.post('/pay-qr', authenticateToken(), async (req, res) => {
+  const { qrId, amount, pin, senderUsername } = req.body;
+
+  if (!qrId || !amount || !pin || !senderUsername) {
+    return res.status(400).json({ error: 'QR ID, amount, PIN, and sender username required' });
+  }
+  if (amount <= 0 || amount > 10000) {
+    return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
+  }
+
+  try {
+    const sender = await User.findOne({ username: senderUsername });
+    if (!sender || sender.username !== req.user.username) {
+      return res.status(403).json({ error: 'Unauthorized sender' });
+    }
+    if (!sender.isActive) return res.status(403).json({ error: 'Sender account inactive' });
+
+    const qrPin = await QRPin.findOne({ qrId, pin });
+    if (!qrPin) return res.status(404).json({ error: 'Invalid QR code or PIN' });
+
+    const receiver = await User.findOne({ username: qrPin.username });
+    if (!receiver || !receiver.isActive) {
+      return res.status(404).json({ error: 'Receiver not found or inactive' });
+    }
+
+    const sendingFee = amount <= 50 ? 0.50 : amount <= 100 ? 1.00 : amount <= 500 ? 2.00 :
+                       amount <= 1000 ? 2.50 : amount <= 5000 ? 3.50 : 5.00;
+    const receivingFee = amount <= 50 ? 0.50 : amount <= 100 ? 1.00 : amount <= 500 ? 1.50 :
+                         amount <= 1000 ? 2.00 : amount <= 5000 ? 3.00 : 5.00;
+
+    if (sender.balance < amount + sendingFee) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+
+    sender.balance -= (amount + sendingFee);
+    receiver.balance += (amount - receivingFee);
+
+    sender.transactions.push({
+      type: 'sent',
+      amount,
+      toFrom: receiver.username,
+      fee: sendingFee,
+      date: new Date(),
+    });
+    receiver.transactions.push({
+      type: 'received',
+      amount,
+      toFrom: sender.username,
+      fee: receivingFee,
+      date: new Date(),
+    });
+
+    await Promise.all([sender.save(), receiver.save(), QRPin.deleteOne({ qrId })]);
+
+    res.json({ sendingFee });
+  } catch (error) {
+    console.error('Payment Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error processing payment' });
   }
 });
 
