@@ -99,7 +99,16 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
     const user = await User.findOne({ phoneNumber: req.params.phoneNumber });
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (user.phoneNumber !== req.user.phoneNumber) return res.status(403).json({ error: 'Unauthorized' });
-    res.json(user);
+    res.json({
+      phoneNumber: user.phoneNumber,
+      username: user.username,
+      email: user.email,
+      name: user.name,
+      balance: user.balance,
+      transactions: user.transactions,
+      kycStatus: user.kycStatus,
+      role: user.role,
+    });
   } catch (error) {
     console.error('[USER] Error:', error.message);
     res.status(500).json({ error: 'Server error' });
