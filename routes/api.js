@@ -264,10 +264,8 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
 });
 
 // POST /api/login
-// POST /api/login
 router.post('/login', async (req, res) => {
   const { identifier, password } = req.body;
-
   if (!identifier || !password) {
     return res.status(400).json({ error: 'Username or phone number and password are required' });
   }
@@ -275,20 +273,15 @@ router.post('/login', async (req, res) => {
   try {
     const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
     if (!user) {
-      return res.status(400).json({ error: 'User not found. Check your username or phone number.' });
+      return res.status(400).json({ error: 'Invalid credentials' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(400).json({ error: 'Incorrect password.' });
+      return res.status(400).json({ error: 'Invalid credentials' });
     }
 
-    const token = jwt.sign(
-      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
+    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
     const isFirstLogin = !user.lastLogin;
     user.lastLogin = new Date();
     await user.save();
@@ -296,7 +289,7 @@ router.post('/login', async (req, res) => {
     res.status(200).json({
       token,
       username: user.username,
-      phoneNumber: user.phoneNumber, // Added phoneNumber
+      phoneNumber: user.phoneNumber, // Added
       role: user.role || 'user',
       kycStatus: user.kycStatus || 'pending',
       isFirstLogin,
