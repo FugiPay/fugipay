@@ -23,6 +23,21 @@ try {
   console.error('Axios not installed. Please run `npm install axios`');
 } */
 
+
+// Middleware to check admin role
+const requireAdmin = async (req, res, next) => {
+  try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+  } catch (error) {
+    console.error('[ADMIN] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 // Configure multer for temporary local storage
 const upload = multer({ dest: 'uploads/' });
 
@@ -933,6 +948,7 @@ router.get('/ip', async (req, res) => {
 router.post('/pay-qr', authenticateToken(), async (req, res) => {
   const { qrId, amount, pin, senderUsername } = req.body;
 
+  // Validation
   if (!qrId || !amount || !pin || !senderUsername) {
     return res.status(400).json({ error: 'QR ID, amount, PIN, and sender username required' });
   }
@@ -940,34 +956,71 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
     return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
   }
 
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
-    const sender = await User.findOne({ username: senderUsername });
+    // Sender verification
+    const sender = await User.findOne({ username: senderUsername }).session(session);
     if (!sender || sender.username !== req.user.username) {
+      await session.abortTransaction();
+      session.endSession();
       return res.status(403).json({ error: 'Unauthorized sender' });
     }
-    if (!sender.isActive) return res.status(403).json({ error: 'Sender account inactive' });
+    if (!sender.isActive) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(403).json({ error: 'Sender account inactive' });
+    }
 
-    const qrPin = await QRPin.findOne({ qrId, pin });
-    if (!qrPin) return res.status(404).json({ error: 'Invalid QR code or PIN' });
+    // QR PIN validation
+    const qrPin = await QRPin.findOne({ qrId, pin }).session(session);
+    if (!qrPin) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'Invalid QR code or PIN' });
+    }
 
-    const receiver = await User.findOne({ username: qrPin.username });
+    // Receiver verification
+    const receiver = await User.findOne({ username: qrPin.username }).session(session);
     if (!receiver || !receiver.isActive) {
+      await session.abortTransaction();
+      session.endSession();
       return res.status(404).json({ error: 'Receiver not found or inactive' });
     }
 
-    const sendingFee = amount <= 50 ? 0.50 : amount <= 100 ? 1.00 : amount <= 500 ? 2.00 :
-                       amount <= 1000 ? 2.50 : amount <= 5000 ? 3.50 : 5.00;
-    const receivingFee = amount <= 50 ? 0.50 : amount <= 100 ? 1.00 : amount <= 500 ? 1.50 :
-                         amount <= 1000 ? 2.00 : amount <= 5000 ? 3.00 : 5.00;
+    // Fee calculation
+    const sendingFee = amount <= 50 ? 0.50 : 
+                      amount <= 100 ? 1.00 : 
+                      amount <= 500 ? 2.00 :
+                      amount <= 1000 ? 2.50 : 
+                      amount <= 5000 ? 3.50 : 
+                      5.00;
+    const receivingFee = amount <= 50 ? 0.50 : 
+                        amount <= 100 ? 1.00 : 
+                        amount <= 500 ? 1.50 :
+                        amount <= 1000 ? 2.00 : 
+                        amount <= 5000 ? 3.00 : 
+                        5.00;
 
+    // Balance check
     if (sender.balance < amount + sendingFee) {
+      await session.abortTransaction();
+      session.endSession();
       return res.status(400).json({ error: 'Insufficient balance' });
     }
 
+    // Generate transaction IDs
+    const sentTxId = new mongoose.Types.ObjectId().toString();
+    const receivedTxId = new mongoose.Types.ObjectId().toString();
+
+    // Update balances
     sender.balance -= (amount + sendingFee);
     receiver.balance += (amount - receivingFee);
 
+    // Record user transactions
     sender.transactions.push({
+      _id: sentTxId,
       type: 'sent',
       amount,
       toFrom: receiver.username,
@@ -975,6 +1028,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       date: new Date(),
     });
     receiver.transactions.push({
+      _id: receivedTxId,
       type: 'received',
       amount,
       toFrom: sender.username,
@@ -982,12 +1036,123 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       date: new Date(),
     });
 
-    await Promise.all([sender.save(), receiver.save(), QRPin.deleteOne({ qrId })]);
+    // Update AdminLedger
+    const totalFee = sendingFee + receivingFee;
+    await AdminLedger.findOneAndUpdate(
+      {}, // Singleton
+      {
+        $inc: { totalBalance: totalFee },
+        $set: { lastUpdated: new Date() },
+        $push: {
+          transactions: {
+            type: 'fee-collected',
+            amount: totalFee,
+            sender: sender.username,
+            receiver: receiver.username,
+            userTransactionIds: [sentTxId, receivedTxId],
+            date: new Date(),
+          },
+        },
+      },
+      {
+        upsert: true, // Create if doesn't exist
+        new: true, // Return updated document
+        session,
+      }
+    );
 
-    res.json({ sendingFee });
+    // Save changes and delete QR PIN
+    await Promise.all([
+      sender.save({ session }),
+      receiver.save({ session }),
+      QRPin.deleteOne({ qrId }).session(session),
+    ]);
+
+    await session.commitTransaction();
+    session.endSession();
+
+    console.log('[PAY-QR] Transaction:', {
+      amount,
+      sendingFee,
+      receivingFee,
+      totalFeeCredited: totalFee,
+      sentTxId,
+      receivedTxId,
+      sender: sender.username,
+      receiver: receiver.username,
+    });
+
+    res.json({ sendingFee, receivingFee, amount });
   } catch (error) {
-    console.error('Payment Error:', error.message, error.stack);
+    await session.abortTransaction();
+    session.endSession();
+    console.error('[PAY-QR] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Server error processing payment' });
+  }
+});
+
+// GET /admin/ledger
+router.get('/ledger', authenticateToken(), requireAdmin, async (req, res) => {
+  try {
+    const { startDate, endDate, limit = 50, skip = 0 } = req.query;
+
+    // Validate and parse query params
+    const query = {};
+    if (startDate || endDate) {
+      query['transactions.date'] = {};
+      if (startDate) {
+        const start = new Date(startDate);
+        if (isNaN(start)) return res.status(400).json({ error: 'Invalid startDate' });
+        query['transactions.date'].$gte = start;
+      }
+      if (endDate) {
+        const end = new Date(endDate);
+        if (isNaN(end)) return res.status(400).json({ error: 'Invalid endDate' });
+        query['transactions.date'].$lte = end;
+      }
+    }
+
+    const parsedLimit = Math.min(parseInt(limit, 10), 100); // Cap at 100
+    const parsedSkip = Math.max(parseInt(skip, 10), 0); // No negative skip
+
+    // Fetch AdminLedger
+    const ledger = await AdminLedger.findOne()
+      .select('totalBalance lastUpdated transactions')
+      .lean();
+
+    if (!ledger) {
+      return res.status(404).json({ error: 'Admin ledger not found' });
+    }
+
+    // Filter transactions
+    let transactions = ledger.transactions || [];
+    if (Object.keys(query).length) {
+      transactions = transactions.filter(tx => {
+        const txDate = new Date(tx.date);
+        return (!query['transactions.date'].$gte || txDate >= query['transactions.date'].$gte) &&
+               (!query['transactions.date'].$lte || txDate <= query['transactions.date'].$lte);
+      });
+    }
+
+    // Apply pagination
+    const totalTransactions = transactions.length;
+    transactions = transactions.slice(parsedSkip, parsedSkip + parsedLimit);
+
+    // Response
+    res.json({
+      totalBalance: ledger.totalBalance,
+      lastUpdated: ledger.lastUpdated,
+      transactions,
+      pagination: {
+        total: totalTransactions,
+        limit: parsedLimit,
+        skip: parsedSkip,
+        hasMore: parsedSkip + parsedLimit < totalTransactions,
+      },
+    });
+  } catch (error) {
+    console.error('[GET /admin/ledger] Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error fetching ledger' });
   }
 });
 

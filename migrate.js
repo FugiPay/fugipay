@@ -1,12 +1,22 @@
 const mongoose = require('mongoose');
-const User = require('./models/User');
+const User = require('./models/User'); // Adjust path to your User model
+require('dotenv').config();
 
-const connectDB = async () => {
-  const mongoUri = process.env.MONGODB_URI;
-  if (!mongoUri) throw new Error('MONGODB_URI not set');
-  await mongoose.connect(mongoUri, { useNewUrlParser: true, useUnifiedTopology: true });
-  console.log('Connected to MongoDB');
-};
+// MongoDB connection string from .env
+const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
+
+async function connectToDatabase() {
+  try {
+    await mongoose.connect(MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    console.log('Connected to MongoDB');
+  } catch (error) {
+    console.error('MongoDB connection error:', error);
+    process.exit(1);
+  }
+}
 
 async function migrateUsers() {
   try {
@@ -26,7 +36,7 @@ async function migrateUsers() {
     } else {
       console.log('No duplicate usernames found');
     }
-/* 
+
     // 2. Migrate roles
     const usersWithInvalidRoles = await User.find({
       $or: [{ role: { $exists: false } }, { role: { $nin: ['user', 'admin'] } }],
@@ -37,7 +47,7 @@ async function migrateUsers() {
       console.log(`Set role for user: ${user.username} (Role: ${user.role})`);
     }
     console.log(`Processed ${usersWithInvalidRoles.length} users for role migration`);
- */
+
     // 3. Add lastViewedTimestamp
     const result = await User.updateMany(
       { lastViewedTimestamp: { $exists: false } },
@@ -51,14 +61,9 @@ async function migrateUsers() {
   }
 }
 
-connectDB()
-  .then(migrateUsers)
-  .then(() => {
-    console.log('Migration completed successfully');
-    return mongoose.connection.close();
-  })
-  .then(() => console.log('Database connection closed'))
-  .catch((error) => {
-    console.error('Migration failed:', error.message);
-    process.exit(1);
-  });
+async function runMigration() {
+  await connectToDatabase();
+  await migrateUsers();
+}
+
+runMigration();
