@@ -1,4 +1,4 @@
-/* const jwt = require('jsonwebtoken');
+const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
 
 module.exports = (roles = []) => (req, res, next) => {
@@ -18,8 +18,8 @@ module.exports = (roles = []) => (req, res, next) => {
 
     next();
   });
-}; */
-
+};
+/* 
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -49,4 +49,4 @@ module.exports = (roles = []) => (req, res, next) => {
 
     next();
   });
-};
+}; */
