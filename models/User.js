@@ -61,6 +61,7 @@ const userSchema = new mongoose.Schema({
   pendingDeposits: [pendingDepositSchema],
   pendingWithdrawals: [pendingWithdrawalSchema],
   lastLogin: { type: Date, default: null },
+  lastViewedTimestamp: { type: Number, default: 0 }, // New field
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

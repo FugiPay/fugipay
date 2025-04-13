@@ -108,9 +108,32 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
       transactions: user.transactions || [],
       kycStatus: user.kycStatus,
       role: user.role,
+      lastViewedTimestamp: user.lastViewedTimestamp || 0, // Include new field
     });
   } catch (error) {
     console.error('[USER] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.put('/user/update-notification', authenticateToken(), async (req, res) => {
+  try {
+    const { phoneNumber, lastViewedTimestamp } = req.body;
+    if (!phoneNumber || typeof lastViewedTimestamp !== 'number') {
+      return res.status(400).json({ error: 'Invalid phoneNumber or timestamp' });
+    }
+    if (phoneNumber !== req.user.phoneNumber) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const user = await User.findOneAndUpdate(
+      { phoneNumber },
+      { lastViewedTimestamp },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ message: 'Notification timestamp updated' });
+  } catch (error) {
+    console.error('[USER] Update Notification Error:', error.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

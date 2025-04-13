@@ -10,7 +10,7 @@ const connectDB = async () => {
 
 async function migrateUsers() {
   try {
-    // Check for duplicate usernames
+    // 1. Check for duplicate usernames
     const duplicateUsers = await User.aggregate([
       { $group: { _id: "$username", count: { $sum: 1 }, docs: { $push: "$$ROOT" } } },
       { $match: { count: { $gt: 1 } } },
@@ -23,24 +23,42 @@ async function migrateUsers() {
         await User.deleteMany({ _id: { $in: removeIds } });
         console.log(`Removed ${removeIds.length} duplicates for username: ${dup._id}`);
       }
+    } else {
+      console.log('No duplicate usernames found');
     }
-
-    // Migrate roles
-    const users = await User.find({ $or: [{ role: { $exists: false } }, { role: { $nin: ['user', 'admin'] } }] });
-    for (const user of users) {
+/* 
+    // 2. Migrate roles
+    const usersWithInvalidRoles = await User.find({
+      $or: [{ role: { $exists: false } }, { role: { $nin: ['user', 'admin'] } }],
+    });
+    for (const user of usersWithInvalidRoles) {
       user.role = user.role === 'admin' ? 'admin' : 'user';
       await user.save();
       console.log(`Set role for user: ${user.username} (Role: ${user.role})`);
     }
-    console.log(`Processed ${users.length} users`);
+    console.log(`Processed ${usersWithInvalidRoles.length} users for role migration`);
+ */
+    // 3. Add lastViewedTimestamp
+    const result = await User.updateMany(
+      { lastViewedTimestamp: { $exists: false } },
+      { $set: { lastViewedTimestamp: 0 } }
+    );
+    console.log(`Added lastViewedTimestamp to ${result.modifiedCount} users`);
+
   } catch (error) {
-    console.error('Migration error:', error);
+    console.error('Migration error:', error.message);
     process.exit(1);
   }
 }
 
 connectDB()
   .then(migrateUsers)
-  .then(() => mongoose.connection.close())
-  .then(() => console.log('Done'))
-  .catch(() => process.exit(1));
+  .then(() => {
+    console.log('Migration completed successfully');
+    return mongoose.connection.close();
+  })
+  .then(() => console.log('Database connection closed'))
+  .catch((error) => {
+    console.error('Migration failed:', error.message);
+    process.exit(1);
+  });
