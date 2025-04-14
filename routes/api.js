@@ -1092,7 +1092,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
 });
 
 // GET /admin/ledger
-router.get('/ledger', authenticateToken(), requireAdmin, async (req, res) => {
+router.get('/admin/ledger', authenticateToken(), requireAdmin, async (req, res) => {
   try {
     const { startDate, endDate, limit = 50, skip = 0 } = req.query;
 
