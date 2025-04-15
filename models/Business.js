@@ -2,15 +2,16 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 
 const transactionSchema = new mongoose.Schema({
-  _id: { type: String, default: () => crypto.randomBytes(16).toString('hex') }, // 32-char hex string
+  _id: { type: String, default: () => crypto.randomBytes(16).toString('hex') },
   type: {
     type: String,
     required: true,
-    enum: ['received', 'deposited', 'withdrawn'],
+    enum: ['received', 'deposited', 'withdrawn', 'refunded', 'settled'],
   },
   amount: { type: Number, required: true },
   toFrom: { type: String, required: true },
   fee: { type: Number, default: 0 },
+  reason: { type: String },
   date: { type: Date, default: Date.now, index: true },
 });
 
@@ -29,18 +30,23 @@ const pendingWithdrawalSchema = new mongoose.Schema({
 });
 
 const businessSchema = new mongoose.Schema({
-  businessId: { type: String, required: true, unique: true, index: true }, // TPIN
+  businessId: { type: String, required: true, unique: true, index: true },
   name: { type: String, required: true },
   ownerUsername: { type: String, required: true },
-  pin: { type: String, required: true, minlength: 4, maxlength: 4 }, // Align with User
+  pin: { type: String, required: true, minlength: 4, maxlength: 4 },
   balance: { type: Number, default: 0 },
   qrCode: { type: String },
+  bankDetails: {
+    bankName: { type: String },
+    accountNumber: { type: String },
+    accountType: { type: String, enum: ['bank', 'mobile_money'] },
+  },
   role: { type: String, enum: ['business', 'admin'], default: 'business' },
   approvalStatus: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
   transactions: [transactionSchema],
   pendingDeposits: [pendingDepositSchema],
   pendingWithdrawals: [pendingWithdrawalSchema],
-  pushToken: { type: String, default: null }, // Added default for consistency
+  pushToken: { type: String, default: null },
   isActive: { type: Boolean, default: false },
 }, { timestamps: true });
 
