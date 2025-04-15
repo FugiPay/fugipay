@@ -14,8 +14,8 @@ const QRCode = require('qrcode');
 const Business = require('../models/Business'); // Added Business model
 const QRPin = require('../models/QRPin');
 const AdminLedger = require('../models/AdminLedger'); // Added for balance tracking
-const BusinessTransaction = require('./models/BusinessTransaction');
-const BusinessAdminLedger = require('./models/BusinessAdminLedger');
+const BusinessTransaction = require('../models/BusinessTransaction');
+const BusinessAdminLedger = require('../models/BusinessAdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
 const axios = require('axios');
 
