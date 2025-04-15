@@ -833,6 +833,100 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
   }
 });
 
+// Business Signup
+router.post('/business/signup', async (req, res) => {
+  const { businessId, name, ownerUsername, pin, phoneNumber } = req.body;
+  if (!businessId || !name || !ownerUsername || !pin || !phoneNumber) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+  if (!/^\d{10}$/.test(businessId)) {
+    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+  }
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
+  if (!/^[a-zA-Z0-9]+$/.test(ownerUsername)) {
+    return res.status(400).json({ error: 'Owner Username must be alphanumeric' });
+  }
+  if (!/^0\d{9}$/.test(phoneNumber)) {
+    return res.status(400).json({ error: 'Phone number must be a valid 10-digit Zambian mobile number (e.g., 0961234567)' });
+  }
+  try {
+    const existingBusiness = await Business.findOne({ $or: [{ businessId }, { ownerUsername }, { phoneNumber }] });
+    if (existingBusiness) {
+      return res.status(409).json({ error: 'Business ID (TPIN), Owner Username, or Phone Number already registered' });
+    }
+    const hashedPin = await bcrypt.hash(pin, 10);
+    const business = new Business({
+      businessId,
+      name,
+      ownerUsername,
+      pin: hashedPin,
+      phoneNumber,
+      balance: 0,
+      transactions: [],
+      pendingDeposits: [],
+      pendingWithdrawals: [],
+      qrCode: JSON.stringify({ type: 'business_payment', businessId, businessName: name }),
+      role: 'business',
+      approvalStatus: 'pending',
+      isActive: false,
+    });
+    await business.save();
+    const admin = await User.findOne({ role: 'admin' });
+    if (admin && admin.pushToken) {
+      await sendPushNotification(
+        admin.pushToken,
+        'New Business Signup',
+        `Business ${businessId} (${name}) awaits approval`,
+        { businessId }
+      );
+    }
+    res.status(201).json({
+      message: 'Business registered, awaiting admin approval',
+      business: { businessId: business.businessId, name: business.name, approvalStatus: business.approvalStatus },
+    });
+  } catch (error) {
+    console.error('Business Signup Error:', error);
+    res.status(500).json({ error: 'Server error during signup' });
+  }
+});
+
+// Business Signin
+router.post('/business/signin', async (req, res) => {
+  const { businessId, pin } = req.body;
+  if (!businessId || !pin) {
+    return res.status(400).json({ error: 'Business ID and PIN are required' });
+  }
+  if (!/^\d{10}$/.test(businessId)) {
+    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+  }
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
+  try {
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found, check your 10-digit TPIN and PIN' });
+    }
+    if (business.approvalStatus !== 'approved') {
+      return res.status(403).json({ error: 'Business is not yet approved by admin' });
+    }
+    const isMatch = await bcrypt.compare(pin, business.pin);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid PIN' });
+    }
+    const token = jwt.sign({ id: business._id, role: business.role }, JWT_SECRET, { expiresIn: '30d' });
+    res.json({
+      token,
+      business: { businessId: business.businessId, name: business.name, role: business.role, phoneNumber: business.phoneNumber },
+    });
+  } catch (error) {
+    console.error('Business Signin Error:', error);
+    res.status(500).json({ error: 'Server error during signin' });
+  }
+});
+
 // GET /api/business/:businessId
 router.get('/business/:businessId', authenticateToken(['business', 'admin']), async (req, res) => {
   try {
