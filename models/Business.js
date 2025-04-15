@@ -32,8 +32,14 @@ const pendingWithdrawalSchema = new mongoose.Schema({
 const businessSchema = new mongoose.Schema({
   businessId: { type: String, required: true, unique: true, index: true },
   name: { type: String, required: true },
-  ownerUsername: { type: String, required: true },
-  pin: { type: String, required: true, minlength: 4, maxlength: 4 },
+  ownerUsername: { type: String, required: true, unique: true },
+  pin: { type: String, required: true },
+  phoneNumber: {
+    type: String,
+    required: true,
+    unique: true,
+    match: [/^\+2609[567]\d{7}$/, 'Phone number must be a valid Zambian mobile number (e.g., +260961234567)'],
+  },
   balance: { type: Number, default: 0 },
   qrCode: { type: String },
   bankDetails: {
@@ -49,5 +55,10 @@ const businessSchema = new mongoose.Schema({
   pushToken: { type: String, default: null },
   isActive: { type: Boolean, default: false },
 }, { timestamps: true });
+
+// Indexes for performance
+businessSchema.index({ businessId: 1 });
+businessSchema.index({ ownerUsername: 1 });
+businessSchema.index({ phoneNumber: 1 });
 
 module.exports = mongoose.model('Business', businessSchema);
