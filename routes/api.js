@@ -833,11 +833,10 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
   }
 });
 
-// Business Signup
 router.post('/business/signup', async (req, res) => {
-  const { businessId, name, ownerUsername, pin, phoneNumber } = req.body;
+  const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
   if (!businessId || !name || !ownerUsername || !pin || !phoneNumber) {
-    return res.status(400).json({ error: 'All fields are required' });
+    return res.status(400).json({ error: 'Business ID, Name, Owner Username, PIN, and Phone Number are required' });
   }
   if (!/^\d{10}$/.test(businessId)) {
     return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
@@ -848,13 +847,37 @@ router.post('/business/signup', async (req, res) => {
   if (!/^[a-zA-Z0-9]+$/.test(ownerUsername)) {
     return res.status(400).json({ error: 'Owner Username must be alphanumeric' });
   }
-  if (!/^0\d{9}$/.test(phoneNumber)) {
-    return res.status(400).json({ error: 'Phone number must be a valid 10-digit Zambian mobile number (e.g., 0961234567)' });
+  if (!/^\+2609[567]\d{7}$/.test(phoneNumber)) {
+    return res.status(400).json({ error: 'Phone number must be a valid Zambian mobile number (e.g., +260961234567)' });
   }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Email must be a valid address' });
+  }
+  if (bankDetails) {
+    if (!['bank', 'mobile_money'].includes(bankDetails.accountType)) {
+      return res.status(400).json({ error: 'Account type must be bank or mobile_money' });
+    }
+    if (bankDetails.accountNumber) {
+      const accountLength = bankDetails.accountType === 'bank' ? /^\d{10,12}$/ : /^\d{10}$/;
+      if (!accountLength.test(bankDetails.accountNumber)) {
+        return res.status(400).json({
+          error: bankDetails.accountType === 'bank'
+            ? 'Bank account number must be 10-12 digits'
+            : 'Mobile money number must be 10 digits',
+        });
+      }
+      if (!bankDetails.bankName || !bankDetails.bankName.trim()) {
+        return res.status(400).json({ error: 'Bank or Mobile Name is required if account number is provided' });
+      }
+    }
+  }
+
   try {
-    const existingBusiness = await Business.findOne({ $or: [{ businessId }, { ownerUsername }, { phoneNumber }] });
+    const existingBusiness = await Business.findOne({
+      $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}].filter(Boolean),
+    });
     if (existingBusiness) {
-      return res.status(409).json({ error: 'Business ID (TPIN), Owner Username, or Phone Number already registered' });
+      return res.status(409).json({ error: 'Business ID, Owner Username, Phone Number, or Email already registered' });
     }
     const hashedPin = await bcrypt.hash(pin, 10);
     const business = new Business({
@@ -863,6 +886,12 @@ router.post('/business/signup', async (req, res) => {
       ownerUsername,
       pin: hashedPin,
       phoneNumber,
+      email,
+      bankDetails: bankDetails && (bankDetails.bankName || bankDetails.accountNumber) ? {
+        bankName: bankDetails.bankName?.trim(),
+        accountNumber: bankDetails.accountNumber,
+        accountType: bankDetails.accountType,
+      } : undefined,
       balance: 0,
       transactions: [],
       pendingDeposits: [],
@@ -924,6 +953,88 @@ router.post('/business/signin', async (req, res) => {
   } catch (error) {
     console.error('Business Signin Error:', error);
     res.status(500).json({ error: 'Server error during signin' });
+  }
+});
+
+// Forgot PIN
+router.post('/business/forgot-pin', async (req, res) => {
+  const { phoneNumber, businessId } = req.body;
+  if (!phoneNumber && !businessId) {
+    return res.status(400).json({ error: 'Phone number or Business ID required' });
+  }
+  if (phoneNumber && !/^\+2609[567]\d{7}$/.test(phoneNumber)) {
+    return res.status(400).json({ error: 'Invalid phone number' });
+  }
+  if (businessId && !/^\d{10}$/.test(businessId)) {
+    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+  }
+  try {
+    const business = await Business.findOne({
+      $or: [
+        phoneNumber ? { phoneNumber } : {},
+        businessId ? { businessId } : {},
+      ].filter(Boolean),
+    });
+    if (!business) {
+      return res.status(404).json({ error: 'No account found with that identifier' });
+    }
+    if (!business.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(business.email)) {
+      return res.status(500).json({ error: 'Invalid email configuration' });
+    }
+
+    const resetToken = crypto.randomBytes(20).toString('hex');
+    const resetTokenExpiry = Date.now() + 3600000; // 1 hour
+
+    business.resetToken = resetToken;
+    business.resetTokenExpiry = resetTokenExpiry;
+    await business.save();
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER || 'no-reply@zangena.com',
+      to: business.email,
+      subject: 'Zangena PIN Reset',
+      text: `Your PIN reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena Business app to reset your PIN.`,
+      html: `<h2>Zangena PIN Reset</h2><p>Your PIN reset token is: <strong>${resetToken}</strong></p><p>It expires in 1 hour. Enter it in the Zangena Business app to reset your PIN.</p>`,
+    };
+
+    await transporter.sendMail(mailOptions);
+    res.json({ message: 'Reset instructions have been sent to your email.' });
+  } catch (error) {
+    console.error('Forgot PIN Error:', error);
+    res.status(500).json({ error: 'Server error during PIN reset request' });
+  }
+});
+
+// Reset PIN
+router.post('/business/reset-pin', async (req, res) => {
+  const { resetToken, newPin, phoneNumber, businessId } = req.body;
+  if (!resetToken || !newPin || (!phoneNumber && !businessId)) {
+    return res.status(400).json({ error: 'Reset token, new PIN, and phone number or Business ID required' });
+  }
+  if (!/^\d{4}$/.test(newPin)) {
+    return res.status(400).json({ error: 'New PIN must be a 4-digit number' });
+  }
+  try {
+    const business = await Business.findOne({
+      $or: [
+        phoneNumber ? { phoneNumber } : {},
+        businessId ? { businessId } : {},
+      ].filter(Boolean),
+    });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    if (!business.resetToken || business.resetToken !== resetToken || business.resetTokenExpiry < Date.now()) {
+      return res.status(401).json({ error: 'Invalid or expired reset token' });
+    }
+    business.pin = await bcrypt.hash(newPin, 10);
+    business.resetToken = null;
+    business.resetTokenExpiry = null;
+    await business.save();
+    res.json({ message: 'PIN reset successfully' });
+  } catch (error) {
+    console.error('Reset PIN Error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
