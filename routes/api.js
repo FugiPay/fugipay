@@ -2291,6 +2291,113 @@ router.get('/api/admin/pending-withdrawals', authenticateToken(['admin']), async
   }
 });
 
+// Business Transactions
+router.get('/business/transactions/:businessId', async (req, res) => {
+  const { businessId } = req.params;
+  try {
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    res.json(business.transactions || []);
+  } catch (error) {
+    console.error('Business Transactions Error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Credit Business
+router.post('/business/credit', async (req, res) => {
+  const { adminUsername, businessId, amount } = req.body;
+  if (!adminUsername || !businessId || !amount || amount <= 0) {
+    return res.status(400).json({ error: 'Admin username, business ID, and valid amount required' });
+  }
+  try {
+    const admin = await User.findOne({ username: adminUsername, role: 'admin' });
+    if (!admin) {
+      return res.status(403).json({ error: 'Admin not found' });
+    }
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    business.balance += amount;
+    business.transactions.push({
+      type: 'credited',
+      amount,
+      toFrom: `Admin ${adminUsername}`,
+      date: new Date(),
+      fee: 0,
+    });
+    await business.save();
+    res.json({ message: `Credited ${amount.toFixed(2)} ZMW to ${businessId}` });
+  } catch (error) {
+    console.error('Credit Business Error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Updated Ledger Endpoint
+router.get('/admin/ledger', async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  try {
+    const users = await User.find({}).lean();
+    const businesses = await Business.find({}).lean();
+    let userFeeTotal = 0;
+    let businessFeeTotal = 0;
+    const transactions = [];
+
+    users.forEach((user) => {
+      (user.transactions || []).forEach((tx) => {
+        if (tx.fee) {
+          userFeeTotal += tx.fee;
+          transactions.push({
+            type: `${tx.type}-fee`,
+            amount: tx.amount,
+            fee: tx.fee,
+            sender: user.username,
+            receiver: tx.toFrom,
+            date: tx.date,
+          });
+        }
+      });
+    });
+
+    businesses.forEach((business) => {
+      (business.transactions || []).forEach((tx) => {
+        if (tx.fee) {
+          businessFeeTotal += tx.fee;
+          transactions.push({
+            type: `${tx.type}-fee`,
+            amount: tx.amount,
+            fee: tx.fee,
+            sender: business.businessId,
+            receiver: tx.toFrom,
+            date: tx.date,
+          });
+        }
+      });
+    });
+
+    const totalBalance = userFeeTotal + businessFeeTotal;
+    res.json({
+      totalBalance,
+      userFeeTotal,
+      businessFeeTotal,
+      lastUpdated: new Date(),
+      transactions: transactions.sort((a, b) => new Date(b.date) - new Date(a.date)),
+    });
+  } catch (error) {
+    console.error('Ledger Error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/user
 router.get('/user', authenticateToken(), async (req, res) => {
   try {
