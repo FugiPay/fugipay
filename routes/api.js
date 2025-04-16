@@ -847,24 +847,25 @@ router.post('/business/signup', async (req, res) => {
   if (!/^[a-zA-Z0-9]+$/.test(ownerUsername)) {
     return res.status(400).json({ error: 'Owner Username must be alphanumeric' });
   }
-  if (!/^\+2609[567]\d{7}$/.test(phoneNumber)) {
-    return res.status(400).json({ error: 'Phone number must be a valid Zambian mobile number (e.g., +260961234567)' });
+  if (!/^\+260(9[567]|7[567])\d{7}$/.test(phoneNumber)) {
+    return res.status(400).json({ error: 'Phone number must be a valid Zambian mobile number (e.g., +260751234567 or +260961234567)' });
   }
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Email must be a valid address' });
+  if (email && !/^[a-z][^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Email must start with a lowercase letter and be a valid address' });
   }
   if (bankDetails) {
     if (!['bank', 'mobile_money'].includes(bankDetails.accountType)) {
       return res.status(400).json({ error: 'Account type must be bank or mobile_money' });
     }
     if (bankDetails.accountNumber) {
-      const accountLength = bankDetails.accountType === 'bank' ? /^\d{10,12}$/ : /^\d{10}$/;
-      if (!accountLength.test(bankDetails.accountNumber)) {
-        return res.status(400).json({
-          error: bankDetails.accountType === 'bank'
-            ? 'Bank account number must be 10-12 digits'
-            : 'Mobile money number must be 10 digits',
-        });
+      if (bankDetails.accountType === 'bank') {
+        if (!/^\d{10,12}$/.test(bankDetails.accountNumber)) {
+          return res.status(400).json({ error: 'Bank account number must be 10-12 digits' });
+        }
+      } else {
+        if (!/^\+260(9[567]|7[567])\d{7}$/.test(bankDetails.accountNumber)) {
+          return res.status(400).json({ error: 'Mobile money number must be a valid Zambian mobile (e.g., +260751234567)' });
+        }
       }
       if (!bankDetails.bankName || !bankDetails.bankName.trim()) {
         return res.status(400).json({ error: 'Bank or Mobile Name is required if account number is provided' });
