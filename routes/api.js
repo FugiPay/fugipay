@@ -850,8 +850,8 @@ router.post('/business/signup', async (req, res) => {
   if (!/^\+260(9[567]|7[567])\d{7}$/.test(phoneNumber)) {
     return res.status(400).json({ error: 'Phone number must be a valid Zambian mobile number (e.g., +260751234567 or +260961234567)' });
   }
-  if (email && !/^[a-z][^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Email must start with a lowercase letter and be a valid address' });
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Email must be a valid address' });
   }
   if (bankDetails) {
     if (!['bank', 'mobile_money'].includes(bankDetails.accountType)) {
