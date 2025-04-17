@@ -113,6 +113,23 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
   }
 }
 
+const withRetry = async (operation, maxRetries = 3, delay = 1000) => {
+  let lastError;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastError = err;
+      if (i === maxRetries || !err.message.includes('Mongo')) {
+        throw err;
+      }
+      console.warn(`DB retry ${i + 1}/${maxRetries}: ${err.message} (code: ${err.code || 'unknown'})`);
+      await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+    }
+  }
+  throw lastError;
+};
+
 router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => {
   try {
     const user = await User.findOne({ phoneNumber: req.params.phoneNumber });
