@@ -346,13 +346,13 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   }
 }); */
 
-router.post('/business/register', authenticateToken(['user']), async (req, res) => {
+router.post('/business/register', async (req, res) => {
   const startTime = Date.now();
-  const { businessId, name, phoneNumber, email, pin } = req.body;
+  const { businessId, name, phoneNumber, email, pin, ownerUsername } = req.body;
 
   // Validate required fields
-  if (!businessId || !name || !phoneNumber || !pin) {
-    return res.status(400).json({ error: 'Business ID, name, phone number, and PIN required' });
+  if (!businessId || !name || !phoneNumber || !pin || !ownerUsername) {
+    return res.status(400).json({ error: 'Business ID, name, phone number, PIN, and owner username required' });
   }
 
   // Validate field formats
@@ -368,11 +368,11 @@ router.post('/business/register', authenticateToken(['user']), async (req, res) 
   if (!/^\d{4}$/.test(pin)) {
     return res.status(400).json({ error: 'PIN must be a 4-digit number' });
   }
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(ownerUsername)) {
+    return res.status(400).json({ error: 'Username must be 3-20 characters (letters, numbers, underscores)' });
+  }
 
   try {
-    const ownerUsername = req.user.username;
-    console.log(`[REGISTER] Validating user: ${ownerUsername}`);
-
     // Check existing business
     console.log(`[REGISTER] Checking existing business`);
     const businessCheckStart = Date.now();
@@ -398,7 +398,7 @@ router.post('/business/register', authenticateToken(['user']), async (req, res) 
     );
     console.log(`[REGISTER] User query took ${Date.now() - userStart}ms`);
     if (!owner) {
-      return res.status(404).json({ error: 'Owner user not found' });
+      return res.status(404).json({ error: 'Owner username not found' });
     }
 
     // Hash PIN
