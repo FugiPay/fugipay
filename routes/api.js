@@ -834,22 +834,13 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
   }
 });
 
-router.post('/business/register', authenticateToken(['user']), upload.single('qrCode'), async (req, res) => {
+router.post('/business/register', authenticateToken(['user']), async (req, res) => {
   const startTime = Date.now();
   const { businessId, name, pin, phoneNumber, email, bankDetails } = req.body;
-  const qrCodeImage = req.file;
 
   // Validate required fields
-  if (!businessId || !name || !pin || !phoneNumber || !qrCodeImage || !bankDetails) {
-    return res.status(400).json({ error: 'Business ID, name, PIN, phone number, QR code, and bank details required' });
-  }
-
-  // Parse bankDetails if it's a JSON string
-  let parsedBankDetails;
-  try {
-    parsedBankDetails = typeof bankDetails === 'string' ? JSON.parse(bankDetails) : bankDetails;
-  } catch (err) {
-    return res.status(400).json({ error: 'Invalid bank details format' });
+  if (!businessId || !name || !pin || !phoneNumber || !bankDetails) {
+    return res.status(400).json({ error: 'Business ID, name, PIN, phone number, and bank details required' });
   }
 
   // Validate field formats
@@ -865,17 +856,17 @@ router.post('/business/register', authenticateToken(['user']), upload.single('qr
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return res.status(400).json({ error: 'Invalid email address' });
   }
-  if (!parsedBankDetails.accountType || !['bank', 'mobile_money'].includes(parsedBankDetails.accountType)) {
+  if (!bankDetails.accountType || !['bank', 'mobile_money'].includes(bankDetails.accountType)) {
     return res.status(400).json({ error: 'Account type must be bank or mobile_money' });
   }
-  if (!parsedBankDetails.bankName?.trim()) {
+  if (!bankDetails.bankName?.trim()) {
     return res.status(400).json({ error: 'Bank or Mobile Name required' });
   }
-  if (parsedBankDetails.accountNumber) {
-    if (parsedBankDetails.accountType === 'bank' && !/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
+  if (bankDetails.accountNumber) {
+    if (bankDetails.accountType === 'bank' && !/^\d{10,12}$/.test(bankDetails.accountNumber)) {
       return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
     }
-    if (parsedBankDetails.accountType === 'mobile_money' && !/^\+260(9[567]|7[567])\d{7}$/.test(parsedBankDetails.accountNumber)) {
+    if (bankDetails.accountType === 'mobile_money' && !/^\+260(9[567]|7[567])\d{7}$/.test(bankDetails.accountNumber)) {
       return res.status(400).json({ error: 'Invalid mobile money number' });
     }
   }
@@ -923,29 +914,6 @@ router.post('/business/register', authenticateToken(['user']), upload.single('qr
     }
     console.log(`[REGISTER] PIN hashing took ${Date.now() - hashStart}ms`);
 
-    // Upload QR code to S3
-    console.log(`[REGISTER] Uploading QR code to S3`);
-    const s3Start = Date.now();
-    let qrCodeUrl;
-    try {
-      const fileStream = fs.createReadStream(qrCodeImage.path);
-      const s3Key = `qr-codes/${Date.now()}-${qrCodeImage.originalname}`;
-      const params = {
-        Bucket: process.env.S3_BUCKET,
-        Key: s3Key,
-        Body: fileStream,
-        ContentType: qrCodeImage.mimetype,
-        ACL: 'private',
-      };
-      const s3Response = await s3.upload(params).promise();
-      qrCodeUrl = s3Response.Location;
-      fs.unlinkSync(qrCodeImage.path);
-    } catch (err) {
-      console.error(`[REGISTER] S3 upload failed: ${err.message}`);
-      return res.status(500).json({ error: 'Failed to upload QR code to S3' });
-    }
-    console.log(`[REGISTER] S3 upload took ${Date.now() - s3Start}ms`);
-
     // Create business
     const business = new Business({
       businessId,
@@ -955,15 +923,15 @@ router.post('/business/register', authenticateToken(['user']), upload.single('qr
       phoneNumber,
       email,
       bankDetails: {
-        bankName: parsedBankDetails.bankName.trim(),
-        accountNumber: parsedBankDetails.accountNumber || undefined,
-        accountType: parsedBankDetails.accountType,
+        bankName: bankDetails.bankName.trim(),
+        accountNumber: bankDetails.accountNumber || undefined,
+        accountType: bankDetails.accountType,
       },
       balance: 0,
       transactions: [],
       pendingDeposits: [],
       pendingWithdrawals: [],
-      qrCode: qrCodeUrl,
+      qrCode: JSON.stringify({ type: 'business_payment', businessId, businessName: name }),
       role: 'business',
       approvalStatus: 'pending',
       isActive: false,
@@ -1008,9 +976,6 @@ router.post('/business/register', authenticateToken(['user']), upload.single('qr
     });
   } catch (error) {
     console.error(`Business Register Error [businessId: ${businessId || 'unknown'}]:`, error.message, error.stack);
-    if (qrCodeImage && fs.existsSync(qrCodeImage.path)) {
-      fs.unlinkSync(qrCodeImage.path);
-    }
     const errorMessage = error.message.includes('query failed') || error.message.includes('save failed')
       ? error.message.includes('refused') ? 'Database connection refused. Try again later.'
         : error.message.includes('authentication') ? 'Database authentication failed. Contact support.'
