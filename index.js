@@ -9,7 +9,7 @@ app.use(express.json());
 // CORS Configuration
 const allowedOrigins = [
   'http://localhost:3000',
-  'http://localhost:19006',
+  'http://localhost:19006', // Expo dev
   'https://nzubo.net',
   'https://nzubo-admin.web.app',
   'https://kayah.net',
@@ -57,27 +57,15 @@ if (!mongoUri) {
   console.error('MONGODB_URI is not defined');
   process.exit(1);
 }
-
 mongoose.connect(mongoUri, {
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 45000,
-  connectTimeoutMS: 10000,
-  autoReconnect: true,
-  reconnectTries: 5,
-  reconnectInterval: 2000,
-}).then(() => {
-  console.log('MongoDB connected successfully');
-}).catch(err => {
-  console.error(`MongoDB connection error: ${err.message} (code: ${err.code || 'unknown'})`);
-  process.exit(1);
-});
-
-mongoose.connection.on('error', (err) => {
-  console.error(`MongoDB connection error: ${err.message} (code: ${err.code || 'unknown'})`);
-});
-mongoose.connection.on('disconnected', () => {
-  console.warn('MongoDB disconnected');
-});
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+}) 
+  .then(() => console.log('MongoDB connected successfully'))
+  .catch(err => {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  });
 
 // Start Server
 const PORT = process.env.PORT || 3002;
