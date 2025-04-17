@@ -347,138 +347,57 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
 }); */
 
 router.post('/business/register', async (req, res) => {
-  const startTime = Date.now();
-  const { businessId, name, phoneNumber, email, pin, ownerUsername } = req.body;
+  const { businessId, name, pin } = req.body;
 
   // Validate required fields
-  if (!businessId || !name || !phoneNumber || !pin || !ownerUsername) {
-    return res.status(400).json({ error: 'Business ID, name, phone number, PIN, and owner username required' });
+  if (!businessId || !name || !pin) {
+    return res.status(400).json({ error: 'Business ID, name, and PIN required' });
   }
 
   // Validate field formats
   if (!/^\d{10}$/.test(businessId)) {
     return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
   }
-  if (!/^\+260(9[567]|7[567])\d{7}$/.test(phoneNumber)) {
-    return res.status(400).json({ error: 'Invalid Zambian phone number' });
-  }
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Invalid email address' });
-  }
   if (!/^\d{4}$/.test(pin)) {
     return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-  }
-  if (!/^[a-zA-Z0-9_]{3,20}$/.test(ownerUsername)) {
-    return res.status(400).json({ error: 'Username must be 3-20 characters (letters, numbers, underscores)' });
   }
 
   try {
     // Check existing business
-    console.log(`[REGISTER] Checking existing business`);
-    const businessCheckStart = Date.now();
-    const existingBusiness = await withRetry(() =>
-      Business.findOne({
-        $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}],
-      }).catch(err => {
-        throw new Error(`Business query failed: ${err.message} (code: ${err.code || 'unknown'})`);
-      })
-    );
-    console.log(`[REGISTER] Business check took ${Date.now() - businessCheckStart}ms`);
+    const existingBusiness = await Business.findOne({ businessId });
     if (existingBusiness) {
-      return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
-    }
-
-    // Verify owner
-    console.log(`[REGISTER] Verifying owner`);
-    const userStart = Date.now();
-    const owner = await withRetry(() =>
-      User.findOne({ username: ownerUsername }).catch(err => {
-        throw new Error(`User query failed: ${err.message} (code: ${err.code || 'unknown'})`);
-      })
-    );
-    console.log(`[REGISTER] User query took ${Date.now() - userStart}ms`);
-    if (!owner) {
-      return res.status(404).json({ error: 'Owner username not found' });
+      return res.status(409).json({ error: 'TPIN already taken' });
     }
 
     // Hash PIN
-    console.log(`[REGISTER] Hashing PIN`);
-    const hashStart = Date.now();
-    let hashedPin;
-    try {
-      hashedPin = await bcrypt.hash(pin, 10);
-    } catch (err) {
-      throw new Error(`PIN hashing failed: ${err.message}`);
-    }
-    console.log(`[REGISTER] PIN hashing took ${Date.now() - hashStart}ms`);
+    const hashedPin = await bcrypt.hash(pin, 10);
 
     // Create business
     const business = new Business({
       businessId,
       name,
-      ownerUsername,
       pin: hashedPin,
-      phoneNumber,
-      email: email || undefined,
       balance: 0,
       transactions: [],
-      pendingDeposits: [],
-      pendingWithdrawals: [],
-      qrCode: JSON.stringify({ type: 'business_payment', businessId, businessName: name }),
-      role: 'business',
       approvalStatus: 'pending',
       isActive: false,
     });
 
     // Save business
-    console.log(`[REGISTER] Saving business`);
-    const saveStart = Date.now();
-    await withRetry(() =>
-      business.save().catch(err => {
-        throw new Error(`Business save failed: ${err.message} (code: ${err.code || 'unknown'})`);
-      })
-    );
-    console.log(`[REGISTER] Business save took ${Date.now() - saveStart}ms`);
+    await business.save();
 
-    // Notify admin
-    console.log(`[REGISTER] Notifying admin`);
-    const notifyStart = Date.now();
-    try {
-      const admin = await withRetry(() =>
-        User.findOne({ role: 'admin' }).catch(err => {
-          throw new Error(`Admin query failed: ${err.message} (code: ${err.code || 'unknown'})`);
-        })
-      );
-      if (admin && admin.pushToken) {
-        await sendPushNotification(
-          admin.pushToken,
-          'New Business Registration',
-          `Business ${name} (${businessId}) needs approval`,
-          { businessId }
-        );
-      }
-    } catch (err) {
-      console.warn(`Notification failed for business ${businessId}: ${err.message}`);
-    }
-    console.log(`[REGISTER] Admin notification took ${Date.now() - notifyStart}ms`);
-
-    console.log(`[REGISTER] Completed in ${Date.now() - startTime}ms`);
     res.status(201).json({
       message: 'Business registered, awaiting approval',
       business: { businessId, name, approvalStatus: 'pending' },
     });
   } catch (error) {
     console.error(`Business Register Error [businessId: ${businessId || 'unknown'}]:`, error.message, error.stack);
-    const errorMessage = error.message.includes('query failed') || error.message.includes('save failed')
+    const errorMessage = error.message.includes('Mongo')
       ? error.message.includes('refused') ? 'Database connection refused. Try again later.'
         : error.message.includes('authentication') ? 'Database authentication failed. Contact support.'
         : error.message.includes('MongoServerSelectionError') ? 'Database server unavailable. Try again later.'
         : error.message.includes('E11000') ? 'Duplicate entry detected. Contact support.'
         : 'Database unavailable. Try again later.'
-      : error.message.includes('PIN hashing')
-      ? 'PIN processing failed. Try again.'
-      : error.message.includes('User') && error.message.includes('not found')
-      ? 'User model not found. Contact support.'
       : 'Internal server error. Contact support@zangena.com';
     res.status(500).json({ error: errorMessage });
   }
@@ -491,11 +410,7 @@ router.post('/business/signin', async (req, res) => {
   }
 
   try {
-    const business = await withRetry(() =>
-      Business.findOne({ businessId }).catch(err => {
-        throw new Error(`Business query failed: ${err.message} (code: ${err.code || 'unknown'})`);
-      })
-    );
+    const business = await Business.findOne({ businessId });
     if (!business) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -509,14 +424,14 @@ router.post('/business/signin', async (req, res) => {
     }
 
     const token = jwt.sign(
-      { username: business.ownerUsername, role: 'business' },
+      { businessId, role: 'business' },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
     res.json({ token, message: 'Sign-in successful' });
   } catch (error) {
     console.error(`Business Signin Error [businessId: ${businessId}]:`, error.message, error.stack);
-    const errorMessage = error.message.includes('query failed')
+    const errorMessage = error.message.includes('Mongo')
       ? error.message.includes('refused') ? 'Database connection refused. Try again later.'
         : error.message.includes('authentication') ? 'Database authentication failed. Contact support.'
         : error.message.includes('MongoServerSelectionError') ? 'Database server unavailable. Try again later.'
