@@ -836,22 +836,22 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
 router.post('/business/signup', async (req, res) => {
   const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
   if (!businessId || !name || !ownerUsername || !pin || !phoneNumber) {
-    return res.status(400).json({ error: 'Business ID, Name, Owner Username, PIN, and Phone Number are required' });
+    return res.status(400).json({ error: 'Business ID, Name, Username, PIN, and Phone required' });
   }
   if (!/^\d{10}$/.test(businessId)) {
-    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+    return res.status(400).json({ error: 'Business ID must be 10 digits' });
   }
   if (!/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+    return res.status(400).json({ error: 'PIN must be 4 digits' });
   }
   if (!/^[a-zA-Z0-9]+$/.test(ownerUsername)) {
-    return res.status(400).json({ error: 'Owner Username must be alphanumeric' });
+    return res.status(400).json({ error: 'Username must be alphanumeric' });
   }
   if (!/^\+260(9[567]|7[567])\d{7}$/.test(phoneNumber)) {
-    return res.status(400).json({ error: 'Phone number must be a valid Zambian mobile number (e.g., +260751234567 or +260961234567)' });
+    return res.status(400).json({ error: 'Invalid Zambian phone number' });
   }
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Email must be a valid address' });
+    return res.status(400).json({ error: 'Invalid email address' });
   }
   if (bankDetails) {
     if (!['bank', 'mobile_money'].includes(bankDetails.accountType)) {
@@ -860,15 +860,15 @@ router.post('/business/signup', async (req, res) => {
     if (bankDetails.accountNumber) {
       if (bankDetails.accountType === 'bank') {
         if (!/^\d{10,12}$/.test(bankDetails.accountNumber)) {
-          return res.status(400).json({ error: 'Bank account number must be 10-12 digits' });
+          return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
         }
       } else {
         if (!/^\+260(9[567]|7[567])\d{7}$/.test(bankDetails.accountNumber)) {
-          return res.status(400).json({ error: 'Mobile money number must be a valid Zambian mobile (e.g., +260751234567)' });
+          return res.status(400).json({ error: 'Invalid mobile money number' });
         }
       }
-      if (!bankDetails.bankName || !bankDetails.bankName.trim()) {
-        return res.status(400).json({ error: 'Bank or Mobile Name is required if account number is provided' });
+      if (!bankDetails.bankName?.trim()) {
+        return res.status(400).json({ error: 'Bank or Mobile Name required' });
       }
     }
   }
@@ -876,11 +876,20 @@ router.post('/business/signup', async (req, res) => {
   try {
     const existingBusiness = await Business.findOne({
       $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}].filter(Boolean),
+    }).catch(err => {
+      throw new Error(`Database query failed: ${err.message}`);
     });
     if (existingBusiness) {
-      return res.status(409).json({ error: 'Business ID, Owner Username, Phone Number, or Email already registered' });
+      return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
     }
-    const hashedPin = await bcrypt.hash(pin, 10);
+
+    let hashedPin;
+    try {
+      hashedPin = await bcrypt.hash(pin, 10);
+    } catch (err) {
+      throw new Error(`PIN hashing failed: ${err.message}`);
+    }
+
     const business = new Business({
       businessId,
       name,
@@ -902,23 +911,37 @@ router.post('/business/signup', async (req, res) => {
       approvalStatus: 'pending',
       isActive: false,
     });
-    await business.save();
-    const admin = await User.findOne({ role: 'admin' });
-    if (admin && admin.pushToken) {
-      await sendPushNotification(
-        admin.pushToken,
-        'New Business Signup',
-        `Business ${businessId} (${name}) awaits approval`,
-        { businessId }
-      );
+
+    await business.save().catch(err => {
+      throw new Error(`Database save failed: ${err.message}`);
+    });
+
+    try {
+      const admin = await User.findOne({ role: 'admin' });
+      if (admin && admin.pushToken) {
+        await sendPushNotification(
+          admin.pushToken,
+          'New Business Signup',
+          `Business ${businessId} (${name}) awaits approval`,
+          { businessId }
+        );
+      }
+    } catch (err) {
+      console.warn(`Notification failed for business ${businessId}: ${err.message}`);
     }
+
     res.status(201).json({
-      message: 'Business registered, awaiting admin approval',
+      message: 'Business registered, awaiting approval',
       business: { businessId: business.businessId, name: business.name, approvalStatus: business.approvalStatus },
     });
   } catch (error) {
-    console.error('Business Signup Error:', error);
-    res.status(500).json({ error: 'Server error during signup' });
+    console.error(`Business Signup Error [businessId: ${businessId}]:`, error.message, error.stack);
+    const errorMessage = error.message.includes('Database')
+      ? 'Database unavailable. Try again later.'
+      : error.message.includes('PIN hashing')
+      ? 'PIN processing failed. Try again.'
+      : 'Internal server error. Contact support.';
+    res.status(500).json({ error: errorMessage });
   }
 });
 
