@@ -281,7 +281,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   }
 }); */
 
-router.post('/business/register', authenticateToken(['user']), upload.single('qrCode'), async (req, res) => {
+/* router.post('/business/register', authenticateToken(['user']), upload.single('qrCode'), async (req, res) => {
   const { businessId, name, pin, bankDetails } = req.body;
   const qrCodeImage = req.file;
   if (!businessId || !name || !pin || !qrCodeImage || !bankDetails?.bankName || !bankDetails?.accountNumber || !['bank', 'mobile_money'].includes(bankDetails?.accountType)) {
@@ -327,7 +327,7 @@ router.post('/business/register', authenticateToken(['user']), upload.single('qr
     console.error('Business Register Error:', error.message);
     res.status(500).json({ error: 'Server error during business registration' });
   }
-});
+}); */
 
 router.post('/business/qr/generate', authenticateToken(['business']), async (req, res) => {
   const { amount, description, transactionType } = req.body;
@@ -835,7 +835,7 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
 });
 
 // business signup
-router.post('/business/signup', authenticateToken(['user']), async (req, res) => {
+router.post('/business/register', authenticateToken(['user']), async (req, res) => {
   const startTime = Date.now();
   const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
   if (!businessId || !name || !ownerUsername || !pin || !phoneNumber) {
@@ -875,7 +875,7 @@ router.post('/business/signup', authenticateToken(['user']), async (req, res) =>
 
   try {
     const authUsername = req.user.username;
-    console.log(`[SIGNUP] Validating user: ${authUsername}, provided ownerUsername: ${ownerUsername}`);
+    console.log(`[REGISTER] Validating user: ${authUsername}, provided ownerUsername: ${ownerUsername}`);
     if (ownerUsername !== authUsername) {
       return res.status(403).json({ error: 'Provided username does not match authenticated user' });
     }
@@ -886,12 +886,12 @@ router.post('/business/signup', authenticateToken(['user']), async (req, res) =>
         throw new Error(`User query failed: ${err.message} (code: ${err.code || 'unknown'})`);
       })
     );
-    console.log(`[SIGNUP] User query took ${Date.now() - userStart}ms`);
+    console.log(`[REGISTER] User query took ${Date.now() - userStart}ms`);
     if (!owner) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    console.log(`[SIGNUP] Checking existing business`);
+    console.log(`[REGISTER] Checking existing business`);
     const businessCheckStart = Date.now();
     const existingBusiness = await withRetry(() =>
       Business.findOne({
@@ -900,12 +900,12 @@ router.post('/business/signup', authenticateToken(['user']), async (req, res) =>
         throw new Error(`Business query failed: ${err.message} (code: ${err.code || 'unknown'})`);
       })
     );
-    console.log(`[SIGNUP] Business check took ${Date.now() - businessCheckStart}ms`);
+    console.log(`[REGISTER] Business check took ${Date.now() - businessCheckStart}ms`);
     if (existingBusiness) {
       return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
     }
 
-    console.log(`[SIGNUP] Hashing PIN`);
+    console.log(`[REGISTER] Hashing PIN`);
     const hashStart = Date.now();
     let hashedPin;
     try {
@@ -913,7 +913,7 @@ router.post('/business/signup', authenticateToken(['user']), async (req, res) =>
     } catch (err) {
       throw new Error(`PIN hashing failed: ${err.message}`);
     }
-    console.log(`[SIGNUP] PIN hashing took ${Date.now() - hashStart}ms`);
+    console.log(`[REGISTER] PIN hashing took ${Date.now() - hashStart}ms`);
 
     const business = new Business({
       businessId,
@@ -937,16 +937,16 @@ router.post('/business/signup', authenticateToken(['user']), async (req, res) =>
       isActive: false,
     });
 
-    console.log(`[SIGNUP] Saving business`);
+    console.log(`[REGISTER] Saving business`);
     const saveStart = Date.now();
     await withRetry(() =>
       business.save().catch(err => {
         throw new Error(`Business save failed: ${err.message} (code: ${err.code || 'unknown'})`);
       })
     );
-    console.log(`[SIGNUP] Business save took ${Date.now() - saveStart}ms`);
+    console.log(`[REGISTER] Business save took ${Date.now() - saveStart}ms`);
 
-    console.log(`[SIGNUP] Notifying admin`);
+    console.log(`[REGISTER] Notifying admin`);
     const notifyStart = Date.now();
     try {
       const admin = await withRetry(() =>
@@ -957,7 +957,7 @@ router.post('/business/signup', authenticateToken(['user']), async (req, res) =>
       if (admin && admin.pushToken) {
         await sendPushNotification(
           admin.pushToken,
-          'New Business Signup',
+          'New Business Registration',
           `Business ${businessId} (${name}) awaits approval`,
           { businessId }
         );
@@ -965,15 +965,15 @@ router.post('/business/signup', authenticateToken(['user']), async (req, res) =>
     } catch (err) {
       console.warn(`Notification failed for business ${businessId}: ${err.message}`);
     }
-    console.log(`[SIGNUP] Admin notification took ${Date.now() - notifyStart}ms`);
+    console.log(`[REGISTER] Admin notification took ${Date.now() - notifyStart}ms`);
 
-    console.log(`[SIGNUP] Completed in ${Date.now() - startTime}ms`);
+    console.log(`[REGISTER] Completed in ${Date.now() - startTime}ms`);
     res.status(201).json({
       message: 'Business registered, awaiting approval',
       business: { businessId, name, approvalStatus: 'pending' },
     });
   } catch (error) {
-    console.error(`Business Signup Error [businessId: ${businessId || 'unknown'}]:`, error.message, error.stack);
+    console.error(`Business Register Error [businessId: ${businessId || 'unknown'}]:`, error.message, error.stack);
     const errorMessage = error.message.includes('query failed') || error.message.includes('save failed')
       ? error.message.includes('refused') ? 'Database connection refused. Try again later.'
         : error.message.includes('authentication') ? 'Database authentication failed. Contact support.'
