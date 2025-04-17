@@ -833,6 +833,8 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
     res.status(500).json({ error: 'Server error fetching user', details: error.message, duration: `${Date.now() - start}ms` });
   }
 });
+
+// business signup
 router.post('/business/signup', authenticateToken(['user']), async (req, res) => {
   const startTime = Date.now();
   const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
