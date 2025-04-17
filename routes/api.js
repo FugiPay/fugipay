@@ -855,36 +855,41 @@ router.post('/business/signup', async (req, res) => {
     return res.status(400).json({ error: 'Invalid email address' });
   }
   if (bankDetails) {
-    if (!['bank', 'mobile_money'].includes(bankDetails.accountType)) {
+    if (!bankDetails.accountType || !['bank', 'mobile_money'].includes(bankDetails.accountType)) {
       return res.status(400).json({ error: 'Account type must be bank or mobile_money' });
     }
     if (bankDetails.accountNumber) {
-      if (bankDetails.accountType === 'bank') {
-        if (!/^\d{10,12}$/.test(bankDetails.accountNumber)) {
-          return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
-        }
-      } else {
-        if (!/^\+260(9[567]|7[567])\d{7}$/.test(bankDetails.accountNumber)) {
-          return res.status(400).json({ error: 'Invalid mobile money number' });
-        }
+      if (bankDetails.accountType === 'bank' && !/^\d{10,12}$/.test(bankDetails.accountNumber)) {
+        return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
       }
-      if (!bankDetails.bankName?.trim()) {
-        return res.status(400).json({ error: 'Bank or Mobile Name required' });
+      if (bankDetails.accountType === 'mobile_money' && !/^\+260(9[567]|7[567])\d{7}$/.test(bankDetails.accountNumber)) {
+        return res.status(400).json({ error: 'Invalid mobile money number' });
       }
+    }
+    if ((bankDetails.bankName || bankDetails.accountNumber) && !bankDetails.bankName?.trim()) {
+      return res.status(400).json({ error: 'Bank or Mobile Name required when providing bank details' });
     }
   }
 
   try {
-    // Simplified query to match /business/register
+    const owner = await withRetry(() =>
+      User.findOne({ username: ownerUsername }).catch(err => {
+        throw new Error(`User query failed: ${err.message} (code: ${err.code || 'unknown'})`);
+      })
+    );
+    if (!owner) {
+      return res.status(400).json({ error: 'Username does not exist' });
+    }
+
     const existingBusiness = await withRetry(() =>
       Business.findOne({
-        $or: [{ businessId }, { ownerUsername }],
+        $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}],
       }).catch(err => {
-        throw new Error(`Database query failed: ${err.message} (code: ${err.code || 'unknown'})`);
+        throw new Error(`Business query failed: ${err.message} (code: ${err.code || 'unknown'})`);
       })
     );
     if (existingBusiness) {
-      return res.status(409).json({ error: 'TPIN or username already taken' });
+      return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
     }
 
     let hashedPin;
@@ -901,9 +906,9 @@ router.post('/business/signup', async (req, res) => {
       pin: hashedPin,
       phoneNumber,
       email,
-      bankDetails: bankDetails && (bankDetails.bankName || bankDetails.accountNumber) ? {
-        bankName: bankDetails.bankName?.trim(),
-        accountNumber: bankDetails.accountNumber,
+      bankDetails: bankDetails && bankDetails.bankName ? {
+        bankName: bankDetails.bankName.trim(),
+        accountNumber: bankDetails.accountNumber || undefined,
         accountType: bankDetails.accountType,
       } : undefined,
       balance: 0,
@@ -918,12 +923,16 @@ router.post('/business/signup', async (req, res) => {
 
     await withRetry(() =>
       business.save().catch(err => {
-        throw new Error(`Database save failed: ${err.message} (code: ${err.code || 'unknown'})`);
+        throw new Error(`Business save failed: ${err.message} (code: ${err.code || 'unknown'})`);
       })
     );
 
     try {
-      const admin = await User.findOne({ role: 'admin' });
+      const admin = await withRetry(() =>
+        User.findOne({ role: 'admin' }).catch(err => {
+          throw new Error(`Admin query failed: ${err.message} (code: ${err.code || 'unknown'})`);
+        })
+      );
       if (admin && admin.pushToken) {
         await sendPushNotification(
           admin.pushToken,
@@ -938,17 +947,21 @@ router.post('/business/signup', async (req, res) => {
 
     res.status(201).json({
       message: 'Business registered, awaiting approval',
-      business: { businessId: business.businessId, name: business.name, approvalStatus: business.approvalStatus },
+      business: { businessId, name, approvalStatus: 'pending' },
     });
   } catch (error) {
-    console.error(`Business Signup Error [businessId: ${businessId}]:`, error.message, error.stack);
-    const errorMessage = error.message.includes('Database')
+    console.error(`Business Signup Error [businessId: ${businessId || 'unknown'}]:`, error.message, error.stack);
+    const errorMessage = error.message.includes('query failed') || error.message.includes('save failed')
       ? error.message.includes('refused') ? 'Database connection refused. Try again later.'
         : error.message.includes('authentication') ? 'Database authentication failed. Contact support.'
+        : error.message.includes('MongoServerSelectionError') ? 'Database server unavailable. Try again later.'
+        : error.message.includes('E11000') ? 'Duplicate entry detected. Contact support.'
         : 'Database unavailable. Try again later.'
       : error.message.includes('PIN hashing')
       ? 'PIN processing failed. Try again.'
-      : 'Internal server error. Contact support.';
+      : error.message.includes('User') && error.message.includes('not found')
+      ? 'User model not found. Contact support.'
+      : 'Internal server error. Contact support@zangena.com';
     res.status(500).json({ error: errorMessage });
   }
 });
