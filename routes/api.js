@@ -833,7 +833,6 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
     res.status(500).json({ error: 'Server error fetching user', details: error.message, duration: `${Date.now() - start}ms` });
   }
 });
-
 router.post('/business/signup', authenticateToken(['user']), async (req, res) => {
   const startTime = Date.now();
   const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
@@ -988,38 +987,45 @@ router.post('/business/signup', authenticateToken(['user']), async (req, res) =>
   }
 });
 
-// Business Signin
 router.post('/business/signin', async (req, res) => {
   const { businessId, pin } = req.body;
   if (!businessId || !pin) {
-    return res.status(400).json({ error: 'Business ID and PIN are required' });
+    return res.status(400).json({ error: 'Business ID and PIN required' });
   }
-  if (!/^\d{10}$/.test(businessId)) {
-    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
-  }
-  if (!/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-  }
+
   try {
-    const business = await Business.findOne({ businessId });
+    const business = await withRetry(() =>
+      Business.findOne({ businessId }).catch(err => {
+        throw new Error(`Business query failed: ${err.message} (code: ${err.code || 'unknown'})`);
+      })
+    );
     if (!business) {
-      return res.status(404).json({ error: 'Business not found, check your 10-digit TPIN and PIN' });
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
-    if (business.approvalStatus !== 'approved') {
-      return res.status(403).json({ error: 'Business is not yet approved by admin' });
+    if (business.approvalStatus !== 'approved' || !business.isActive) {
+      return res.status(403).json({ error: 'Business account not approved or inactive' });
     }
+
     const isMatch = await bcrypt.compare(pin, business.pin);
     if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid PIN' });
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
-    const token = jwt.sign({ id: business._id, role: business.role }, JWT_SECRET, { expiresIn: '30d' });
-    res.json({
-      token,
-      business: { businessId: business.businessId, name: business.name, role: business.role, phoneNumber: business.phoneNumber },
-    });
+
+    const token = jwt.sign(
+      { username: business.ownerUsername, role: 'business' },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+    res.json({ token, message: 'Sign-in successful' });
   } catch (error) {
-    console.error('Business Signin Error:', error);
-    res.status(500).json({ error: 'Server error during signin' });
+    console.error(`Business Signin Error [businessId: ${businessId}]:`, error.message, error.stack);
+    const errorMessage = error.message.includes('query failed')
+      ? error.message.includes('refused') ? 'Database connection refused. Try again later.'
+        : error.message.includes('authentication') ? 'Database authentication failed. Contact support.'
+        : error.message.includes('MongoServerSelectionError') ? 'Database server unavailable. Try again later.'
+        : 'Database unavailable. Try again later.'
+      : 'Internal server error. Contact support@zangena.com';
+    res.status(500).json({ error: errorMessage });
   }
 });
 
