@@ -834,7 +834,8 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
   }
 });
 
-router.post('/business/signup', async (req, res) => {
+router.post('/business/signup', authenticateToken(['user']), async (req, res) => {
+  const startTime = Date.now();
   const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
   if (!businessId || !name || !ownerUsername || !pin || !phoneNumber) {
     return res.status(400).json({ error: 'Business ID, Name, Username, PIN, and Phone required' });
@@ -872,15 +873,25 @@ router.post('/business/signup', async (req, res) => {
   }
 
   try {
+    const authUsername = req.user.username;
+    console.log(`[SIGNUP] Validating user: ${authUsername}, provided ownerUsername: ${ownerUsername}`);
+    if (ownerUsername !== authUsername) {
+      return res.status(403).json({ error: 'Provided username does not match authenticated user' });
+    }
+
+    const userStart = Date.now();
     const owner = await withRetry(() =>
       User.findOne({ username: ownerUsername }).catch(err => {
         throw new Error(`User query failed: ${err.message} (code: ${err.code || 'unknown'})`);
       })
     );
+    console.log(`[SIGNUP] User query took ${Date.now() - userStart}ms`);
     if (!owner) {
-      return res.status(400).json({ error: 'Username does not exist' });
+      return res.status(404).json({ error: 'User not found' });
     }
 
+    console.log(`[SIGNUP] Checking existing business`);
+    const businessCheckStart = Date.now();
     const existingBusiness = await withRetry(() =>
       Business.findOne({
         $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}],
@@ -888,16 +899,20 @@ router.post('/business/signup', async (req, res) => {
         throw new Error(`Business query failed: ${err.message} (code: ${err.code || 'unknown'})`);
       })
     );
+    console.log(`[SIGNUP] Business check took ${Date.now() - businessCheckStart}ms`);
     if (existingBusiness) {
       return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
     }
 
+    console.log(`[SIGNUP] Hashing PIN`);
+    const hashStart = Date.now();
     let hashedPin;
     try {
       hashedPin = await bcrypt.hash(pin, 10);
     } catch (err) {
       throw new Error(`PIN hashing failed: ${err.message}`);
     }
+    console.log(`[SIGNUP] PIN hashing took ${Date.now() - hashStart}ms`);
 
     const business = new Business({
       businessId,
@@ -921,12 +936,17 @@ router.post('/business/signup', async (req, res) => {
       isActive: false,
     });
 
+    console.log(`[SIGNUP] Saving business`);
+    const saveStart = Date.now();
     await withRetry(() =>
       business.save().catch(err => {
         throw new Error(`Business save failed: ${err.message} (code: ${err.code || 'unknown'})`);
       })
     );
+    console.log(`[SIGNUP] Business save took ${Date.now() - saveStart}ms`);
 
+    console.log(`[SIGNUP] Notifying admin`);
+    const notifyStart = Date.now();
     try {
       const admin = await withRetry(() =>
         User.findOne({ role: 'admin' }).catch(err => {
@@ -944,7 +964,9 @@ router.post('/business/signup', async (req, res) => {
     } catch (err) {
       console.warn(`Notification failed for business ${businessId}: ${err.message}`);
     }
+    console.log(`[SIGNUP] Admin notification took ${Date.now() - notifyStart}ms`);
 
+    console.log(`[SIGNUP] Completed in ${Date.now() - startTime}ms`);
     res.status(201).json({
       message: 'Business registered, awaiting approval',
       business: { businessId, name, approvalStatus: 'pending' },
