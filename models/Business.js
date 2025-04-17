@@ -38,7 +38,7 @@ const businessSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true,
-    match: [/^\+2609[567]\d{7}$/, 'Phone number must be a valid Zambian mobile number (e.g., +260961234567)'],
+    match: [/^\+260(9[567]|7[567])\d{7}$/, 'Phone number must be a valid Zambian mobile number (e.g., +260751234567)'],
   },
   email: {
     type: String,
@@ -51,8 +51,8 @@ const businessSchema = new mongoose.Schema({
   balance: { type: Number, default: 0 },
   qrCode: { type: String },
   bankDetails: {
-    bankName: { type: String },
-    accountNumber: { type: String },
+    bankName: String,
+    accountNumber: String,
     accountType: { type: String, enum: ['bank', 'mobile_money'] },
   },
   role: { type: String, enum: ['business', 'admin'], default: 'business' },
@@ -64,9 +64,10 @@ const businessSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: false },
 }, { timestamps: true });
 
-businessSchema.index({ businessId: 1 });
-businessSchema.index({ ownerUsername: 1 });
-businessSchema.index({ phoneNumber: 1 });
-businessSchema.index({ email: 1 });
+// Simplified indexes to avoid conflicts
+businessSchema.index({ businessId: 1 }, { unique: true });
+businessSchema.index({ ownerUsername: 1 }, { unique: true });
+businessSchema.index({ phoneNumber: 1 }, { unique: true });
+businessSchema.index({ email: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Business', businessSchema);

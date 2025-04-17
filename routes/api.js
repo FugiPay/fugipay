@@ -875,13 +875,16 @@ router.post('/business/signup', async (req, res) => {
   }
 
   try {
-    const existingBusiness = await Business.findOne({
-      $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}].filter(Boolean),
-    }).catch(err => {
-      throw new Error(`Database query failed: ${err.message}`);
-    });
+    // Simplified query to match /business/register
+    const existingBusiness = await withRetry(() =>
+      Business.findOne({
+        $or: [{ businessId }, { ownerUsername }],
+      }).catch(err => {
+        throw new Error(`Database query failed: ${err.message} (code: ${err.code || 'unknown'})`);
+      })
+    );
     if (existingBusiness) {
-      return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
+      return res.status(409).json({ error: 'TPIN or username already taken' });
     }
 
     let hashedPin;
@@ -913,9 +916,11 @@ router.post('/business/signup', async (req, res) => {
       isActive: false,
     });
 
-    await business.save().catch(err => {
-      throw new Error(`Database save failed: ${err.message}`);
-    });
+    await withRetry(() =>
+      business.save().catch(err => {
+        throw new Error(`Database save failed: ${err.message} (code: ${err.code || 'unknown'})`);
+      })
+    );
 
     try {
       const admin = await User.findOne({ role: 'admin' });
@@ -938,7 +943,9 @@ router.post('/business/signup', async (req, res) => {
   } catch (error) {
     console.error(`Business Signup Error [businessId: ${businessId}]:`, error.message, error.stack);
     const errorMessage = error.message.includes('Database')
-      ? 'Database unavailable. Try again later.'
+      ? error.message.includes('refused') ? 'Database connection refused. Try again later.'
+        : error.message.includes('authentication') ? 'Database authentication failed. Contact support.'
+        : 'Database unavailable. Try again later.'
       : error.message.includes('PIN hashing')
       ? 'PIN processing failed. Try again.'
       : 'Internal server error. Contact support.';
