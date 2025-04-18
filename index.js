@@ -3,8 +3,8 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
-const testRoutes = require('./routes/test');
-const businessRoutes = require('./routes/business');
+// const testRoutes = require('./routes/test');
+// const businessRoutes = require('./routes/business');
 
 const app = express();
 app.use(express.json());
@@ -53,8 +53,8 @@ app.get('/wake', (req, res) => {
 
 // Routes
 app.use('/api', require('./routes/api'));
-app.use('/api/business', businessRoutes);
-app.use('/api', testRoutes);
+// app.use('/api/business', businessRoutes);
+// app.use('/api', testRoutes);
 
 // MongoDB Connection
 const mongoUri = process.env.MONGODB_URI;

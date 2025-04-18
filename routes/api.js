@@ -346,7 +346,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   }
 }); */
 
-router.post('/business/register', async (req, res) => {
+/* router.post('/business/register', async (req, res) => {
   const { businessId, name, pin } = req.body;
 
   // Validate required fields
@@ -401,42 +401,58 @@ router.post('/business/register', async (req, res) => {
       : 'Internal server error. Contact support@zangena.com';
     res.status(500).json({ error: errorMessage });
   }
-});
+}); */
 
 router.post('/business/signin', async (req, res) => {
   const { businessId, pin } = req.body;
+
+  // Validate required fields
   if (!businessId || !pin) {
-    return res.status(400).json({ error: 'Business ID and PIN required' });
+    return res.status(400).json({ error: 'Business ID and PIN are required' });
+  }
+  if (!/^\d{10}$/.test(businessId)) {
+    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+  }
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
   }
 
   try {
+    // Find business
     const business = await Business.findOne({ businessId });
     if (!business) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    if (business.approvalStatus !== 'approved' || !business.isActive) {
-      return res.status(403).json({ error: 'Business account not approved or inactive' });
+      return res.status(404).json({ error: 'Business not found, check your TPIN' });
     }
 
+    // Verify PIN
     const isMatch = await bcrypt.compare(pin, business.pin);
     if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: 'Invalid PIN' });
     }
 
-    const token = jwt.sign(
-      { businessId, role: 'business' },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-    res.json({ token, message: 'Sign-in successful' });
+    // Check approval status
+    if (business.approvalStatus !== 'approved') {
+      return res.status(403).json({ error: 'Business is not yet approved by admin' });
+    }
+
+    // Check active status
+    if (!business.isActive) {
+      return res.status(403).json({ error: 'Business account is inactive' });
+    }
+
+    res.json({
+      message: 'Signed in successfully',
+      business: {
+        businessId: business.businessId,
+        name: business.name,
+        approvalStatus: business.approvalStatus,
+      },
+    });
   } catch (error) {
-    console.error(`Business Signin Error [businessId: ${businessId}]:`, error.message, error.stack);
+    console.error(`Business Signin Error [businessId: ${businessId || 'unknown'}]:`, error.message);
     const errorMessage = error.message.includes('Mongo')
-      ? error.message.includes('refused') ? 'Database connection refused. Try again later.'
-        : error.message.includes('authentication') ? 'Database authentication failed. Contact support.'
-        : error.message.includes('MongoServerSelectionError') ? 'Database server unavailable. Try again later.'
-        : 'Database unavailable. Try again later.'
-      : 'Internal server error. Contact support@zangena.com';
+      ? 'Database issue. Try again later.'
+      : 'Server error during signin. Contact support@zangena.com';
     res.status(500).json({ error: errorMessage });
   }
 });
