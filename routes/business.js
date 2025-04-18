@@ -13,7 +13,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
 console.log('Loading business.js routes...');
 
 // Business Signup
-router.post('/signup', async (req, res) => {
+/* router.post('/signup', async (req, res) => {
   const { businessId, name, ownerUsername, pin } = req.body;
   if (!businessId || !name || !ownerUsername || !pin) {
     return res.status(400).json({ error: 'All fields are required' });
@@ -62,7 +62,7 @@ router.post('/signup', async (req, res) => {
     console.error('Business Signup Error:', error);
     res.status(500).json({ error: 'Server error during signup' });
   }
-});
+}); */
 
 // Business Signin
 router.post('/signin', async (req, res) => {

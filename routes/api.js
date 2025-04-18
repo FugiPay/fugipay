@@ -945,6 +945,89 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
     res.status(500).json({ error: 'Server error fetching user', details: error.message, duration: `${Date.now() - start}ms` });
   }
 });
+
+
+router.post('/business/signup', async (req, res) => {
+  const { businessId, name, ownerUsername, pin, phoneNumber, email } = req.body;
+
+  // Validate required fields
+  if (!businessId || !name || !ownerUsername || !pin || !phoneNumber) {
+    return res.status(400).json({ error: 'Business ID, name, owner username, PIN, and phone number are required' });
+  }
+
+  // Validate formats
+  if (!/^\d{10}$/.test(businessId)) {
+    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+  }
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
+  if (!/^\+260(9[567]|7[567])\d{7}$/.test(phoneNumber)) {
+    return res.status(400).json({ error: 'Phone number must be a valid Zambian mobile number (e.g., +260751234567)' });
+  }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Invalid email address' });
+  }
+
+  try {
+    // Check for existing business
+    const existingBusiness = await Business.findOne({
+      $or: [{ businessId }, { ownerUsername }, { phoneNumber }, ...(email ? [{ email }] : [])],
+    });
+    if (existingBusiness) {
+      return res.status(409).json({
+        error: 'Business ID, owner username, phone number, or email already registered',
+      });
+    }
+
+    // Hash PIN
+    const hashedPin = await bcrypt.hash(pin, 10);
+
+    // Create business
+    const business = new Business({
+      businessId,
+      name,
+      ownerUsername,
+      pin: hashedPin,
+      phoneNumber,
+      email: email || undefined,
+      balance: 0,
+      transactions: [],
+      pendingDeposits: [],
+      pendingWithdrawals: [],
+      qrCode: JSON.stringify({ type: 'business_payment', businessId, businessName: name }),
+      role: 'business',
+      approvalStatus: 'pending',
+      isActive: false,
+    });
+
+    // Save business
+    await business.save();
+
+    // Notify admin
+    const admin = await User.findOne({ role: 'admin' });
+    if (admin && admin.pushToken) {
+      await sendPushNotification(
+        admin.pushToken,
+        'New Business Signup',
+        `Business ${businessId} (${name}) awaits approval`,
+        { businessId }
+      );
+    }
+
+    res.json({
+      message: 'Business registered, awaiting admin approval',
+      business: { businessId: business.businessId, name: business.name, approvalStatus: business.approvalStatus },
+    });
+  } catch (error) {
+    console.error(`Business Signup Error [businessId: ${businessId || 'unknown'}]:`, error.message);
+    const errorMessage = error.message.includes('Mongo')
+      ? 'Database issue. Try again later.'
+      : 'Server error during signup. Contact support@zangena.com';
+    res.status(500).json({ error: errorMessage });
+  }
+});
+
 /* 
 router.post('/business/signup', async (req, res) => {
   const startTime = Date.now();
