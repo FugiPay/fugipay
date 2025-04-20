@@ -2421,7 +2421,7 @@ router.get('/business/businesses', authenticateToken(), requireAdmin, async (req
     const businesses = await Business.find(query)
       .skip((page - 1) * limit)
       .limit(parseInt(limit))
-      .select('businessId name ownerUsername phoneNumber email balance approvalStatus isActive createdAt documentUrl');
+      .select('businessId name ownerUsername phoneNumber email balance approvalStatus isActive createdAt');
     console.log('Businesses Found:', businesses);
 
     const total = await Business.countDocuments(query);
