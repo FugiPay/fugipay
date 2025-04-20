@@ -2398,7 +2398,8 @@ router.post('/payment-direct', authenticateToken(), async (req, res) => {
 router.get('/business/businesses', authenticateToken(), requireAdmin, async (req, res) => {
   try {
     const { page = 1, limit = 10, search, approvalStatus } = req.query;
-    console.log('Query:', { page, limit, search, approvalStatus });
+    console.log('Query Parameters:', { page, limit, search, approvalStatus });
+
     const query = {};
     if (search) {
       query.$or = [
@@ -2409,18 +2410,26 @@ router.get('/business/businesses', authenticateToken(), requireAdmin, async (req
       ];
     }
     if (approvalStatus) {
-      query.approvalStatus = approvalStatus;
+      query.approvalStatus = { $regex: `^${approvalStatus}$`, $options: 'i' }; // Case-insensitive
     }
-    console.log('MongoDB Query:', query);
+    console.log('MongoDB Query:', JSON.stringify(query, null, 2));
+
+    // Log all businesses to check data
+    const allBusinesses = await Business.find().select('businessId name approvalStatus');
+    console.log('All Businesses in DB:', allBusinesses);
+
     const businesses = await Business.find(query)
       .skip((page - 1) * limit)
       .limit(parseInt(limit))
       .select('businessId name ownerUsername phoneNumber email balance approvalStatus isActive createdAt documentUrl');
     console.log('Businesses Found:', businesses);
+
     const total = await Business.countDocuments(query);
+    console.log('Total Count:', total);
+
     res.json({ businesses, total });
   } catch (error) {
-    console.error('Businesses Fetch Error:', error.message);
+    console.error('Businesses Fetch Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to fetch businesses' });
   }
 });
