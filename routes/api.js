@@ -2397,39 +2397,64 @@ router.post('/payment-direct', authenticateToken(), async (req, res) => {
 
 router.get('/business/businesses', authenticateToken(), requireAdmin, async (req, res) => {
   try {
-    const { page = 1, limit = 10, search, approvalStatus } = req.query;
-    console.log('Query Parameters:', { page, limit, search, approvalStatus });
+    const { page = 1, limit = 10, search = '', approvalStatus, sort = 'createdAt', sortOrder = 'desc' } = req.query;
 
+    // Validate query parameters
+    const parsedPage = parseInt(page, 10);
+    const parsedLimit = Math.min(parseInt(limit, 10), 100); // Cap at 100
+    if (isNaN(parsedPage) || parsedPage < 1) {
+      return res.status(400).json({ error: 'Invalid page number' });
+    }
+    if (isNaN(parsedLimit) || parsedLimit < 1) {
+      return res.status(400).json({ error: 'Invalid limit' });
+    }
+    if (approvalStatus && !['pending', 'approved', 'rejected'].includes(approvalStatus.toLowerCase())) {
+      return res.status(400).json({ error: 'Invalid approvalStatus. Use pending, approved, or rejected' });
+    }
+
+    // Build query
     const query = {};
     if (search) {
+      // Sanitize search input
+      const sanitizedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { businessId: { $regex: search, $options: 'i' } },
-        { name: { $regex: search, $options: 'i' } },
-        { ownerUsername: { $regex: search, $options: 'i' } },
-        { phoneNumber: { $regex: search, $options: 'i' } },
+        { businessId: { $regex: sanitizedSearch, $options: 'i' } },
+        { name: { $regex: sanitizedSearch, $options: 'i' } },
+        { ownerUsername: { $regex: sanitizedSearch, $options: 'i' } },
+        { phoneNumber: { $regex: sanitizedSearch, $options: 'i' } },
       ];
     }
-    if (approvalStatus) {
-      query.approvalStatus = { $regex: `^${approvalStatus}$`, $options: 'i' }; // Case-insensitive
-    }
-    console.log('MongoDB Query:', JSON.stringify(query, null, 2));
+    // Default to pending if no approvalStatus is provided
+    query.approvalStatus = approvalStatus ? approvalStatus.toLowerCase() : 'pending';
 
-    // Log all businesses to check data
-    const allBusinesses = await Business.find().select('businessId name approvalStatus');
-    console.log('All Businesses in DB:', allBusinesses);
+    // Build sort options
+    const sortOptions = {};
+    const validSortFields = ['createdAt', 'name', 'businessId'];
+    const sortField = validSortFields.includes(sort) ? sort : 'createdAt';
+    sortOptions[sortField] = sortOrder.toLowerCase() === 'asc' ? 1 : -1;
 
+    // Fetch businesses
     const businesses = await Business.find(query)
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit))
-      .select('businessId name ownerUsername phoneNumber email balance approvalStatus isActive createdAt');
-    console.log('Businesses Found:', businesses);
+      .skip((parsedPage - 1) * parsedLimit)
+      .limit(parsedLimit)
+      .sort(sortOptions)
+      .select('businessId name ownerUsername phoneNumber email balance approvalStatus isActive createdAt')
+      .lean();
 
     const total = await Business.countDocuments(query);
-    console.log('Total Count:', total);
 
-    res.json({ businesses, total });
+    res.json({
+      businesses,
+      total,
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        totalPages: Math.ceil(total / parsedLimit),
+        hasMore: parsedPage * parsedLimit < total,
+      },
+    });
   } catch (error) {
-    console.error('Businesses Fetch Error:', error.message, error.stack);
+    console.error('[BUSINESSES] Fetch Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to fetch businesses' });
   }
 });
