@@ -2120,7 +2120,7 @@ router.get('/transactions/:username', authenticateToken(['admin']), async (req, 
 });
 
 // GET /api/admin/stats
-router.get('/admin/stats', authenticateToken(['admin']), async (req, res) => {
+/* router.get('/admin/stats', authenticateToken(['admin']), async (req, res) => {
   try {
     const totalUsers = await User.countDocuments();
     const totalUserBalance = await User.aggregate([{ $group: { _id: null, total: { $sum: { $ifNull: ['$balance', 0] } } } }]).then(r => r[0]?.total || 0);
@@ -2170,7 +2170,7 @@ router.get('/admin/stats', authenticateToken(['admin']), async (req, res) => {
     console.error('Stats Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to fetch stats', details: error.message });
   }
-});
+}); */
 
 // GET /api/admin/pending
 router.get('/admin/pending', authenticateToken(['admin']), async (req, res) => {
