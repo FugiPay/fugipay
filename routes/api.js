@@ -2903,4 +2903,246 @@ router.post('/credit-zmc', authenticateToken(['admin']), async (req, res) => {
   }
 });
 
+router.post('/admin/refunded-transaction', authenticateToken(['admin']), async (req, res) => {
+  const { transactionId, sourceType, sourceId, reason } = req.body;
+  if (!transactionId || !sourceType || !sourceId || !reason) {
+    return res.status(400).json({ error: 'Transaction ID, source type, source ID, and reason required' });
+  }
+  if (!['user', 'business'].includes(sourceType)) {
+    return res.status(400).json({ error: 'Source type must be user or business' });
+  }
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    let sender, receiver, transaction;
+    if (sourceType === 'user') {
+      sender = await User.findOne({ username: sourceId }).session(session);
+      if (!sender) throw new Error('Sender not found');
+      transaction = sender.transactions.find(tx => tx._id === transactionId && tx.type === 'sent');
+      if (!transaction) throw new Error('Transaction not found');
+      receiver = await (transaction.toFrom.match(/^\d{10}$/) ?
+        Business.findOne({ businessId: transaction.toFrom }).session(session) :
+        User.findOne({ username: transaction.toFrom }).session(session));
+    } else {
+      sender = await Business.findOne({ businessId: sourceId }).session(session);
+      if (!sender) throw new Error('Sender not found');
+      transaction = sender.transactions.find(tx => tx._id === transactionId && tx.type === 'received');
+      if (!transaction) throw new Error('Transaction not found');
+      receiver = await User.findOne({ username: transaction.toFrom }).session(session);
+    }
+    if (!receiver) throw new Error('Receiver not found');
+    const amount = transaction.amount;
+    const refundFee = amount * 0.01;
+    const netRefund = amount - refundFee;
+    if (sender.balance < amount) throw new Error('Insufficient sender balance');
+    sender.balance -= amount;
+    receiver.balance += netRefund;
+    sender.transactions.push({
+      _id: crypto.randomBytes(16).toString('hex'),
+      type: 'refunded',
+      amount,
+      toFrom: receiver.username || receiver.businessId,
+      fee: refundFee,
+      reason,
+      date: new Date(),
+    });
+    receiver.transactions.push({
+      _id: crypto.randomBytes(16).toString('hex'),
+      type: 'received',
+      amount: netRefund,
+      toFrom: sender.username || sender.businessId,
+      fee: refundFee,
+      reason,
+      date: new Date(),
+    });
+    await AdminLedger.findOneAndUpdate(
+      {},
+      {
+        $inc: { totalBalance: refundFee },
+        $push: {
+          transactions: {
+            type: 'refund-fee',
+            amount: refundFee,
+            sourceId,
+            sourceType,
+            transactionId,
+            reason,
+            date: new Date(),
+          },
+        },
+      },
+      { upsert: true, session }
+    );
+    await Promise.all([sender.save({ session }), receiver.save({ session })]);
+    await session.commitTransaction();
+    if (receiver.pushToken) {
+      await sendPushNotification(
+        receiver.pushToken,
+        'Refund Received',
+        `You received a refund of ${netRefund.toFixed(2)} ZMW for transaction ${transactionId}.`,
+        { transactionId }
+      );
+    }
+    res.json({ message: 'Transaction refunded successfully', refundAmount: netRefund, refundFee });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Refund Transaction Error:', error.message);
+    res.status(400).json({ error: error.message });
+  } finally {
+    session.endSession();
+  }
+});
+
+router.get('/admin/transactions', authenticateToken(['admin']), async (req, res) => {
+  const { page = 1, limit = 50, type, startDate, endDate, username, businessId } = req.query;
+  try {
+    const query = {};
+    if (type) query['transactions.type'] = type;
+    if (startDate || endDate) {
+      query['transactions.date'] = {};
+      if (startDate) query['transactions.date'].$gte = new Date(startDate);
+      if (endDate) query['transactions.date'].$lte = new Date(endDate);
+    }
+    const userQuery = username ? { username } : {};
+    const businessQuery = businessId ? { businessId } : {};
+    const userTransactions = await User.find({ ...userQuery, ...query })
+      .flatMap(user => user.transactions.map(tx => ({
+        ...tx.toObject(),
+        source: 'user',
+        sourceId: user.username,
+      })))
+      .slice((page - 1) * limit, parseInt(limit));
+    const businessTransactions = await Business.find({ ...businessQuery, ...query })
+      .flatMap(business => business.transactions.map(tx => ({
+        ...tx.toObject(),
+        source: 'business',
+        sourceId: business.businessId,
+      })))
+      .slice((page - 1) * limit, parseInt(limit));
+    const transactions = [...userTransactions, ...businessTransactions].sort((a, b) => new Date(b.date) - new Date(a.date));
+    const totalUsers = await User.countDocuments(userQuery);
+    const totalBusinesses = await Business.countDocuments(businessQuery);
+    res.json({
+      transactions,
+      total: totalUsers + totalBusinesses,
+      pagination: { page: parseInt(page), limit: parseInt(limit) },
+    });
+  } catch (error) {
+    console.error('Admin Transactions Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+router.post('/admin/business/suspend', authenticateToken(['admin']), async (req, res) => {
+  const { businessId, reason } = req.body;
+  if (!businessId || !reason) {
+    return res.status(400).json({ error: 'Business ID and reason are required' });
+  }
+  try {
+    const business = await Business.findOne({ businessId });
+    if (!business) return res.status(404).json({ error: 'Business not found' });
+    business.isActive = false;
+    business.suspensionReason = reason;
+    business.suspensionDate = new Date();
+    await business.save();
+    await AdminLedger.findOneAndUpdate(
+      {},
+      {
+        $push: {
+          transactions: {
+            type: 'business-suspension',
+            businessId,
+            reason,
+            date: new Date(),
+          },
+        },
+      },
+      { upsert: true }
+    );
+    if (business.pushToken) {
+      await sendPushNotification(
+        business.pushToken,
+        'Business Suspended',
+        `Your business has been suspended: ${reason}`,
+        { businessId }
+      );
+    }
+    res.json({ message: 'Business suspended successfully' });
+  } catch (error) {
+    console.error('Business Suspension Error:', error.message);
+    res.status(500).json({ error: 'Failed to suspend business' });
+  }
+});
+
+router.post('/admin/user/suspend', authenticateToken(['admin']), async (req, res) => {
+  const { username, reason } = req.body;
+  if (!username || !reason) {
+    return res.status(400).json({ error: 'Username and reason are required' });
+  }
+  try {
+    const user = await User.findOne({ username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.isActive = false;
+    user.suspensionReason = reason;
+    user.suspensionDate = new Date();
+    await user.save();
+    await AdminLedger.findOneAndUpdate(
+      {},
+      {
+        $push: {
+          transactions: {
+            type: 'user-suspension',
+            userId: username,
+            reason,
+            date: new Date(),
+          },
+        },
+      },
+      { upsert: true }
+    );
+    if (user.pushToken) {
+      await sendPushNotification(
+        user.pushToken,
+        'Account Suspended',
+        `Your account has been suspended: ${reason}`,
+        { username }
+      );
+    }
+    res.json({ message: 'User suspended successfully' });
+  } catch (error) {
+    console.error('User Suspension Error:', error.message);
+    res.status(500).json({ error: 'Failed to suspend user' });
+  }
+});
+
+router.get('/admin/businesses/pending', authenticateToken(['admin']), async (req, res) => {
+  const { page = 1, limit = 10 } = req.query;
+  try {
+    const businesses = await Business.find({ approvalStatus: 'pending' })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .select('businessId name ownerUsername phoneNumber email createdAt');
+    const total = await Business.countDocuments({ approvalStatus: 'pending' });
+    res.json({ businesses, total });
+  } catch (error) {
+    console.error('Pending Businesses Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch pending businesses' });
+  }
+});
+
+router.get('/admin/users/pending', authenticateToken(['admin']), async (req, res) => {
+  const { page = 1, limit = 10 } = req.query;
+  try {
+    const users = await User.find({ kycStatus: 'pending' })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .select('username name phoneNumber email idImageUrl createdAt');
+    const total = await User.countDocuments({ kycStatus: 'pending' });
+    res.json({ users, total });
+  } catch (error) {
+    console.error('Pending Users Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch pending users' });
+  }
+});
+
 module.exports = router;
