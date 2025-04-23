@@ -2395,7 +2395,7 @@ router.post('/payment-direct', authenticateToken(), async (req, res) => {
   }
 });
 
-router.get('/business/businesses', authenticateToken(), async (req, res) => {
+router.get('/business/businesses', async (req, res) => {
   try {
     const { page = 1, limit = 10, search = '', approvalStatus, sort = 'createdAt', sortOrder = 'desc' } = req.query;
 
