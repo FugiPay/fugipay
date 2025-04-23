@@ -2395,9 +2395,9 @@ router.post('/payment-direct', authenticateToken(), async (req, res) => {
   }
 });
 
-router.get('/business/businesses', async (req, res) => {
+router.get('/business/businesses', authenticateToken(['admin']), async (req, res) => {
   try {
-    const { page = 1, limit = 10, search = '', approvalStatus, sort = 'createdAt', sortOrder = 'desc' } = req.query;
+    const { page = 1, limit = 10, sort = 'createdAt', sortOrder = 'desc' } = req.query;
 
     // Validate query parameters
     const parsedPage = parseInt(page, 10);
@@ -2408,24 +2408,6 @@ router.get('/business/businesses', async (req, res) => {
     if (isNaN(parsedLimit) || parsedLimit < 1) {
       return res.status(400).json({ error: 'Invalid limit' });
     }
-    if (approvalStatus && !['pending', 'approved', 'rejected'].includes(approvalStatus.toLowerCase())) {
-      return res.status(400).json({ error: 'Invalid approvalStatus. Use pending, approved, or rejected' });
-    }
-
-    // Build query
-    const query = {};
-    if (search) {
-      // Sanitize search input
-      const sanitizedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      query.$or = [
-        { businessId: { $regex: sanitizedSearch, $options: 'i' } },
-        { name: { $regex: sanitizedSearch, $options: 'i' } },
-        { ownerUsername: { $regex: sanitizedSearch, $options: 'i' } },
-        { phoneNumber: { $regex: sanitizedSearch, $options: 'i' } },
-      ];
-    }
-    // Default to pending if no approvalStatus is provided
-    query.approvalStatus = approvalStatus ? approvalStatus.toLowerCase() : 'pending';
 
     // Build sort options
     const sortOptions = {};
@@ -2433,15 +2415,15 @@ router.get('/business/businesses', async (req, res) => {
     const sortField = validSortFields.includes(sort) ? sort : 'createdAt';
     sortOptions[sortField] = sortOrder.toLowerCase() === 'asc' ? 1 : -1;
 
-    // Fetch businesses
-    const businesses = await Business.find(query)
+    // Fetch all businesses without restrictions
+    const businesses = await Business.find({})
       .skip((parsedPage - 1) * parsedLimit)
       .limit(parsedLimit)
       .sort(sortOptions)
       .select('businessId name ownerUsername phoneNumber email balance approvalStatus isActive createdAt')
       .lean();
 
-    const total = await Business.countDocuments(query);
+    const total = await Business.countDocuments({});
 
     res.json({
       businesses,
