@@ -49,4 +49,20 @@ module.exports = (roles = []) => (req, res, next) => {
 
     next();
   });
+
+  jwt.verify(token, JWT_SECRET, (err, business) => {
+    if (err) {
+      console.error('[AUTH] Token error:', err.message);
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+
+    req.business = business;
+
+    if (roles.length && !roles.includes(business.role)) {
+      console.error('[AUTH] Role denied:', business.role, roles);
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
+    next();
+  });
 };
