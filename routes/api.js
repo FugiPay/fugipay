@@ -16,7 +16,7 @@ const QRPin = require('../models/QRPin');
 const AdminLedger = require('../models/AdminLedger'); // Added for balance tracking
 const BusinessTransaction = require('../models/BusinessTransaction');
 const BusinessAdminLedger = require('../models/BusinessAdminLedger');
-const { authenticateToken, requireAdmin } = require('../middleware/authenticateToken');
+const authenticateToken = require('../middleware/authenticateToken');
 const axios = require('axios');
 // const { sendPushNotification } = require('../utils/notifications');
 
@@ -2408,13 +2408,14 @@ router.get('/business/businesses', authenticateToken(), requireAdmin, async (req
     if (isNaN(parsedLimit) || parsedLimit < 1) {
       return res.status(400).json({ error: 'Invalid limit' });
     }
-    if (approvalStatus && !['pending', 'approved', 'rejected', ''].includes(approvalStatus.toLowerCase())) {
-      return res.status(400).json({ error: 'Invalid approvalStatus. Use pending, approved, rejected, or empty' });
+    if (approvalStatus && !['pending', 'approved', 'rejected'].includes(approvalStatus.toLowerCase())) {
+      return res.status(400).json({ error: 'Invalid approvalStatus. Use pending, approved, or rejected' });
     }
 
     // Build query
     const query = {};
     if (search) {
+      // Sanitize search input
       const sanitizedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
         { businessId: { $regex: sanitizedSearch, $options: 'i' } },
@@ -2423,10 +2424,8 @@ router.get('/business/businesses', authenticateToken(), requireAdmin, async (req
         { phoneNumber: { $regex: sanitizedSearch, $options: 'i' } },
       ];
     }
-    // Only apply approvalStatus filter if explicitly provided
-    if (approvalStatus && approvalStatus !== '') {
-      query.approvalStatus = approvalStatus.toLowerCase();
-    }
+    // Default to pending if no approvalStatus is provided
+    query.approvalStatus = approvalStatus ? approvalStatus.toLowerCase() : 'pending';
 
     // Build sort options
     const sortOptions = {};
