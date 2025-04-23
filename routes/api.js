@@ -16,7 +16,7 @@ const QRPin = require('../models/QRPin');
 const AdminLedger = require('../models/AdminLedger'); // Added for balance tracking
 const BusinessTransaction = require('../models/BusinessTransaction');
 const BusinessAdminLedger = require('../models/BusinessAdminLedger');
-const authenticateToken = require('../middleware/authenticateToken');
+const { authenticateToken, requireAdmin } = require('../middleware/authenticateToken');
 const axios = require('axios');
 // const { sendPushNotification } = require('../utils/notifications');
 
