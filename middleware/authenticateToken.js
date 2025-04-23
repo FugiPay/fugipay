@@ -23,11 +23,9 @@ module.exports = (roles = []) => (req, res, next) => {
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET;
 
-if (!JWT_SECRET) {
-  throw new Error('JWT_SECRET is required');
-}
+if (!JWT_SECRET) throw new Error('JWT_SECRET is required');
 
-const authenticateToken = () => (req, res, next) => {
+module.exports = (roles = []) => (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
@@ -43,16 +41,12 @@ const authenticateToken = () => (req, res, next) => {
     }
 
     req.user = user;
+
+    if (roles.length && !roles.includes(user.role)) {
+      console.error('[AUTH] Role denied:', user.role, roles);
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
     next();
   });
 };
-
-const requireAdmin = (req, res, next) => {
-  if (req.user.role !== 'admin') {
-    console.error('[AUTH] Role denied:', req.user.role, ['admin']);
-    return res.status(403).json({ error: 'Admins only' });
-  }
-  next();
-};
-
-module.exports = { authenticateToken, requireAdmin };
