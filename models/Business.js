@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 
 const transactionSchema = new mongoose.Schema({
@@ -6,68 +7,92 @@ const transactionSchema = new mongoose.Schema({
   type: {
     type: String,
     required: true,
-    enum: ['received', 'deposited', 'withdrawn', 'refunded', 'settled'],
+    enum: [
+      'received', 'deposited', 'withdrawn', 'refunded', 'settled', 'fee-collected',
+      'zmc-received', 'zmc-sent',
+    ],
   },
-  amount: { type: Number, required: true },
+  amount: { type: mongoose.Schema.Types.Decimal128, required: true },
   toFrom: { type: String, required: true },
-  fee: { type: Number, default: 0 },
+  fee: { type: mongoose.Schema.Types.Decimal128, default: 0 },
+  originalAmount: { type: mongoose.Schema.Types.Decimal128 },
+  sendingFee: { type: mongoose.Schema.Types.Decimal128 },
+  receivingFee: { type: mongoose.Schema.Types.Decimal128 },
   reason: { type: String },
+  trustRating: { type: Number, min: 1, max: 5 },
   date: { type: Date, default: Date.now, index: true },
 });
 
 const pendingDepositSchema = new mongoose.Schema({
-  amount: { type: Number, required: true },
+  amount: { type: mongoose.Schema.Types.Decimal128, required: true },
   transactionId: { type: String, required: true },
   date: { type: Date, default: Date.now },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+  rejectionReason: { type: String },
 });
 
 const pendingWithdrawalSchema = new mongoose.Schema({
-  amount: { type: Number, required: true },
-  fee: { type: Number, default: 0 },
+  amount: { type: mongoose.Schema.Types.Decimal128, required: true },
+  fee: { type: mongoose.Schema.Types.Decimal128, default: 0 },
   date: { type: Date, default: Date.now },
-  status: { type: String, enum: ['pending', 'completed', 'rejected'], default: 'pending' },
+  status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+  rejectionReason: { type: String },
+  destination: {
+    type: { type: String, enum: ['bank', 'mobile_money', 'zambia_coin'] },
+    accountDetails: { type: String },
+  },
 });
 
 const businessSchema = new mongoose.Schema({
-  businessId: { type: String, required: true, unique: true, index: true },
-  name: { type: String, required: true },
+  businessId: { type: String, required: true, unique: true },
+  businessName: { type: String, required: true },
   ownerUsername: { type: String, required: true, unique: true },
-  pin: { type: String, required: true },
   phoneNumber: {
     type: String,
     required: true,
     unique: true,
-    match: [/^\+260(9[567]|7[567])\d{7}$/, 'Phone number must be a valid Zambian mobile number (e.g., +260751234567)'],
+    match: [/^\+260(9[5678]|7[34679])\d{7}$/, 'Phone number must be a valid Zambian mobile number (e.g., +260951234567)'],
   },
   email: {
     type: String,
+    required: true,
     unique: true,
-    sparse: true,
     match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email address'],
   },
+  pin: { type: String, required: true, minlength: 4, maxlength: 4 },
   resetToken: { type: String },
   resetTokenExpiry: { type: Date },
-  balance: { type: Number, default: 0 },
+  balance: { type: mongoose.Schema.Types.Decimal128, default: 0 },
+  zambiaCoinBalance: { type: mongoose.Schema.Types.Decimal128, default: 0 },
   qrCode: { type: String },
   bankDetails: {
     bankName: String,
     accountNumber: String,
-    accountType: { type: String, enum: ['bank', 'mobile_money'] },
+    accountType: { type: String, enum: ['bank', 'mobile_money', 'zambia_coin'] },
   },
   role: { type: String, enum: ['business', 'admin'], default: 'business' },
-  approvalStatus: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+  kycStatus: { type: String, enum: ['pending', 'verified', 'rejected'], default: 'pending' },
+  kycDocuments: [{
+    documentType: { type: String, enum: ['registration', 'license', 'tax_id', 'other'] },
+    documentUrl: { type: String },
+  }],
+  trustScore: { type: Number, default: 0, min: 0, max: 100 },
+  ratingCount: { type: Number, default: 0 },
   transactions: [transactionSchema],
   pendingDeposits: [pendingDepositSchema],
   pendingWithdrawals: [pendingWithdrawalSchema],
   pushToken: { type: String, default: null },
   isActive: { type: Boolean, default: false },
+  lastLogin: { type: Date, default: null },
+  lastViewedTimestamp: { type: Number, default: 0 },
 }, { timestamps: true });
 
-// Simplified indexes to avoid conflicts
-businessSchema.index({ businessId: 1 }, { unique: true });
-businessSchema.index({ ownerUsername: 1 }, { unique: true });
-businessSchema.index({ phoneNumber: 1 }, { unique: true });
-businessSchema.index({ email: 1 }, { unique: true, sparse: true });
+// Hash PIN before saving
+businessSchema.pre('save', async function (next) {
+  if (this.isModified('pin')) {
+    this.pin = await bcrypt.hash(this.pin, 10);
+  }
+  next();
+});
 
 module.exports = mongoose.model('Business', businessSchema);

@@ -3,8 +3,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
-// const testRoutes = require('./routes/test');
-// const businessRoutes = require('./routes/business');
+const userRoutes = require('./routes/userRoutes');
 
 const app = express();
 app.use(express.json());
@@ -12,6 +11,7 @@ app.use(express.json());
 // CORS Configuration
 const allowedOrigins = [
   'http://localhost:3000',
+  'http://localhost:3002',
   'http://localhost:19006', // Expo dev
   'https://nzubo.net',
   'https://nzubo-admin.web.app',
@@ -35,14 +35,8 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 // Health Check
-app.get('/health', async (req, res) => {
-  try {
-    await mongoose.connection.db.admin().ping();
-    res.status(200).json({ status: 'ok', database: 'connected' });
-  } catch (err) {
-    console.error(`Health check failed: ${err.message} (code: ${err.code || 'unknown'})`);
-    res.status(500).json({ status: 'error', database: 'unavailable', error: `Database ping failed: ${err.message}` });
-  }
+app.get('/health', (req, res) => {
+  res.send('OK');
 });
 
 // Wake Endpoint
@@ -53,8 +47,7 @@ app.get('/wake', (req, res) => {
 
 // Routes
 app.use('/api', require('./routes/api'));
-// app.use('/api/business', businessRoutes);
-// app.use('/api', testRoutes);
+// app.use('/api', userRoutes); // Updated to use userRoutes directly
 
 // MongoDB Connection
 const mongoUri = process.env.MONGODB_URI;
