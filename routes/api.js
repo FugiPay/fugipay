@@ -18,6 +18,7 @@ const BusinessTransaction = require('../models/BusinessTransaction');
 const BusinessAdminLedger = require('../models/BusinessAdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
 const axios = require('axios');
+const redis = require('redis');
 // const { sendPushNotification } = require('../utils/notifications');
 
 /* let axios;
@@ -27,6 +28,9 @@ try {
   console.error('Axios not installed. Please run `npm install axios`');
 } */
 
+  /* const client = redis.createClient({ url: process.env.REDIS_URL });
+  client.connect();
+ */
 
 // Middleware to check admin role
 const requireAdmin = async (req, res, next) => {
@@ -112,6 +116,32 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
     console.error('Error sending push notification:', error.message);
   }
 }
+
+/* router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) => {
+  try {
+    const { phoneNumber } = req.params;
+    const { limit = 10, skip = 0 } = req.query;
+    if (req.user.phoneNumber !== phoneNumber && req.user.role !== 'admin') {
+      throw new Error('Unauthorized access');
+    }
+
+    const cacheKey = `user:${phoneNumber}`;
+    const cached = await client.get(cacheKey);
+    if (cached) return res.json(JSON.parse(cached));
+
+    const user = await User.findOne({ phoneNumber })
+      .select('-password')
+      .lean()
+      .exec();
+    if (!user) throw new Error('User not found');
+
+    user.transactions = user.transactions.slice(Number(skip), Number(skip) + Number(limit));
+    await client.setEx(cacheKey, 300, JSON.stringify(user));
+    res.json(user);
+  } catch (error) {
+    next(error);
+  }
+}); */
 
 router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => {
   try {

@@ -3,7 +3,10 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
+// Import route files
 const userRoutes = require('./routes/userRoutes');
+const businessRoutes = require('./routes/businessRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 
 const app = express();
 app.use(express.json());
@@ -46,8 +49,12 @@ app.get('/wake', (req, res) => {
 });
 
 // Routes
-app.use('/api', require('./routes/api'));
-// app.use('/api', userRoutes); // Updated to use userRoutes directly
+// app.use('/api', require('./routes/api'));
+
+// Routes
+app.use('/api/users', userRoutes); // User-related endpoints
+app.use('/api/business', businessRoutes); // Business-related endpoints
+app.use('/api/admin', adminRoutes); // Admin-related endpoints
 
 // MongoDB Connection
 const mongoUri = process.env.MONGODB_URI;

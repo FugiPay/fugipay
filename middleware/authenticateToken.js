@@ -21,9 +21,12 @@ module.exports = (roles = []) => (req, res, next) => {
 }; */
 
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025'; // Fallback for development
 
-if (!JWT_SECRET) throw new Error('JWT_SECRET is required');
+// Log warning if JWT_SECRET is missing (avoid crashing in production)
+if (!process.env.JWT_SECRET) {
+  console.warn('[AUTH] JWT_SECRET is not set. Using default fallback (unsafe for production).');
+}
 
 module.exports = (roles = []) => (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -34,32 +37,20 @@ module.exports = (roles = []) => (req, res, next) => {
     return res.status(401).json({ error: 'No token provided' });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  jwt.verify(token, JWT_SECRET, (err, payload) => {
     if (err) {
-      console.error('[AUTH] Token error:', err.message);
-      return res.status(403).json({ error: 'Invalid or expired token' });
+      console.error('[AUTH] Token verification failed:', err.message);
+      return res.status(403).json({
+        error: err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token',
+      });
     }
 
-    req.user = user;
+    // Attach payload to req.user for consistency across user, business, and admin routes
+    req.user = payload;
 
-    if (roles.length && !roles.includes(user.role)) {
-      console.error('[AUTH] Role denied:', user.role, roles);
-      return res.status(403).json({ error: 'Insufficient permissions' });
-    }
-
-    next();
-  });
-
-  jwt.verify(token, JWT_SECRET, (err, business) => {
-    if (err) {
-      console.error('[AUTH] Token error:', err.message);
-      return res.status(403).json({ error: 'Invalid or expired token' });
-    }
-
-    req.business = business;
-
-    if (roles.length && !roles.includes(business.role)) {
-      console.error('[AUTH] Role denied:', business.role, roles);
+    // Validate role if roles are specified
+    if (roles.length && !roles.includes(payload.role)) {
+      console.error('[AUTH] Role denied:', payload.role, 'Expected:', roles);
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
