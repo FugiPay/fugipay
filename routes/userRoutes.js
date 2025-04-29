@@ -602,4 +602,62 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
   }
 });
 
+// New Routes for Profile Update and Account Deletion
+router.put('/user/update', authenticateToken(), async (req, res) => {
+  const { email, password, pin } = req.body;
+  if (!email && !password && !pin) {
+    return res.status(400).json({ error: 'At least one field (email, password, pin) is required' });
+  }
+  if (email && !email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
+    return res.status(400).json({ error: 'Invalid email format' });
+  }
+  if (password && password.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  }
+  if (pin && !/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
+  try {
+    const updates = {};
+    if (email) updates.email = email.trim();
+    if (password) updates.password = await bcrypt.hash(password, 10);
+    if (pin) updates.pin = await bcrypt.hash(pin, 10);
+    const user = await User.findOneAndUpdate(
+      { username: req.user.username },
+      { $set: updates },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({
+      message: 'Profile updated',
+      user: {
+        email: user.email,
+        phoneNumber: user.phoneNumber,
+        username: user.username,
+        name: user.name,
+        balance: user.balance,
+        transactions: user.transactions,
+        kycStatus: user.kycStatus,
+        role: user.role,
+        lastViewedTimestamp: user.lastViewedTimestamp || 0,
+      }
+    });
+  } catch (error) {
+    console.error('[USER] Update Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error updating profile' });
+  }
+});
+
+router.delete('/user/delete', authenticateToken(), async (req, res) => {
+  try {
+    const user = await User.findOneAndDelete({ username: req.user.username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    await QRPin.deleteMany({ username: user.username });
+    res.json({ message: 'Account deleted' });
+  } catch (error) {
+    console.error('[USER] Delete Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error deleting account' });
+  }
+});
+
 module.exports = router;
