@@ -309,35 +309,73 @@ router.put('/user/update-notification', authenticateToken(), async (req, res) =>
 });
 
 router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
-  const { username, pin } = req.body;
-  if (!username || !pin) {
-    return res.status(400).json({ error: 'Username and PIN are required' });
-  }
-  if (!/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-  }
-  try {
-    const user = await User.findOne({ username: req.user.username });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (!user.isActive) return res.status(403).json({ error: 'User is inactive' });
-    if (username !== user.username) return res.status(403).json({ error: 'Unauthorized' });
-    const hashedPin = await bcrypt.hash(pin, 10);
-    const qrId = crypto.randomBytes(16).toString('hex');
-    const qrPin = new QRPin({ username, qrId, pin: hashedPin });
-    await qrPin.save();
-    user.transactions.push({ 
-      type: 'pending-pin', 
-      amount: 0, 
-      toFrom: 'Self', 
-      date: new Date() 
-    });
-    await user.save();
-    res.json({ qrId });
-  } catch (error) {
-    console.error('QR Pin Store Error:', error.message, error.stack);
-    res.status(500).json({ error: 'Server error storing QR pin' });
-  }
-});
+    const { username, pin } = req.body;
+    if (!username || !pin) {
+      return res.status(400).json({ error: 'Username and PIN are required' });
+    }
+    if (!/^\d{4}$/.test(pin)) {
+      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+    }
+    try {
+      const user = await User.findOne({ username: req.user.username });
+      if (!user) {
+        console.error('QR Pin Store: User not found', { username: req.user.username });
+        return res.status(404).json({ error: 'User not found' });
+      }
+      if (!user.isActive) {
+        console.error('QR Pin Store: User inactive', { username });
+        return res.status(403).json({ error: 'User is inactive' });
+      }
+      if (username !== user.username) {
+        console.error('QR Pin Store: Unauthorized', { requested: username, actual: user.username });
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+  
+      const hashedPin = await bcrypt.hash(pin, 10);
+      const qrId = crypto.randomBytes(16).toString('hex');
+      const qrPin = new QRPin({ username, qrId, pin: hashedPin });
+      
+      try {
+        await qrPin.save();
+      } catch (error) {
+        console.error('QR Pin Store: Failed to save QRPin', {
+          username,
+          qrId,
+          error: error.message,
+          stack: error.stack
+        });
+        throw new Error('Failed to save QR pin');
+      }
+  
+      try {
+        user.transactions.push({ 
+          type: 'pending-pin', 
+          amount: 0, 
+          toFrom: 'Self', 
+          date: new Date() 
+        });
+        await user.save();
+      } catch (error) {
+        console.error('QR Pin Store: Failed to update user transactions', {
+          username,
+          error: error.message,
+          stack: error.stack
+        });
+        throw new Error('Failed to update user transactions');
+      }
+  
+      console.log('QR Pin Store: Success', { username, qrId });
+      res.json({ qrId });
+    } catch (error) {
+      console.error('QR Pin Store Error:', {
+        message: error.message,
+        stack: error.stack,
+        username,
+        pinLength: pin?.length
+      });
+      res.status(500).json({ error: error.message || 'Server error storing QR pin' });
+    }
+  });
 
 router.post('/pay-qr', authenticateToken(), async (req, res) => {
   const { qrId, amount, pin, senderUsername } = req.body;
