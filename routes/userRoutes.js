@@ -371,7 +371,7 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
       return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
     }
     const session = await mongoose.startSession();
-    session.startTransaction();
+    session.startTransaction({ writeConcern: { w: 'majority' } });
     try {
       const sender = await User.findOne({ username: senderUsername, isActive: true }).session(session);
       if (!sender || sender.username !== req.user.username) {
@@ -408,8 +408,10 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
       }
       const sentTxId = new mongoose.Types.ObjectId().toString();
       const receivedTxId = new mongoose.Types.ObjectId().toString();
+      const transactionDate = new Date(); // Consistent timestamp
   
-      await Promise.all([
+      // Timeout for Promise.all to prevent hangs
+      const updates = Promise.all([
         User.updateOne(
           { _id: sender._id },
           {
@@ -421,7 +423,8 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
                 amount,
                 toFrom: receiver.username,
                 fee: sendingFee,
-                date: new Date(),
+                date: transactionDate,
+                qrId, // Add qrId
               },
             },
           },
@@ -438,7 +441,8 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
                 amount,
                 toFrom: sender.username,
                 fee: receivingFee,
-                date: new Date(),
+                date: transactionDate,
+                qrId, // Add qrId
               },
             },
           },
@@ -457,13 +461,20 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
                 sender: sender.username,
                 receiver: receiver.username,
                 userTransactionIds: [sentTxId, receivedTxId],
-                date: new Date(),
+                date: transactionDate,
+                qrId, // Add qrId for tracking
               },
             },
           },
           { upsert: true, session }
         ),
       ]);
+  
+      // Set timeout for updates
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Transaction update timeout')), 10000);
+      });
+      await Promise.race([updates, timeoutPromise]);
   
       await session.commitTransaction();
       session.endSession();
@@ -473,13 +484,21 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
         receivingFee,
         sender: sender.username,
         receiver: receiver.username,
+        qrId,
+        transactionDate,
       });
       res.json({ sendingFee, receivingFee, amount });
     } catch (error) {
       await session.abortTransaction();
       session.endSession();
-      console.error('[PAY-QR] Error:', error.message, error.stack);
-      res.status(500).json({ error: 'Server error processing payment' });
+      console.error('[PAY-QR] Error:', {
+        message: error.message,
+        stack: error.stack,
+        qrId,
+        senderUsername,
+        amount,
+      });
+      res.status(500).json({ error: error.message === 'Transaction update timeout' ? 'Transaction timed out' : 'Server error processing payment' });
     }
   });
 
