@@ -14,6 +14,11 @@ const AdminLedger = require('../models/AdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
 const axios = require('axios');
 
+
+// Ensure indexes
+User.createIndexes({ username: 1, phoneNumber: 1 });
+QRPin.createIndexes({ qrId: 1 });
+
 // Configure multer for temporary local storage
 const upload = multer({ dest: 'uploads/' });
 
@@ -317,14 +322,23 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
       return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
     try {
-      const user = await User.findOne({ username: req.user.username });
+      const user = await User.findOneAndUpdate(
+        { username: req.user.username, isActive: true },
+        {
+          $push: {
+            transactions: {
+              type: 'pending-pin',
+              amount: 0,
+              toFrom: 'Self',
+              date: new Date(),
+            },
+          },
+        },
+        { new: true }
+      );
       if (!user) {
-        console.error('QR Pin Store: User not found', { username: req.user.username });
-        return res.status(404).json({ error: 'User not found' });
-      }
-      if (!user.isActive) {
-        console.error('QR Pin Store: User inactive', { username });
-        return res.status(403).json({ error: 'User is inactive' });
+        console.error('QR Pin Store: User not found or inactive', { username: req.user.username });
+        return res.status(404).json({ error: 'User not found or inactive' });
       }
       if (username !== user.username) {
         console.error('QR Pin Store: Unauthorized', { requested: username, actual: user.username });
@@ -334,35 +348,7 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
       const qrId = crypto.randomBytes(16).toString('hex');
       const qrPin = new QRPin({ username, qrId, pin });
   
-      try {
-        await qrPin.save();
-      } catch (error) {
-        console.error('QR Pin Store: Failed to save QRPin', {
-          username,
-          qrId,
-          error: error.message,
-          stack: error.stack,
-        });
-        return res.status(500).json({ error: 'Failed to save QR pin' });
-      }
-  
-      try {
-        user.transactions.push({
-          type: 'pending-pin',
-          amount: 0,
-          toFrom: 'Self',
-          date: new Date(),
-        });
-        await user.save();
-      } catch (error) {
-        console.error('QR Pin Store: Failed to update user transactions', {
-          username,
-          error: error.message,
-          stack: error.stack,
-        });
-        return res.status(500).json({ error: 'Failed to update user transactions' });
-      }
-  
+      await qrPin.save();
       console.log('QR Pin Store: Success', { username, qrId });
       res.json({ qrId });
     } catch (error) {
@@ -372,129 +358,130 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
         username,
         pinLength: pin?.length,
       });
-      res.status(500).json({ error: error.message || 'Server error storing QR pin' });
+      res.status(500).json({ error: 'Server error storing QR pin' });
     }
   });
-
-router.post('/pay-qr', authenticateToken(), async (req, res) => {
-  const { qrId, amount, pin, senderUsername } = req.body;
-  if (!qrId || !amount || !pin || !senderUsername) {
-    return res.status(400).json({ error: 'QR ID, amount, PIN, and sender username required' });
-  }
-  if (amount <= 0 || amount > 10000) {
-    return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
-  }
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
-    const sender = await User.findOne({ username: senderUsername }).session(session);
-    if (!sender || sender.username !== req.user.username) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(403).json({ error: 'Unauthorized sender' });
+  
+  router.post('/pay-qr', authenticateToken(), async (req, res) => {
+    const { qrId, amount, pin, senderUsername } = req.body;
+    if (!qrId || !amount || !pin || !senderUsername) {
+      return res.status(400).json({ error: 'QR ID, amount, PIN, and sender username required' });
     }
-    if (!sender.isActive) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(403).json({ error: 'Sender account inactive' });
+    if (amount <= 0 || amount > 10000) {
+      return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
     }
-    const qrPin = await QRPin.findOne({ qrId }).session(session);
-    if (!qrPin || !await bcrypt.compare(pin, qrPin.pin)) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({ error: 'Invalid QR code or PIN' });
-    }
-    const receiver = await User.findOne({ username: qrPin.username }).session(session);
-    if (!receiver || !receiver.isActive) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({ error: 'Receiver not found or inactive' });
-    }
-    const sendingFee = amount <= 50 ? 0.50 : 
-                      amount <= 100 ? 1.00 : 
-                      amount <= 500 ? 2.00 :
-                      amount <= 1000 ? 2.50 : 
-                      amount <= 5000 ? 3.50 : 
-                      5.00;
-    const receivingFee = amount <= 50 ? 0.50 : 
-                        amount <= 100 ? 1.00 : 
-                        amount <= 500 ? 1.50 :
-                        amount <= 1000 ? 2.00 : 
-                        amount <= 5000 ? 3.00 : 
-                        5.00;
-    if (sender.balance < amount + sendingFee) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ error: 'Insufficient balance' });
-    }
-    const sentTxId = new mongoose.Types.ObjectId().toString();
-    const receivedTxId = new mongoose.Types.ObjectId().toString();
-    sender.balance -= (amount + sendingFee);
-    receiver.balance += (amount - receivingFee);
-    sender.transactions.push({
-      _id: sentTxId,
-      type: 'sent',
-      amount,
-      toFrom: receiver.username,
-      fee: sendingFee,
-      date: new Date(),
-    });
-    receiver.transactions.push({
-      _id: receivedTxId,
-      type: 'received',
-      amount,
-      toFrom: sender.username,
-      fee: receivingFee,
-      date: new Date(),
-    });
-    const totalFee = sendingFee + receivingFee;
-    await AdminLedger.findOneAndUpdate(
-      {},
-      {
-        $inc: { totalBalance: totalFee },
-        $set: { lastUpdated: new Date() },
-        $push: {
-          transactions: {
-            type: 'fee-collected',
-            amount: totalFee,
-            sender: sender.username,
-            receiver: receiver.username,
-            userTransactionIds: [sentTxId, receivedTxId],
-            date: new Date(),
-          },
-        },
-      },
-      {
-        upsert: true,
-        new: true,
-        session,
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      const sender = await User.findOne({ username: senderUsername, isActive: true }).session(session);
+      if (!sender || sender.username !== req.user.username) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(403).json({ error: 'Unauthorized sender' });
       }
-    );
-    await Promise.all([
-      sender.save({ session }),
-      receiver.save({ session }),
-      QRPin.deleteOne({ qrId }).session(session),
-    ]);
-    await session.commitTransaction();
-    session.endSession();
-    console.log('[PAY-QR] Transaction:', {
-      amount,
-      sendingFee,
-      receivingFee,
-      totalFeeCredited: totalFee,
-      sentTxId,
-      receivedTxId,
-      sender: sender.username,
-      receiver: receiver.username,
-    });
-    res.json({ sendingFee, receivingFee, amount });
-  } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
-    console.error('[PAY-QR] Error:', error.message, error.stack);
-    res.status(500).json({ error: 'Server error processing payment' });
-  }
-});
+      const qrPin = await QRPin.findOne({ qrId }).session(session);
+      if (!qrPin || qrPin.pin !== pin) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(404).json({ error: 'Invalid QR code or PIN' });
+      }
+      const receiver = await User.findOne({ username: qrPin.username, isActive: true }).session(session);
+      if (!receiver) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(404).json({ error: 'Receiver not found or inactive' });
+      }
+      const sendingFee = amount <= 50 ? 0.50 : 
+                        amount <= 100 ? 1.00 : 
+                        amount <= 500 ? 2.00 :
+                        amount <= 1000 ? 2.50 : 
+                        amount <= 5000 ? 3.50 : 5.00;
+      const receivingFee = amount <= 50 ? 0.50 : 
+                          amount <= 100 ? 1.00 : 
+                          amount <= 500 ? 1.50 :
+                          amount <= 1000 ? 2.00 : 
+                          amount <= 5000 ? 3.00 : 5.00;
+      if (sender.balance < amount + sendingFee) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(400).json({ error: 'Insufficient balance' });
+      }
+      const sentTxId = new mongoose.Types.ObjectId().toString();
+      const receivedTxId = new mongoose.Types.ObjectId().toString();
+  
+      await Promise.all([
+        User.updateOne(
+          { _id: sender._id },
+          {
+            $inc: { balance: -(amount + sendingFee) },
+            $push: {
+              transactions: {
+                _id: sentTxId,
+                type: 'sent',
+                amount,
+                toFrom: receiver.username,
+                fee: sendingFee,
+                date: new Date(),
+              },
+            },
+          },
+          { session }
+        ),
+        User.updateOne(
+          { _id: receiver._id },
+          {
+            $inc: { balance: amount - receivingFee },
+            $push: {
+              transactions: {
+                _id: receivedTxId,
+                type: 'received',
+                amount,
+                toFrom: sender.username,
+                fee: receivingFee,
+                date: new Date(),
+              },
+            },
+          },
+          { session }
+        ),
+        QRPin.deleteOne({ qrId }, { session }),
+        AdminLedger.updateOne(
+          {},
+          {
+            $inc: { totalBalance: sendingFee + receivingFee },
+            $set: { lastUpdated: new Date() },
+            $push: {
+              transactions: {
+                type: 'fee-collected',
+                amount: sendingFee + receivingFee,
+                sender: sender.username,
+                receiver: receiver.username,
+                userTransactionIds: [sentTxId, receivedTxId],
+                date: new Date(),
+              },
+            },
+          },
+          { upsert: true, session }
+        ),
+      ]);
+  
+      await session.commitTransaction();
+      session.endSession();
+      console.log('[PAY-QR] Transaction:', {
+        amount,
+        sendingFee,
+        receivingFee,
+        sender: sender.username,
+        receiver: receiver.username,
+      });
+      res.json({ sendingFee, receivingFee, amount });
+    } catch (error) {
+      await session.abortTransaction();
+      session.endSession();
+      console.error('[PAY-QR] Error:', error.message, error.stack);
+      res.status(500).json({ error: 'Server error processing payment' });
+    }
+  });
 
 router.post('/deposit/manual', authenticateToken(), async (req, res) => {
   const { amount, transactionId } = req.body;
