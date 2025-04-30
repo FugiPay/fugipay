@@ -331,10 +331,9 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
         return res.status(403).json({ error: 'Unauthorized' });
       }
   
-      const hashedPin = await bcrypt.hash(pin, 10);
       const qrId = crypto.randomBytes(16).toString('hex');
-      const qrPin = new QRPin({ username, qrId, pin: hashedPin });
-      
+      const qrPin = new QRPin({ username, qrId, pin });
+  
       try {
         await qrPin.save();
       } catch (error) {
@@ -342,26 +341,26 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
           username,
           qrId,
           error: error.message,
-          stack: error.stack
+          stack: error.stack,
         });
-        throw new Error('Failed to save QR pin');
+        return res.status(500).json({ error: 'Failed to save QR pin' });
       }
   
       try {
-        user.transactions.push({ 
-          type: 'pending-pin', 
-          amount: 0, 
-          toFrom: 'Self', 
-          date: new Date() 
+        user.transactions.push({
+          type: 'pending-pin',
+          amount: 0,
+          toFrom: 'Self',
+          date: new Date(),
         });
         await user.save();
       } catch (error) {
         console.error('QR Pin Store: Failed to update user transactions', {
           username,
           error: error.message,
-          stack: error.stack
+          stack: error.stack,
         });
-        throw new Error('Failed to update user transactions');
+        return res.status(500).json({ error: 'Failed to update user transactions' });
       }
   
       console.log('QR Pin Store: Success', { username, qrId });
@@ -371,7 +370,7 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
         message: error.message,
         stack: error.stack,
         username,
-        pinLength: pin?.length
+        pinLength: pin?.length,
       });
       res.status(500).json({ error: error.message || 'Server error storing QR pin' });
     }
