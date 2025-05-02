@@ -322,35 +322,47 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
       return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
     try {
-      const user = await User.findOneAndUpdate(
-        { username: req.user.username, isActive: true },
-        {
-          $push: {
-            transactions: {
-              type: 'pending-pin',
-              amount: 0,
-              toFrom: 'Self',
-              date: new Date(),
+      const qrId = crypto.randomBytes(16).toString('hex');
+      const session = await mongoose.startSession();
+      session.startTransaction({ writeConcern: { w: 'majority' } });
+      try {
+        const user = await User.findOneAndUpdate(
+          { username: req.user.username, isActive: true },
+          {
+            $push: {
+              transactions: {
+                type: 'pending-pin',
+                amount: 0,
+                toFrom: 'Self',
+                date: new Date(),
+                qrId,
+              },
             },
           },
-        },
-        { new: true }
-      );
-      if (!user) {
-        console.error('QR Pin Store: User not found or inactive', { username: req.user.username });
-        return res.status(404).json({ error: 'User not found or inactive' });
+          { new: true, session }
+        );
+        if (!user) {
+          await session.abortTransaction();
+          session.endSession();
+          console.error('QR Pin Store: User not found or inactive', { username: req.user.username });
+          return res.status(404).json({ error: 'User not found or inactive' });
+        }
+        if (username !== user.username) {
+          await session.abortTransaction();
+          session.endSession();
+          console.error('QR Pin Store: Unauthorized', { requested: username, actual: user.username });
+          return res.status(403).json({ error: 'Unauthorized' });
+        }
+        await new QRPin({ username, qrId, pin }).save({ session });
+        await session.commitTransaction();
+        session.endSession();
+        console.log('QR Pin Store: Success', { username, qrId });
+        res.json({ qrId });
+      } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+        throw error;
       }
-      if (username !== user.username) {
-        console.error('QR Pin Store: Unauthorized', { requested: username, actual: user.username });
-        return res.status(403).json({ error: 'Unauthorized' });
-      }
-  
-      const qrId = crypto.randomBytes(16).toString('hex');
-      const qrPin = new QRPin({ username, qrId, pin });
-  
-      await qrPin.save();
-      console.log('QR Pin Store: Success', { username, qrId });
-      res.json({ qrId });
     } catch (error) {
       console.error('QR Pin Store Error:', {
         message: error.message,
@@ -408,46 +420,52 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
       }
       const sentTxId = new mongoose.Types.ObjectId().toString();
       const receivedTxId = new mongoose.Types.ObjectId().toString();
-      const transactionDate = new Date(); // Consistent timestamp
+      const transactionDate = new Date();
   
-      // Timeout for Promise.all to prevent hangs
+      // Batch User updates
+      await User.bulkWrite([
+        {
+          updateOne: {
+            filter: { _id: sender._id },
+            update: {
+              $inc: { balance: -(amount + sendingFee) },
+              $push: {
+                transactions: {
+                  _id: sentTxId,
+                  type: 'sent',
+                  amount,
+                  toFrom: receiver.username,
+                  fee: sendingFee,
+                  date: transactionDate,
+                  qrId,
+                },
+              },
+            },
+          },
+        },
+        {
+          updateOne: {
+            filter: { _id: receiver._id },
+            update: {
+              $inc: { balance: amount - receivingFee },
+              $push: {
+                transactions: {
+                  _id: receivedTxId,
+                  type: 'received',
+                  amount,
+                  toFrom: sender.username,
+                  fee: receivingFee,
+                  date: transactionDate,
+                  qrId,
+                },
+              },
+            },
+          },
+        },
+      ], { session });
+  
+      // Delete QRPin and update AdminLedger
       const updates = Promise.all([
-        User.updateOne(
-          { _id: sender._id },
-          {
-            $inc: { balance: -(amount + sendingFee) },
-            $push: {
-              transactions: {
-                _id: sentTxId,
-                type: 'sent',
-                amount,
-                toFrom: receiver.username,
-                fee: sendingFee,
-                date: transactionDate,
-                qrId, // Add qrId
-              },
-            },
-          },
-          { session }
-        ),
-        User.updateOne(
-          { _id: receiver._id },
-          {
-            $inc: { balance: amount - receivingFee },
-            $push: {
-              transactions: {
-                _id: receivedTxId,
-                type: 'received',
-                amount,
-                toFrom: sender.username,
-                fee: receivingFee,
-                date: transactionDate,
-                qrId, // Add qrId
-              },
-            },
-          },
-          { session }
-        ),
         QRPin.deleteOne({ qrId }, { session }),
         AdminLedger.updateOne(
           {},
@@ -462,7 +480,7 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
                 receiver: receiver.username,
                 userTransactionIds: [sentTxId, receivedTxId],
                 date: transactionDate,
-                qrId, // Add qrId for tracking
+                qrId,
               },
             },
           },
@@ -470,9 +488,8 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
         ),
       ]);
   
-      // Set timeout for updates
       const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Transaction update timeout')), 10000);
+        setTimeout(() => reject(new Error('Transaction update timeout')), 15000);
       });
       await Promise.race([updates, timeoutPromise]);
   
