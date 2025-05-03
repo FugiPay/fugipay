@@ -666,16 +666,16 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
 router.put('/user/update', authenticateToken(), async (req, res) => {
     const { email, password, pin } = req.body;
     if (!email && !password && !pin) {
-      return res.status(400).json({ error: 'At least one field (email, password, pin) is required' });
+      return res.status(400).json({ error: 'At least one field (email, password, pin) is required', code: 'MISSING_FIELDS' });
     }
     if (email && !email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
-      return res.status(400).json({ error: 'Invalid email format' });
+      return res.status(400).json({ error: 'Invalid email format', code: 'INVALID_EMAIL' });
     }
     if (password && password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      return res.status(400).json({ error: 'Password must be at least 6 characters', code: 'INVALID_PASSWORD' });
     }
     if (pin && !/^\d{4}$/.test(pin)) {
-      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+      return res.status(400).json({ error: 'PIN must be a 4-digit number', code: 'INVALID_PIN' });
     }
     try {
       const updates = {};
@@ -683,11 +683,14 @@ router.put('/user/update', authenticateToken(), async (req, res) => {
       if (password) updates.password = await bcrypt.hash(password, 10);
       if (pin) updates.pin = await bcrypt.hash(pin, 10);
       const user = await User.findOneAndUpdate(
-        { username: req.user.username },
+        { username: req.user.username, isActive: true },
         { $set: updates },
         { new: true }
       );
-      if (!user) return res.status(404).json({ error: 'User not found' });
+      if (!user) {
+        return res.status(404).json({ error: 'User not found or inactive', code: 'USER_NOT_FOUND' });
+      }
+      console.log('[USER] Update Success:', { username: req.user.username, updates: Object.keys(updates) });
       res.json({
         message: 'Profile updated',
         user: {
@@ -700,11 +703,16 @@ router.put('/user/update', authenticateToken(), async (req, res) => {
           kycStatus: user.kycStatus,
           role: user.role,
           lastViewedTimestamp: user.lastViewedTimestamp || 0,
-        }
+        },
       });
     } catch (error) {
-      console.error('[USER] Update Error:', error.message, error.stack);
-      res.status(500).json({ error: 'Server error updating profile' });
+      console.error('[USER] Update Error:', {
+        message: error.message,
+        stack: error.stack,
+        username: req.user.username,
+        updates: req.body,
+      });
+      res.status(500).json({ error: 'Server error updating profile', code: 'SERVER_ERROR' });
     }
   });
   
