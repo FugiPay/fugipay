@@ -727,5 +727,43 @@ router.put('/user/update', authenticateToken(), async (req, res) => {
       res.status(500).json({ error: 'Server error deleting account' });
     }
   });
+  
+  router.post('/refresh-token', async (req, res) => {
+    const { refreshToken } = req.body;
+    if (!refreshToken) {
+      return res.status(400).json({ error: 'Refresh token is required', code: 'MISSING_REFRESH_TOKEN' });
+    }
+    try {
+      // Find user with matching refresh token
+      const user = await User.findOne({ refreshToken });
+      if (!user) {
+        return res.status(403).json({ error: 'Invalid refresh token', code: 'INVALID_REFRESH_TOKEN' });
+      }
+      // Verify refresh token
+      try {
+        jwt.verify(refreshToken, process.env.JWT_SECRET);
+      } catch (error) {
+        return res.status(403).json({ error: 'Invalid or expired refresh token', code: 'INVALID_REFRESH_TOKEN' });
+      }
+      // Generate new access token
+      const accessToken = jwt.sign({ username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
+      // Optionally generate new refresh token
+      const newRefreshToken = jwt.sign({ username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
+      // Update user's refresh token
+      await User.updateOne({ _id: user._id }, { $set: { refreshToken: newRefreshToken } });
+      console.log('[USER] Refresh Token Success:', { username: user.username });
+      res.json({
+        accessToken,
+        refreshToken: newRefreshToken,
+      });
+    } catch (error) {
+      console.error('[USER] Refresh Token Error:', {
+        message: error.message,
+        stack: error.stack,
+        refreshToken: refreshToken ? 'provided' : 'missing',
+      });
+      res.status(500).json({ error: 'Server error refreshing token', code: 'SERVER_ERROR' });
+    }
+  });
 
 module.exports = router;
