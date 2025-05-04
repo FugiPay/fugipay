@@ -36,6 +36,8 @@ const corsOptions = {
   credentials: true,
 };
 app.use(cors(corsOptions));
+// index.js
+// app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE'], credentials: true }));
 
 // Health Check
 app.get('/health', (req, res) => {
