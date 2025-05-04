@@ -253,19 +253,28 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
 router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) => {
   try {
     const { phoneNumber } = req.params;
-    const { limit = 10, skip = 0 } = req.query;
     if (req.user.phoneNumber !== phoneNumber && req.user.role !== 'admin') {
-      throw new Error('Unauthorized access');
+      return res.status(403).json({ error: 'Unauthorized' });
     }
     const user = await User.findOne({ phoneNumber })
       .select('-password -pin')
       .lean()
       .exec();
-    if (!user) throw new Error('User not found');
-    user.transactions = user.transactions.slice(Number(skip), Number(skip) + Number(limit));
-    res.json(user);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({
+      phoneNumber: user.phoneNumber,
+      username: user.username,
+      email: user.email || '',
+      name: user.name || '',
+      balance: user.balance || 0,
+      transactions: user.transactions || [],
+      kycStatus: user.kycStatus || 'rejected',
+      role: user.role || 'user',
+      lastViewedTimestamp: user.lastViewedTimestamp || 0,
+    });
   } catch (error) {
-    next(error);
+    console.error('[USER] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
