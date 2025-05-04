@@ -673,57 +673,46 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
 
 // New Routes for Profile Update and Account Deletion
 router.put('/user/update', authenticateToken(), async (req, res) => {
+  try {
     const { email, password, pin } = req.body;
-    if (!email && !password && !pin) {
-      return res.status(400).json({ error: 'At least one field (email, password, pin) is required', code: 'MISSING_FIELDS' });
+    const updates = {};
+    if (email) updates.email = email;
+    if (password) updates.password = password; // Assume bcrypt hashing in middleware
+    if (pin) updates.pin = pin;
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ error: 'No fields to update' });
     }
-    if (email && !email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
-      return res.status(400).json({ error: 'Invalid email format', code: 'INVALID_EMAIL' });
-    }
-    if (password && password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters', code: 'INVALID_PASSWORD' });
-    }
-    if (pin && !/^\d{4}$/.test(pin)) {
-      return res.status(400).json({ error: 'PIN must be a 4-digit number', code: 'INVALID_PIN' });
-    }
-    try {
-      const updates = {};
-      if (email) updates.email = email.trim();
-      if (password) updates.password = await bcrypt.hash(password, 10);
-      if (pin) updates.pin = await bcrypt.hash(pin, 10);
-      const user = await User.findOneAndUpdate(
-        { username: req.user.username, isActive: true },
-        { $set: updates },
-        { new: true }
-      );
-      if (!user) {
-        return res.status(404).json({ error: 'User not found or inactive', code: 'USER_NOT_FOUND' });
+
+    // Validate email uniqueness
+    if (email) {
+      const existingUser = await User.findOne({ email });
+      if (existingUser && existingUser._id.toString() !== req.user._id) {
+        return res.status(409).json({ error: 'Email already exists' });
       }
-      console.log('[USER] Update Success:', { username: req.user.username, updates: Object.keys(updates) });
-      res.json({
-        message: 'Profile updated',
-        user: {
-          email: user.email,
-          phoneNumber: user.phoneNumber,
-          username: user.username,
-          name: user.name,
-          balance: user.balance,
-          transactions: user.transactions,
-          kycStatus: user.kycStatus,
-          role: user.role,
-          lastViewedTimestamp: user.lastViewedTimestamp || 0,
-        },
-      });
-    } catch (error) {
-      console.error('[USER] Update Error:', {
-        message: error.message,
-        stack: error.stack,
-        username: req.user.username,
-        updates: req.body,
-      });
-      res.status(500).json({ error: 'Server error updating profile', code: 'SERVER_ERROR' });
     }
-  });
+
+    const user = await User.findByIdAndUpdate(req.user._id, updates, {
+      new: true,
+      runValidators: true,
+    }).select('-password -pin');
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ message: 'Profile updated', user });
+  } catch (error) {
+    console.error('[USER] Update Error:', error.message);
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Email already exists' });
+    }
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: 'Invalid input' });
+    }
+    res.status(500).json({ error: 'Server error' });
+  }
+});
   
   router.delete('/user/delete', authenticateToken(), async (req, res) => {
     try {
