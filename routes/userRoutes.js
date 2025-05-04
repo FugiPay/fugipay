@@ -664,7 +664,7 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
 
 // New Routes for Profile Update and Account Deletion
 router.put('/user/update', authenticateToken(), async (req, res) => {
-    const { username, email, password, pin } = req.body;
+    const { email, password, pin } = req.body;
   
     try {
       const user = await User.findOne({ username: req.user.username });
@@ -672,13 +672,6 @@ router.put('/user/update', authenticateToken(), async (req, res) => {
         return res.status(404).json({ error: 'User not found', code: 'USER_NOT_FOUND' });
       }
   
-      if (username && username !== user.username) {
-        const existingUsername = await User.findOne({ username });
-        if (existingUsername) {
-          return res.status(400).json({ error: 'Username already taken', code: 'USERNAME_TAKEN' });
-        }
-        user.username = username;
-      }
       if (email && email !== user.email) {
         const existingEmail = await User.findOne({ email });
         if (existingEmail) {
@@ -699,7 +692,7 @@ router.put('/user/update', authenticateToken(), async (req, res) => {
         if (!/^\d{4}$/.test(pin)) {
           return res.status(400).json({ error: 'PIN must be a 4-digit number', code: 'INVALID_PIN' });
         }
-        user.pin = await bcrypt.hash(pin, 10); // Hash PIN for security
+        user.pin = await bcrypt.hash(pin, 10);
       }
   
       await user.save();
@@ -711,7 +704,7 @@ router.put('/user/update', authenticateToken(), async (req, res) => {
           email: user.email,
           phoneNumber: user.phoneNumber,
           username: user.username,
-          name: user.name,
+          name: user.name || '',
           balance: user.balance || 0,
           transactions: user.transactions || [],
           kycStatus: user.kycStatus || 'pending',
