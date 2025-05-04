@@ -665,50 +665,43 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
 // New Routes for Profile Update and Account Deletion
 router.put('/user/update', authenticateToken(), async (req, res) => {
     const { email, password, pin } = req.body;
-  
+    if (!email && !password && !pin) {
+      return res.status(400).json({ error: 'At least one field (email, password, pin) is required', code: 'MISSING_FIELDS' });
+    }
+    if (email && !email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
+      return res.status(400).json({ error: 'Invalid email format', code: 'INVALID_EMAIL' });
+    }
+    if (password && password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters', code: 'INVALID_PASSWORD' });
+    }
+    if (pin && !/^\d{4}$/.test(pin)) {
+      return res.status(400).json({ error: 'PIN must be a 4-digit number', code: 'INVALID_PIN' });
+    }
     try {
-      const user = await User.findOne({ username: req.user.username });
+      const updates = {};
+      if (email) updates.email = email.trim();
+      if (password) updates.password = await bcrypt.hash(password, 10);
+      if (pin) updates.pin = await bcrypt.hash(pin, 10);
+      const user = await User.findOneAndUpdate(
+        { username: req.user.username, isActive: true },
+        { $set: updates },
+        { new: true }
+      );
       if (!user) {
-        return res.status(404).json({ error: 'User not found', code: 'USER_NOT_FOUND' });
+        return res.status(404).json({ error: 'User not found or inactive', code: 'USER_NOT_FOUND' });
       }
-  
-      if (email && email !== user.email) {
-        const existingEmail = await User.findOne({ email });
-        if (existingEmail) {
-          return res.status(400).json({ error: 'Email already in use', code: 'EMAIL_IN_USE' });
-        }
-        if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
-          return res.status(400).json({ error: 'Invalid email format', code: 'INVALID_EMAIL' });
-        }
-        user.email = email;
-      }
-      if (password) {
-        if (password.length < 6) {
-          return res.status(400).json({ error: 'Password must be at least 6 characters', code: 'INVALID_PASSWORD' });
-        }
-        user.password = await bcrypt.hash(password, 10);
-      }
-      if (pin) {
-        if (!/^\d{4}$/.test(pin)) {
-          return res.status(400).json({ error: 'PIN must be a 4-digit number', code: 'INVALID_PIN' });
-        }
-        user.pin = await bcrypt.hash(pin, 10);
-      }
-  
-      await user.save();
-      console.log('[USER] Update Success:', { username: req.user.username, updates: Object.keys(req.body) });
-  
+      console.log('[USER] Update Success:', { username: req.user.username, updates: Object.keys(updates) });
       res.json({
         message: 'Profile updated',
         user: {
           email: user.email,
           phoneNumber: user.phoneNumber,
           username: user.username,
-          name: user.name || '',
-          balance: user.balance || 0,
-          transactions: user.transactions || [],
-          kycStatus: user.kycStatus || 'pending',
-          role: user.role || 'user',
+          name: user.name,
+          balance: user.balance,
+          transactions: user.transactions,
+          kycStatus: user.kycStatus,
+          role: user.role,
           lastViewedTimestamp: user.lastViewedTimestamp || 0,
         },
       });
@@ -725,20 +718,13 @@ router.put('/user/update', authenticateToken(), async (req, res) => {
   
   router.delete('/user/delete', authenticateToken(), async (req, res) => {
     try {
-      const user = await User.findOne({ username: req.user.username });
-      if (!user) return res.status(404).json({ error: 'User not found', code: 'USER_NOT_FOUND' });
-  
+      const user = await User.findOneAndDelete({ username: req.user.username });
+      if (!user) return res.status(404).json({ error: 'User not found' });
       await QRPin.deleteMany({ username: user.username });
-      await User.deleteOne({ username: req.user.username });
-      console.log('[USER] Delete Success:', { username: req.user.username });
-      res.json({ message: 'Account deleted successfully' });
+      res.json({ message: 'Account deleted' });
     } catch (error) {
-      console.error('[USER] Delete Error:', {
-        message: error.message,
-        stack: error.stack,
-        username: req.user.username,
-      });
-      res.status(500).json({ error: 'Server error deleting account', code: 'SERVER_ERROR' });
+      console.error('[USER] Delete Error:', error.message, error.stack);
+      res.status(500).json({ error: 'Server error deleting account' });
     }
   });
   
@@ -772,35 +758,6 @@ router.put('/user/update', authenticateToken(), async (req, res) => {
         refreshToken: refreshToken ? 'provided' : 'missing',
       });
       res.status(500).json({ error: 'Server error refreshing token', code: 'SERVER_ERROR' });
-    }
-  });
-  
-  router.get('/phone/:phoneNumber', authenticateToken(), async (req, res) => {
-    try {
-      const user = await User.findOne({ phoneNumber: req.params.phoneNumber, isActive: true });
-      if (!user) {
-        return res.status(404).json({ error: 'User not found or inactive', code: 'USER_NOT_FOUND' });
-      }
-      const response = {
-        email: user.email,
-        phoneNumber: user.phoneNumber,
-        username: user.username,
-        name: user.name || '',
-        balance: user.balance || 0,
-        transactions: user.transactions || [],
-        kycStatus: user.kycStatus || 'pending',
-        role: user.role || 'user',
-        lastViewedTimestamp: user.lastViewedTimestamp || 0,
-      };
-      console.log('[USER] Get By Phone Success:', response);
-      res.json(response);
-    } catch (error) {
-      console.error('[USER] Get By Phone Error:', {
-        message: error.message,
-        stack: error.stack,
-        phoneNumber: req.params.phoneNumber,
-      });
-      res.status(500).json({ error: 'Server error fetching user', code: 'SERVER_ERROR' });
     }
   });
 
