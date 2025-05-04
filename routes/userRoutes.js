@@ -250,7 +250,7 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
   }
 });
 
-/* router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) => {
+router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) => {
   try {
     const { phoneNumber } = req.params;
     const { limit = 10, skip = 0 } = req.query;
@@ -267,7 +267,7 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
   } catch (error) {
     next(error);
   }
-}); */
+});
 
 router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => {
   try {
