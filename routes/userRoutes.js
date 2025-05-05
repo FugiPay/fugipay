@@ -676,28 +676,48 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
   try {
     const { email, password, pin } = req.body;
     const updates = {};
-    if (email) updates.email = email;
-    if (password) updates.password = password; // Assume bcrypt hashing in middleware
-    if (pin) updates.pin = pin;
+
+    // Validate and add email
+    if (email) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        console.log('[USER] Invalid email format:', email);
+        return res.status(400).json({ error: 'Invalid email format' });
+      }
+      const existingUser = await User.findOne({ email });
+      if (existingUser && existingUser.phoneNumber !== req.user.phoneNumber) {
+        console.log('[USER] Email already exists:', email);
+        return res.status(409).json({ error: 'Email already exists' });
+      }
+      updates.email = email;
+    }
+
+    // Validate and hash password
+    if (password) {
+      if (password.length < 6) {
+        console.log('[USER] Password too short:', password.length);
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      }
+      updates.password = await bcrypt.hash(password, 10);
+    }
+
+    // Validate PIN
+    if (pin) {
+      if (pin.length !== 4 || !/^\d{4}$/.test(pin)) {
+        console.log('[USER] Invalid PIN:', pin);
+        return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
+      }
+      updates.pin = pin;
+    }
 
     if (!Object.keys(updates).length) {
       console.log('[USER] No fields to update');
       return res.status(400).json({ error: 'No fields to update' });
     }
 
-    // Validate email uniqueness
-    if (email) {
-      const existingUser = await User.findOne({ email });
-      if (existingUser && existingUser.phoneNumber !== req.user.phoneNumber) {
-        console.log('[USER] Email already exists:', email);
-        return res.status(409).json({ error: 'Email already exists' });
-      }
-    }
-
     console.log('[USER] Updating user:', { phoneNumber: req.user.phoneNumber, updates });
     const user = await User.findOneAndUpdate(
       { phoneNumber: req.user.phoneNumber },
-      updates,
+      { $set: updates },
       { new: true, runValidators: true }
     ).select('-password -pin');
 
@@ -713,13 +733,14 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
       { expiresIn: '1h' }
     );
 
-    console.log('[USER] Profile updated:', { phoneNumber: user.phoneNumber });
+    console.log('[USER] Profile updated:', { phoneNumber: user.phoneNumber, updatedFields: Object.keys(updates) });
     res.json({ message: 'Profile updated', user, token });
   } catch (error) {
     console.error('[USER] Update Error:', {
       message: error.message,
       code: error.code,
       name: error.name,
+      stack: error.stack,
     });
     if (error.code === 11000) {
       return res.status(409).json({ error: 'Email already exists' });
@@ -730,50 +751,70 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-  
-  router.delete('/user/delete', authenticateToken(), async (req, res) => {
+
+// Delete user
+router.delete('/user/delete', authenticateToken(['user']), async (req, res) => {
+  try {
+    const user = await User.findOneAndDelete({ phoneNumber: req.user.phoneNumber });
+    if (!user) {
+      console.error('[USER] User not found:', req.user.phoneNumber);
+      return res.status(404).json({ error: 'User not found' });
+    }
+    await QRPin.deleteMany({ phoneNumber: user.phoneNumber });
+    console.log('[USER] Account deleted:', req.user.phoneNumber);
+    res.json({ message: 'Account deleted' });
+  } catch (error) {
+    console.error('[USER] Delete Error:', {
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ error: 'Server error deleting account' });
+  }
+});
+
+// Refresh token
+router.post('/refresh-token', async (req, res) => {
+  const { refreshToken } = req.body;
+  if (!refreshToken) {
+    console.log('[USER] Refresh token missing');
+    return res.status(400).json({ error: 'Refresh token is required', code: 'MISSING_REFRESH_TOKEN' });
+  }
+  try {
+    const user = await User.findOne({ refreshToken });
+    if (!user) {
+      console.log('[USER] Invalid refresh token');
+      return res.status(403).json({ error: 'Invalid refresh token', code: 'INVALID_REFRESH_TOKEN' });
+    }
     try {
-      const user = await User.findOneAndDelete({ username: req.user.username });
-      if (!user) return res.status(404).json({ error: 'User not found' });
-      await QRPin.deleteMany({ username: user.username });
-      res.json({ message: 'Account deleted' });
+      jwt.verify(refreshToken, process.env.JWT_SECRET || 'Zangena123$@2025');
     } catch (error) {
-      console.error('[USER] Delete Error:', error.message, error.stack);
-      res.status(500).json({ error: 'Server error deleting account' });
+      console.log('[USER] Invalid or expired refresh token');
+      return res.status(403).json({ error: 'Invalid or expired refresh token', code: 'INVALID_REFRESH_TOKEN' });
     }
-  });
-  
-  router.post('/refresh-token', async (req, res) => {
-    const { refreshToken } = req.body;
-    if (!refreshToken) {
-      return res.status(400).json({ error: 'Refresh token is required', code: 'MISSING_REFRESH_TOKEN' });
-    }
-    try {
-      const user = await User.findOne({ refreshToken });
-      if (!user) {
-        return res.status(403).json({ error: 'Invalid refresh token', code: 'INVALID_REFRESH_TOKEN' });
-      }
-      try {
-        jwt.verify(refreshToken, process.env.JWT_SECRET);
-      } catch (error) {
-        return res.status(403).json({ error: 'Invalid or expired refresh token', code: 'INVALID_REFRESH_TOKEN' });
-      }
-      const accessToken = jwt.sign({ username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
-      const newRefreshToken = jwt.sign({ username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
-      await User.updateOne({ _id: user._id }, { $set: { refreshToken: newRefreshToken } });
-      console.log('[USER] Refresh Token Success:', { username: user.username });
-      res.json({
-        accessToken,
-        refreshToken: newRefreshToken,
-      });
-    } catch (error) {
-      console.error('[USER] Refresh Token Error:', {
-        message: error.message,
-        stack: error.stack,
-        refreshToken: refreshToken ? 'provided' : 'missing',
-      });
-      res.status(500).json({ error: 'Server error refreshing token', code: 'SERVER_ERROR' });
-    }
-  });
+    const accessToken = jwt.sign(
+      { phoneNumber: user.phoneNumber, role: user.role || 'user' },
+      process.env.JWT_SECRET || 'Zangena123$@2025',
+      { expiresIn: '1h' }
+    );
+    const newRefreshToken = jwt.sign(
+      { phoneNumber: user.phoneNumber, role: user.role || 'user' },
+      process.env.JWT_SECRET || 'Zangena123$@2025',
+      { expiresIn: '7d' }
+    );
+    await User.updateOne({ _id: user._id }, { $set: { refreshToken: newRefreshToken } });
+    console.log('[USER] Refresh Token Success:', { phoneNumber: user.phoneNumber });
+    res.json({
+      accessToken,
+      refreshToken: newRefreshToken,
+    });
+  } catch (error) {
+    console.error('[USER] Refresh Token Error:', {
+      message: error.message,
+      stack: error.stack,
+      refreshToken: refreshToken ? 'provided' : 'missing',
+    });
+    res.status(500).json({ error: 'Server error refreshing token', code: 'SERVER_ERROR' });
+  }
+});
 
 module.exports = router;
