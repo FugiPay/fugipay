@@ -817,4 +817,43 @@ router.post('/refresh-token', async (req, res) => {
   }
 });
 
+router.patch('/update-timestamp', authenticateToken(['user']), async (req, res) => {
+  try {
+    const { phoneNumber, lastViewedTimestamp } = req.body;
+    if (!phoneNumber || !lastViewedTimestamp) {
+      console.log('[USER] Missing phoneNumber or lastViewedTimestamp');
+      return res.status(400).json({ error: 'phoneNumber and lastViewedTimestamp are required' });
+    }
+    if (phoneNumber !== req.user.phoneNumber) {
+      console.log('[USER] Unauthorized phoneNumber:', phoneNumber);
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    if (typeof lastViewedTimestamp !== 'number' || lastViewedTimestamp <= 0) {
+      console.log('[USER] Invalid lastViewedTimestamp:', lastViewedTimestamp);
+      return res.status(400).json({ error: 'Invalid lastViewedTimestamp' });
+    }
+
+    console.log('[USER] Updating timestamp:', { phoneNumber, lastViewedTimestamp });
+    const user = await User.findOneAndUpdate(
+      { phoneNumber },
+      { $set: { lastViewedTimestamp } },
+      { new: true, runValidators: true }
+    ).select('-password -pin');
+
+    if (!user) {
+      console.error('[USER] User not found:', phoneNumber);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    console.log('[USER] Timestamp updated:', { phoneNumber });
+    res.json({ message: 'Timestamp updated', user });
+  } catch (error) {
+    console.error('[USER] Timestamp Update Error:', {
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
