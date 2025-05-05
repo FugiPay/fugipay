@@ -672,7 +672,7 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
 });
 
 // New Routes for Profile Update and Account Deletion
-router.put('/user/update', authenticateToken(), async (req, res) => {
+router.put('/user/update', authenticateToken(['user']), async (req, res) => {
   try {
     const { email, password, pin } = req.body;
     const updates = {};
@@ -681,29 +681,46 @@ router.put('/user/update', authenticateToken(), async (req, res) => {
     if (pin) updates.pin = pin;
 
     if (!Object.keys(updates).length) {
+      console.log('[USER] No fields to update');
       return res.status(400).json({ error: 'No fields to update' });
     }
 
     // Validate email uniqueness
     if (email) {
       const existingUser = await User.findOne({ email });
-      if (existingUser && existingUser._id.toString() !== req.user._id) {
+      if (existingUser && existingUser.phoneNumber !== req.user.phoneNumber) {
+        console.log('[USER] Email already exists:', email);
         return res.status(409).json({ error: 'Email already exists' });
       }
     }
 
-    const user = await User.findByIdAndUpdate(req.user._id, updates, {
-      new: true,
-      runValidators: true,
-    }).select('-password -pin');
+    console.log('[USER] Updating user:', { phoneNumber: req.user.phoneNumber, updates });
+    const user = await User.findOneAndUpdate(
+      { phoneNumber: req.user.phoneNumber },
+      updates,
+      { new: true, runValidators: true }
+    ).select('-password -pin');
 
     if (!user) {
+      console.error('[USER] User not found:', req.user.phoneNumber);
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.json({ message: 'Profile updated', user });
+    // Generate new JWT
+    const token = jwt.sign(
+      { _id: user._id, phoneNumber: user.phoneNumber, role: user.role || 'user' },
+      process.env.JWT_SECRET || 'Zangena123$@2025',
+      { expiresIn: '1h' }
+    );
+
+    console.log('[USER] Profile updated:', { phoneNumber: user.phoneNumber });
+    res.json({ message: 'Profile updated', user, token });
   } catch (error) {
-    console.error('[USER] Update Error:', error.message);
+    console.error('[USER] Update Error:', {
+      message: error.message,
+      code: error.code,
+      name: error.name,
+    });
     if (error.code === 11000) {
       return res.status(409).json({ error: 'Email already exists' });
     }
