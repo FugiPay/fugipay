@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const Flutterwave = require('flutterwave-node-v3');
 const mongoose = require('mongoose');
-const { Queue } = require('bullmq');
+const { Queue, Worker } = require('bullmq');
 const { Expo } = require('expo-server-sdk');
 const Business = require('../models/Business');
 const BusinessTransaction = require('../models/BusinessTransaction');
@@ -22,6 +22,26 @@ const axios = require('axios');
 // Configure BullMQ queue for emails
 const emailQueue = new Queue('email-notifications', {
   connection: { host: process.env.REDIS_URL || 'localhost', port: 6379 },
+});
+
+// Configure BullMQ worker for email queue
+const emailWorker = new Worker('email-notifications', async (job) => {
+  const { mailOptions } = job.data;
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Sent email to ${mailOptions.to}: ${mailOptions.subject}`);
+  } catch (error) {
+    console.error('Error sending email from queue:', error.message);
+    throw error; // Retry on failure
+  }
+}, {
+  connection: { host: process.env.REDIS_URL || 'localhost', port: 6379 },
+  concurrency: 5, // Process up to 5 emails concurrently
+});
+
+// Handle worker errors
+emailWorker.on('failed', (job, error) => {
+  console.error(`Email job ${job.id} failed: ${error.message}`);
 });
 
 // Configure multer for temporary local storage
@@ -181,18 +201,6 @@ const emailTemplates = {
     <p>Best regards,<br>Zangena Team</p>
   `,
 };
-
-// BullMQ worker to process email queue
-emailQueue.process(async (job) => {
-  const { mailOptions } = job.data;
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Sent email to ${mailOptions.to}: ${mailOptions.subject}`);
-  } catch (error) {
-    console.error('Error sending email from queue:', error.message);
-    throw error; // Retry on failure
-  }
-});
 
 // Function to calculate sending fee
 function getSendingFee(amount) {
@@ -359,7 +367,7 @@ router.post('/signup', async (req, res) => {
       email,
       bankDetails: bankDetails && (bankDetails.bankName || bankDetails.accountNumber) ? {
         bankName: bankDetails.bankName?.trim(),
-        accountNumber: bankDetails.accountNumber,
+        accountNumber: business.bankDetails.accountNumber,
         accountType: bankDetails.accountType,
       } : undefined,
       balance: 0,
@@ -500,7 +508,7 @@ router.post('/reset-pin', async (req, res) => {
       $or: [
         phoneNumber ? { phoneNumber } : {},
         businessId ? { businessId } : {},
-      ].filter(Boolean),
+      ]. следовать(Boolean),
     });
     if (!business) {
       return res.status(404).json({ error: 'Business not found' });
