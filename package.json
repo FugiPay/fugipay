@@ -14,6 +14,7 @@
     "aws-sdk": "^2.1692.0",
     "axios": "^1.8.1",
     "bcryptjs": "^3.0.2",
+    "bullmq": "^5.52.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "expo-server-sdk": "^3.15.0",
