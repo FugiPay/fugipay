@@ -9,6 +9,8 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const Flutterwave = require('flutterwave-node-v3');
 const mongoose = require('mongoose');
+const { Queue } = require('bullmq');
+const { Expo } = require('expo-server-sdk');
 const Business = require('../models/Business');
 const BusinessTransaction = require('../models/BusinessTransaction');
 const BusinessAdminLedger = require('../models/BusinessAdminLedger');
@@ -16,6 +18,11 @@ const User = require('../models/User');
 const QRCode = require('qrcode');
 const authenticateToken = require('../middleware/authenticateToken');
 const axios = require('axios');
+
+// Configure BullMQ queue for emails
+const emailQueue = new Queue('email-notifications', {
+  connection: { host: process.env.REDIS_URL || 'localhost', port: 6379 },
+});
 
 // Configure multer for temporary local storage
 const upload = multer({ dest: 'uploads/' });
@@ -43,25 +50,149 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Function to send push notifications
+// Initialize Expo SDK
+const expo = new Expo();
+
+// Helper function to queue email notifications
+async function queueEmail(to, subject, html) {
+  if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    console.error('Invalid email address:', to);
+    return;
+  }
+  try {
+    await emailQueue.add('send-email', {
+      mailOptions: {
+        from: process.env.EMAIL_USER || 'no-reply@zangena.com',
+        to,
+        subject,
+        html,
+      },
+    }, {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 1000 },
+    });
+    console.log(`Queued email to ${to}: ${subject}`);
+  } catch (error) {
+    console.error('Error queuing email:', error.message);
+  }
+}
+
+// Helper function to send push notifications
 async function sendPushNotification(pushToken, title, body, data = {}) {
+  if (!pushToken || !Expo.isExpoPushToken(pushToken)) {
+    console.error('Invalid push token:', pushToken);
+    return;
+  }
   const message = {
     to: pushToken,
     sound: 'default',
     title,
     body,
-    data: { type: 'pendingApproval', ...data },
+    data: { type: 'businessActivity', ...data },
   };
   try {
-    await axios.post('https://exp.host/--/api/v2/push/send', message, {
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      timeout: 5000,
-    });
+    await expo.sendPushNotificationsAsync([message]);
     console.log(`Push notification sent to ${pushToken}: ${title} - ${body}`);
   } catch (error) {
     console.error('Error sending push notification:', error.message);
   }
 }
+
+// Email notification templates
+const emailTemplates = {
+  transaction: (business, transaction) => `
+    <h2>New Transaction Received</h2>
+    <p>Dear ${business.name},</p>
+    <p>A new transaction has been recorded on your Zangena account:</p>
+    <ul>
+      <li><strong>Amount:</strong> ZMW ${transaction.amount.toFixed(2)}</li>
+      <li><strong>From:</strong> ${transaction.fromUsername || 'Unknown'}</li>
+      <li><strong>Description:</strong> ${transaction.description || 'N/A'}</li>
+      <li><strong>Date:</strong> ${new Date(transaction.createdAt).toLocaleString()}</li>
+      <li><strong>Transaction ID:</strong> ${transaction.transactionId}</li>
+    </ul>
+    <p>View more details in your Zangena Business app.</p>
+    <p>Best regards,<br>Zangena Team</p>
+  `,
+  deposit: (business, deposit) => `
+    <h2>Manual Deposit Submitted</h2>
+    <p>Dear ${business.name},</p>
+    <p>Your manual deposit request has been submitted:</p>
+    <ul>
+      <li><strong>Amount:</strong> ZMW ${deposit.amount.toFixed(2)}</li>
+      <li><strong>Transaction ID:</strong> ${deposit.transactionId}</li>
+      <li><strong>Date:</strong> ${new Date(deposit.date).toLocaleString()}</li>
+      <li><strong>Status:</strong> ${deposit.status}</li>
+    </ul>
+    <p>Awaiting admin verification. You'll be notified once approved.</p>
+    <p>Best regards,<br>Zangena Team</p>
+  `,
+  withdrawal: (business, withdrawal) => `
+    <h2>Withdrawal Request Submitted</h2>
+    <p>Dear ${business.name},</p>
+    <p>Your withdrawal request has been submitted:</p>
+    <ul>
+      <li><strong>Amount:</strong> ZMW ${withdrawal.amount.toFixed(2)}</li>
+      <li><strong>Fee:</strong> ZMW ${withdrawal.fee.toFixed(2)}</li>
+      <li><strong>Date:</strong> ${new Date(withdrawal.date).toLocaleString()}</li>
+      <li><strong>Status:</strong> ${withdrawal.status}</li>
+    </ul>
+    <p>Awaiting admin approval. You'll be notified once processed.</p>
+    <p>Best regards,<br>Zangena Team</p>
+  `,
+  refund: (business, refund) => `
+    <h2>Refund Processed</h2>
+    <p>Dear ${business.name},</p>
+    <p>A refund has been processed from your account:</p>
+    <ul>
+      <li><strong>Amount:</strong> ZMW ${refund.amount.toFixed(2)}</li>
+      <li><strong>Fee:</strong> ZMW ${refund.fee.toFixed(2)}</li>
+      <li><strong>To:</strong> ${refund.toFrom}</li>
+      <li><strong>Reason:</strong> ${refund.reason}</li>
+      <li><strong>Date:</strong> ${new Date(refund.date).toLocaleString()}</li>
+      <li><strong>Refund ID:</strong> ${refund._id}</li>
+    </ul>
+    <p>View more details in your Zangena Business app.</p>
+    <p>Best regards,<br>Zangena Team</p>
+  `,
+  signup: (business) => `
+    <h2>Business Registration Submitted</h2>
+    <p>Dear ${business.name},</p>
+    <p>Your business registration has been submitted for approval:</p>
+    <ul>
+      <li><strong>Business ID:</strong> ${business.businessId}</li>
+      <li><strong>Name:</strong> ${business.name}</li>
+      <li><strong>Status:</strong> ${business.approvalStatus}</li>
+      <li><strong>Date:</strong> ${new Date().toLocaleString()}</li>
+    </ul>
+    <p>You'll be notified once your account is approved.</p>
+    <p>Best regards,<br>Zangena Team</p>
+  `,
+  forgotPin: (business, resetToken) => `
+    <h2>Zangena PIN Reset</h2>
+    <p>Dear ${business.name},</p>
+    <p>You requested a PIN reset for your Zangena account:</p>
+    <ul>
+      <li><strong>Reset Token:</strong> ${resetToken}</li>
+      <li><strong>Expires:</strong> ${new Date(Date.now() + 3600000).toLocaleString()}</li>
+    </ul>
+    <p>Enter this token in the Zangena Business app to reset your PIN.</p>
+    <p>If you didn't request this, please contact support.</p>
+    <p>Best regards,<br>Zangena Team</p>
+  `,
+};
+
+// BullMQ worker to process email queue
+emailQueue.process(async (job) => {
+  const { mailOptions } = job.data;
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Sent email to ${mailOptions.to}: ${mailOptions.subject}`);
+  } catch (error) {
+    console.error('Error sending email from queue:', error.message);
+    throw error; // Retry on failure
+  }
+});
 
 // Function to calculate sending fee
 function getSendingFee(amount) {
@@ -158,6 +289,9 @@ router.post('/register', authenticateToken(['user']), upload.single('qrCode'), a
       isActive: false,
     });
     await business.save();
+    if (business.email) {
+      await queueEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
+    }
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
       await sendPushNotification(admin.pushToken, 'New Business Registration', `Business ${name} (${businessId}) needs approval`, { businessId });
@@ -238,6 +372,9 @@ router.post('/signup', async (req, res) => {
       isActive: false,
     });
     await business.save();
+    if (business.email) {
+      await queueEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
+    }
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
       await sendPushNotification(
@@ -332,21 +469,17 @@ router.post('/forgot-pin', async (req, res) => {
       return res.status(404).json({ error: 'No account found with that identifier' });
     }
     if (!business.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(business.email)) {
-      return res.status(500).json({ error: 'Invalid email configuration' });
+      return res.status(400).json({ error: 'No valid email associated with this account' });
     }
     const resetToken = crypto.randomBytes(20).toString('hex');
     const resetTokenExpiry = Date.now() + 3600000;
     business.resetToken = resetToken;
     business.resetTokenExpiry = resetTokenExpiry;
     await business.save();
-    const mailOptions = {
-      from: process.env.EMAIL_USER || 'no-reply@zangena.com',
-      to: business.email,
-      subject: 'Zangena PIN Reset',
-      text: `Your PIN reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena Business app to reset your PIN.`,
-      html: `<h2>Zangena PIN Reset</h2><p>Your PIN reset token is: <strong>${resetToken}</strong></p><p>It expires in 1 hour. Enter it in the Zangena Business app to reset your PIN.</p>`,
-    };
-    await transporter.sendMail(mailOptions);
+    await queueEmail(business.email, 'Zangena PIN Reset', emailTemplates.forgotPin(business, resetToken));
+    if (business.pushToken) {
+      await sendPushNotification(business.pushToken, 'PIN Reset Requested', 'A PIN reset token has been sent to your email.');
+    }
     res.json({ message: 'Reset instructions have been sent to your email.' });
   } catch (error) {
     console.error('Forgot PIN Error:', error);
@@ -379,6 +512,18 @@ router.post('/reset-pin', async (req, res) => {
     business.resetToken = null;
     business.resetTokenExpiry = null;
     await business.save();
+    if (business.email) {
+      await queueEmail(business.email, 'PIN Reset Successful', `
+        <h2>PIN Reset Successful</h2>
+        <p>Dear ${business.name},</p>
+        <p>Your Zangena account PIN has been successfully reset.</p>
+        <p>If you didn't perform this action, please contact support immediately.</p>
+        <p>Best regards,<br>Zangena Team</p>
+      `);
+    }
+    if (business.pushToken) {
+      await sendPushNotification(business.pushToken, 'PIN Reset Successful', 'Your account PIN has been successfully reset.');
+    }
     res.json({ message: 'PIN reset successfully' });
   } catch (error) {
     console.error('Reset PIN Error:', error);
@@ -396,9 +541,17 @@ router.get('/:businessId', authenticateToken(['business', 'admin']), async (req,
       return res.status(403).json({ error: 'Unauthorized' });
     }
     const response = {
-      businessId: business.businessId, name: business.name, ownerUsername: business.ownerUsername,
-      balance: business.balance, qrCode: business.qrCode, approvalStatus: business.approvalStatus,
-      transactions: business.transactions.slice(-10), isActive: business.isActive,
+      businessId: business.businessId,
+      name: business.name,
+      ownerUsername: business.ownerUsername,
+      balance: business.balance,
+      qrCode: business.qrCode,
+      approvalStatus: business.approvalStatus,
+      transactions: business.transactions.slice(-10),
+      isActive: business.isActive,
+      email: business.email,
+      phoneNumber: business.phoneNumber,
+      bankDetails: business.bankDetails,
     };
     res.json(response);
   } catch (error) {
@@ -502,13 +655,14 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
       fee: sendingFee,
       date: new Date(),
     });
-    business.transactions.push({
+    const businessTransaction = {
       _id: crypto.randomBytes(16).toString('hex'),
       type: 'received',
       amount: paymentAmount,
       toFrom: user.username,
       date: new Date(),
-    });
+    };
+    business.transactions.push(businessTransaction);
     ledger.transactions.push({
       type: 'fee-collected',
       amount: sendingFee,
@@ -522,6 +676,16 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
     const { settlementId, netAmount, settlementFee } = await initiateSettlement(business, paymentAmount, txId);
     await Promise.all([user.save({ session }), business.save({ session }), ledger.save({ session }), transaction.save({ session })]);
     await session.commitTransaction();
+    if (business.email) {
+      await queueEmail(business.email, 'Payment Received', emailTemplates.transaction(business, {
+        ...businessTransaction,
+        transactionId: txId,
+        amount: paymentAmount,
+        fromUsername: user.username,
+        description: transaction.description,
+        createdAt: new Date(),
+      }));
+    }
     if (business.pushToken) {
       await sendPushNotification(business.pushToken, 'Payment Received', `Received ${paymentAmount.toFixed(2)} ZMW from ${user.username}`, { transactionId: txId });
     }
@@ -630,15 +794,16 @@ router.post('/refund', authenticateToken(['business']), async (req, res) => {
     ledger.totalBalance += refundFee;
     ledger.lastUpdated = new Date();
     const refundId = `rf_${crypto.randomBytes(8).toString('hex')}`;
-    business.transactions.push({
-      _id: crypto.randomBytes(16).toString('hex'),
+    const refundTransaction = {
+      _id: refundId,
       type: 'refunded',
       amount,
       toFrom: user.username,
       fee: refundFee,
       reason,
       date: new Date(),
-    });
+    };
+    business.transactions.push(refundTransaction);
     user.transactions.push({
       _id: crypto.randomBytes(16).toString('hex'),
       type: 'received',
@@ -659,8 +824,14 @@ router.post('/refund', authenticateToken(['business']), async (req, res) => {
     transaction.refundedAmount = (transaction.refundedAmount || 0) + amount;
     await Promise.all([business.save({ session }), user.save({ session }), ledger.save({ session }), transaction.save({ session })]);
     await session.commitTransaction();
+    if (business.email) {
+      await queueEmail(business.email, 'Refund Processed', emailTemplates.refund(business, refundTransaction));
+    }
     if (user.pushToken) {
       await sendPushNotification(user.pushToken, 'Refund Received', `Received ${netRefund.toFixed(2)} ZMW refund from ${business.name}`, { refundId });
+    }
+    if (business.pushToken) {
+      await sendPushNotification(business.pushToken, 'Refund Processed', `Refunded ${netRefund.toFixed(2)} ZMW to ${user.username}`, { refundId });
     }
     res.json({ refundId, message: 'Refund processed', refundAmount: netRefund, refundFee });
   } catch (error) {
@@ -686,11 +857,18 @@ router.post('/deposit/manual', authenticateToken(['business']), async (req, res)
       return res.status(400).json({ error: 'Transaction ID required or already used' });
     }
     business.pendingDeposits = business.pendingDeposits || [];
-    business.pendingDeposits.push({ amount, transactionId, date: new Date(), status: 'pending' });
+    const deposit = { amount, transactionId, date: new Date(), status: 'pending' };
+    business.pendingDeposits.push(deposit);
     await business.save();
+    if (business.email) {
+      await queueEmail(business.email, 'Manual Deposit Submitted', emailTemplates.deposit(business, deposit));
+    }
+    if (business.pushToken) {
+      await sendPushNotification(business.pushToken, 'Deposit Submitted', `Manual deposit of ${amount.toFixed(2)} ZMW submitted for verification`, { transactionId });
+    }
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
-      await sendPushNotification(admin.pushToken, 'New Business Deposit', `Deposit of ${amount} ZMW from ${business.name} (${business.businessId}) needs approval.`, { businessId: business.businessId, transactionId });
+      await sendPushNotification(admin.pushToken, 'New Business Deposit', `Deposit of ${amount} ZMW from ${business.name} (${business.businessId}) needs approval`, { businessId: business.businessId, transactionId });
     }
     res.json({ message: 'Business deposit submitted for verification' });
   } catch (error) {
@@ -710,14 +888,18 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     const totalDeduction = withdrawalAmount + withdrawalFee;
     if (business.balance < totalDeduction) return res.status(400).json({ error: 'Insufficient balance to cover amount and fee' });
     business.pendingWithdrawals = business.pendingWithdrawals || [];
-    business.pendingWithdrawals.push({ amount: withdrawalAmount, fee: withdrawalFee, date: new Date(), status: 'pending' });
+    const withdrawal = { amount: withdrawalAmount, fee: withdrawalFee, date: new Date(), status: 'pending' };
+    business.pendingWithdrawals.push(withdrawal);
     await business.save();
-    const admin = await User.findOne({ role: 'admin' });
-    if (admin && admin.pushToken) {
-      await sendPushNotification(admin.pushToken, 'New Business Withdrawal', `Withdrawal of ${withdrawalAmount} ZMW from ${business.name} (${business.businessId}) needs approval`, { businessId: business.businessId, withdrawalIndex: business.pendingWithdrawals.length - 1 });
+    if (business.email) {
+      await queueEmail(business.email, 'Withdrawal Request Submitted', emailTemplates.withdrawal(business, withdrawal));
     }
     if (business.pushToken) {
-      await sendPushNotification(business.pushToken, 'Withdrawal Requested', `Your request for ${withdrawalAmount.toFixed(2)} ZMW (Fee: ${withdrawalFee.toFixed(2)} ZMW) is pending approval`, { businessId: business.businessId, withdrawalIndex: business.pendingWithdrawals.length - 1 });
+      await sendPushNotification(business.pushToken, 'Withdrawal Requested', `Your request for ${withdrawalAmount.toFixed(2)} ZMW (Fee: ${withdrawalFee.toFixed(2)} ZMW) is pending approval`, { businessId: business.businessId });
+    }
+    const admin = await User.findOne({ role: 'admin' });
+    if (admin && admin.pushToken) {
+      await sendPushNotification(admin.pushToken, 'New Business Withdrawal', `Withdrawal of ${withdrawalAmount} ZMW from ${business.name} (${business.businessId}) needs approval`, { businessId: business.businessId });
     }
     res.json({ message: 'Business withdrawal requested. Awaiting approval', withdrawalFee });
   } catch (error) {
@@ -726,7 +908,7 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
   }
 });
 
-router.post('/save-push-token', authenticateToken(['business']), async (req, res) => {
+router.post('/register-push-token', authenticateToken(['business']), async (req, res) => {
   const { pushToken } = req.body;
   if (!pushToken) return res.status(400).json({ error: 'Push token is required' });
   try {
@@ -734,10 +916,10 @@ router.post('/save-push-token', authenticateToken(['business']), async (req, res
     if (!business) return res.status(404).json({ error: 'Business not found' });
     business.pushToken = pushToken;
     await business.save();
-    res.status(200).json({ message: 'Push token saved for business' });
+    res.status(200).json({ message: 'Push token registered for business' });
   } catch (error) {
-    console.error('Save Push Token Error:', error.message);
-    res.status(500).json({ error: 'Failed to save push token' });
+    console.error('Register Push Token Error:', error.message);
+    res.status(500).json({ error: 'Failed to register push token' });
   }
 });
 
