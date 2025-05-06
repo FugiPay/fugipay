@@ -44,9 +44,19 @@ const pendingWithdrawalSchema = new mongoose.Schema({
 });
 
 const businessSchema = new mongoose.Schema({
-  businessId: { type: String, required: true, unique: true },
-  businessName: { type: String, required: true },
-  ownerUsername: { type: String, required: true, unique: true },
+  businessId: {
+    type: String,
+    required: true,
+    unique: true,
+    match: [/^\d{10}$/, 'Business ID must be a 10-digit TPIN'],
+  },
+  name: { type: String, required: true },
+  ownerUsername: {
+    type: String,
+    required: true,
+    unique: true,
+    match: [/^[a-zA-Z0-9]{3,}$/, 'Username must be at least 3 alphanumeric characters'],
+  },
   phoneNumber: {
     type: String,
     required: true,
@@ -55,13 +65,17 @@ const businessSchema = new mongoose.Schema({
   },
   email: {
     type: String,
-    required: true,
     unique: true,
+    sparse: true,
     match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email address'],
   },
-  pin: { type: String, required: true, minlength: 4, maxlength: 4 },
-  resetToken: { type: String },
-  resetTokenExpiry: { type: Date },
+  pin: {
+    type: String,
+    required: true,
+    match: [/^\d{4}$/, 'PIN must be a 4-digit number'],
+  },
+  resetToken: { type: String }, // Re-added for /forgot-pin, /reset-pin
+  resetTokenExpiry: { type: Date }, // Re-added for /forgot-pin, /reset-pin
   balance: { type: mongoose.Schema.Types.Decimal128, default: 0 },
   zambiaCoinBalance: { type: mongoose.Schema.Types.Decimal128, default: 0 },
   qrCode: { type: String },
@@ -70,12 +84,10 @@ const businessSchema = new mongoose.Schema({
     accountNumber: String,
     accountType: { type: String, enum: ['bank', 'mobile_money', 'zambia_coin'] },
   },
-  role: { type: String, enum: ['business', 'admin'], default: 'business' },
+  tpinCertificate: { type: String, required: true }, // File path for ZRA TPIN Certificate
+  pacraCertificate: { type: String, required: true }, // File path for PACRA Certificate
   kycStatus: { type: String, enum: ['pending', 'verified', 'rejected'], default: 'pending' },
-  kycDocuments: [{
-    documentType: { type: String, enum: ['registration', 'license', 'tax_id', 'other'] },
-    documentUrl: { type: String },
-  }],
+  role: { type: String, enum: ['business', 'admin'], default: 'business' },
   trustScore: { type: Number, default: 0, min: 0, max: 100 },
   ratingCount: { type: Number, default: 0 },
   transactions: [transactionSchema],
@@ -83,8 +95,6 @@ const businessSchema = new mongoose.Schema({
   pendingWithdrawals: [pendingWithdrawalSchema],
   pushToken: { type: String, default: null },
   isActive: { type: Boolean, default: false },
-  lastLogin: { type: Date, default: null },
-  lastViewedTimestamp: { type: Number, default: 0 },
 }, { timestamps: true });
 
 // Hash PIN before saving
