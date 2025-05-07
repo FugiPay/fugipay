@@ -278,6 +278,63 @@ async function initiateSettlement(business, amount, transactionId) {
   return { settlementId, netAmount, settlementFee };
 }
 
+// Admin Stuff ........................................................
+
+// Middleware to check admin role
+const requireAdmin = async (req, res, next) => {
+  try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+  } catch (error) {
+    console.error('[ADMIN] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// Get all businesses (with optional kycStatus filter)
+router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  try {
+    const { kycStatus } = req.query;
+    const query = kycStatus ? { kycStatus } : {};
+    const businesses = await Business.find(query).select(
+      'businessId name ownerUsername email phoneNumber balance kycStatus tpinCertificate pacraCertificate pendingDeposits isActive'
+    );
+    res.json(businesses);
+  } catch (error) {
+    console.error('Fetch Businesses Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch businesses' });
+  }
+});
+
+// Verify KYC for a business
+router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { businessId, approved, rejectionReason } = req.body;
+  try {
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    if (business.kycStatus !== 'pending') {
+      return res.status(400).json({ error: 'KYC already processed' });
+    }
+    business.kycStatus = approved ? 'verified' : 'rejected';
+    business.isActive = approved;
+    if (!approved) {
+      business.rejectionReason = rejectionReason || 'KYC documents invalid';
+    }
+    await business.save();
+    res.json({ message: `KYC ${approved ? 'approved' : 'rejected'}` });
+  } catch (error) {
+    console.error('Verify KYC Error:', error.message);
+    res.status(500).json({ error: 'Failed to verify KYC' });
+  }
+});
+
+// End Admin ..........................................................
+
 router.post('/register', upload.fields([
   { name: 'tpinCertificate', maxCount: 1 },
   { name: 'pacraCertificate', maxCount: 1 },
