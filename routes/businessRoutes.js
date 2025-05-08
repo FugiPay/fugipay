@@ -325,17 +325,9 @@ router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (re
 
 // End Admin ..........................................................
 
-router.post('/signup', uploadMemory.fields([
-  { name: 'tpinCertificate', maxCount: 1 },
-  { name: 'pacraCertificate', maxCount: 1 }
-]), async (req, res) => {
+router.post('/signup', async (req, res) => {
   console.log('[SignUp] Received request:', {
-    body: { ...req.body, pin: '****' },
-    files: req.files ? Object.keys(req.files).map(key => ({
-      field: key,
-      name: req.files[key][0].originalname,
-      size: req.files[key][0].size
-    })) : null
+    body: { ...req.body, pin: '****' }
   });
 
   try {
@@ -343,10 +335,9 @@ router.post('/signup', uploadMemory.fields([
       businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails
     } = req.body;
 
-    if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !email ||
-        !req.files?.tpinCertificate || !req.files?.pacraCertificate) {
-      console.error('[SignUp] Missing fields or documents');
-      return res.status(400).json({ error: 'All fields and KYC documents are required' });
+    if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !email) {
+      console.error('[SignUp] Missing fields');
+      return res.status(400).json({ error: 'All fields are required' });
     }
 
     if (!/^\d{10}$/.test(businessId)) {
@@ -354,9 +345,9 @@ router.post('/signup', uploadMemory.fields([
       return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
     }
 
-    if (!/^[a-zA-Z0-9]{3,}$/.test(ownerUsername)) {
+    if (ownerUsername.length < 3) {
       console.error('[SignUp] Invalid ownerUsername:', ownerUsername);
-      return res.status(400).json({ error: 'Username must be at least 3 alphanumeric characters' });
+      return res.status(400).json({ error: 'Username must be at least 3 characters' });
     }
 
     if (!/^\d{4}$/.test(pin)) {
@@ -364,7 +355,7 @@ router.post('/signup', uploadMemory.fields([
       return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
 
-    if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(phoneNumber)) {
+    if (!/^\+260(9[5678]|7[346789])\d{7}$/.test(phoneNumber)) {
       console.error('[SignUp] Invalid phoneNumber:', phoneNumber);
       return res.status(400).json({ error: 'Invalid Zambian phone number' });
     }
@@ -374,12 +365,23 @@ router.post('/signup', uploadMemory.fields([
       return res.status(400).json({ error: 'Invalid email address' });
     }
 
-    const existingBusiness = await Business.findOne({
-      $or: [{ businessId }, { phoneNumber }, { email }]
-    });
-    if (existingBusiness) {
-      console.error('[SignUp] Duplicate entry:', { businessId, phoneNumber, email });
-      return res.status(400).json({ error: 'Business ID, phone number, or email already exists' });
+    // Check for duplicates individually
+    const existingByBusinessId = await Business.findOne({ businessId });
+    if (existingByBusinessId) {
+      console.error('[SignUp] Duplicate businessId:', businessId);
+      return res.status(409).json({ error: 'Business ID already taken' });
+    }
+
+    const existingByPhone = await Business.findOne({ phoneNumber });
+    if (existingByPhone) {
+      console.error('[SignUp] Duplicate phoneNumber:', phoneNumber);
+      return res.status(409).json({ error: 'Phone number already taken' });
+    }
+
+    const existingByEmail = await Business.findOne({ email });
+    if (existingByEmail) {
+      console.error('[SignUp] Duplicate email:', email);
+      return res.status(409).json({ error: 'Email already taken' });
     }
 
     let parsedBankDetails = null;
@@ -387,57 +389,33 @@ router.post('/signup', uploadMemory.fields([
       try {
         parsedBankDetails = JSON.parse(bankDetails);
         console.log('[SignUp] Parsed bankDetails:', parsedBankDetails);
+        // Validate bankDetails fields
+        if (!parsedBankDetails.bankName || typeof parsedBankDetails.bankName !== 'string') {
+          console.error('[SignUp] Invalid bankName:', parsedBankDetails.bankName);
+          return res.status(400).json({ error: 'Bank or mobile money provider name is required' });
+        }
+        if (!parsedBankDetails.accountNumber || typeof parsedBankDetails.accountNumber !== 'string') {
+          console.error('[SignUp] Invalid accountNumber:', parsedBankDetails.accountNumber);
+          return res.status(400).json({ error: 'Account number is required' });
+        }
+        if (!parsedBankDetails.accountType || !['bank', 'mobile_money'].includes(parsedBankDetails.accountType)) {
+          console.error('[SignUp] Invalid accountType:', parsedBankDetails.accountType);
+          return res.status(400).json({ error: 'Account type must be bank or mobile_money' });
+        }
+        // Validate accountNumber based on accountType
+        if (parsedBankDetails.accountType === 'bank' && !/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
+          console.error('[SignUp] Invalid bank accountNumber:', parsedBankDetails.accountNumber);
+          return res.status(400).json({ error: 'Bank account number must be 10-12 digits' });
+        }
+        if (parsedBankDetails.accountType === 'mobile_money' && !/^\+260(9[5678]|7[346789])\d{7}$/.test(parsedBankDetails.accountNumber)) {
+          console.error('[SignUp] Invalid mobile money accountNumber:', parsedBankDetails.accountNumber);
+          return res.status(400).json({ error: 'Mobile money number must be a valid Zambian number' });
+        }
       } catch (error) {
         console.error('[SignUp] Invalid bankDetails format:', bankDetails, error.message);
         return res.status(400).json({ error: 'Invalid bank details format' });
       }
     }
-
-    const tpinFile = req.files.tpinCertificate[0];
-    const pacraFile = req.files.pacraCertificate[0];
-    const uploadPromises = [];
-
-    const tpinParams = {
-      Bucket: process.env.S3_BUCKET,
-      Key: `kyc/${businessId}_tpin_${Date.now()}.${tpinFile.originalname.split('.').pop()}`,
-      Body: tpinFile.buffer,
-      ContentType: tpinFile.mimetype
-    };
-
-    const pacraParams = {
-      Bucket: process.env.S3_BUCKET,
-      Key: `kyc/${businessId}_pacra_${Date.now()}.${pacraFile.originalname.split('.').pop()}`,
-      Body: pacraFile.buffer,
-      ContentType: pacraFile.mimetype
-    };
-
-    console.log('[SignUp] Uploading to S3:', tpinParams.Key);
-    uploadPromises.push(
-      s3.upload(tpinParams).promise()
-        .then(data => {
-          console.log('[SignUp] Uploaded tpin:', data.Location);
-          return data.Location;
-        })
-        .catch(err => {
-          console.error('[SignUp] S3 tpin upload failed:', err.message, err.stack);
-          throw err;
-        })
-    );
-
-    console.log('[SignUp] Uploading to S3:', pacraParams.Key);
-    uploadPromises.push(
-      s3.upload(pacraParams).promise()
-        .then(data => {
-          console.log('[SignUp] Uploaded pacra:', data.Location);
-          return data.Location;
-        })
-        .catch(err => {
-          console.error('[SignUp] S3 pacra upload failed:', err.message, err.stack);
-          throw err;
-        })
-    );
-
-    const [tpinUrl, pacraUrl] = await Promise.all(uploadPromises);
 
     const business = new Business({
       businessId,
@@ -447,7 +425,7 @@ router.post('/signup', uploadMemory.fields([
       phoneNumber,
       email,
       bankDetails: parsedBankDetails,
-      kycDocuments: { tpinCertificate: tpinUrl, pacraCertificate: pacraUrl },
+      kycDocuments: { tpinCertificate: 'test', pacraCertificate: 'test' },
       kycStatus: 'pending',
       registrationDate: new Date()
     });
@@ -475,9 +453,6 @@ router.post('/signup', uploadMemory.fields([
       code: error.code,
       details: error.details
     });
-    if (error.message.includes('Invalid file type')) {
-      return res.status(400).json({ error: error.message });
-    }
     res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
