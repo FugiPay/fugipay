@@ -284,8 +284,28 @@ const requireAdmin = async (req, res, next) => {
   }
 };
 
+// Helper function to convert Decimal128 fields to numbers
+const convertDecimal128 = (obj) => {
+  if (obj === null || obj === undefined) return 0;
+  if (obj.constructor.name === 'Decimal128') {
+    const strValue = obj.toString();
+    return isNaN(strValue) ? 0 : parseFloat(strValue);
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => convertDecimal128(item));
+  }
+  if (typeof obj === 'object') {
+    const newObj = {};
+    for (const key in obj) {
+      newObj[key] = convertDecimal128(obj[key]);
+    }
+    return newObj;
+  }
+  return obj;
+};
+
 // Get all businesses (with optional kycStatus filter)
-router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+/* router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   try {
     const { kycStatus } = req.query;
     const query = kycStatus ? { kycStatus } : {};
@@ -297,7 +317,7 @@ router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => 
     console.error('[BusinessFetch] Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch businesses' });
   }
-});
+}); */
 
 // Verify KYC for a business
 router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
@@ -1115,20 +1135,22 @@ router.get('/:id', authenticateToken(['admin']), requireAdmin, async (req, res) 
 
 // Update KYC status
 router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
-  const { id, kycStatus } = req.body;
-  if (!id || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
+  const { businessId, kycStatus } = req.body;
+  if (!businessId || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
+    console.log('Invalid request:', { businessId, kycStatus });
     return res.status(400).json({ error: 'Invalid business ID or KYC status' });
   }
   try {
-    const business = await Business.findById(id);
+    const business = await Business.findOne({ businessId });
     if (!business) {
+      console.log('Business not found for businessId:', businessId);
       return res.status(404).json({ error: 'Business not found' });
     }
     business.kycStatus = kycStatus;
     await business.save();
-    res.json({ message: 'KYC status updated' });
+    res.json({ message: 'KYC status updated', businessId, kycStatus });
   } catch (error) {
-    console.error('Update KYC Error:', error.message);
+    console.error('Update KYC Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to update KYC status' });
   }
 });
