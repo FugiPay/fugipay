@@ -1085,10 +1085,12 @@ router.post('/register-push-token', authenticateToken(['business']), async (req,
 // Get all businesses
 router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   try {
-    const businesses = await Business.find().select(
-      'businessId name balance kycStatus pendingDeposits pendingWithdrawals transactions'
-    ).lean();
-    res.json(businesses);
+    const businesses = await Business.find()
+      .select('businessId name balance kycStatus pendingDeposits pendingWithdrawals transactions zambiaCoinBalance')
+      .lean();
+    // Convert all Decimal128 fields to numbers
+    const formattedBusinesses = businesses.map(business => convertDecimal128(business));
+    res.json(formattedBusinesses);
   } catch (error) {
     console.error('Fetch Businesses Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch businesses' });
@@ -1098,11 +1100,13 @@ router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => 
 // Get business by ID
 router.get('/:id', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   try {
-    const business = await Business.findById(req.params.id);
+    const business = await Business.findById(req.params.id).lean();
     if (!business) {
       return res.status(404).json({ error: 'Business not found' });
     }
-    res.json(business);
+    // Convert all Decimal128 fields to numbers
+    const formattedBusiness = convertDecimal128(business);
+    res.json(formattedBusiness);
   } catch (error) {
     console.error('Fetch Business Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch business' });
