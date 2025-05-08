@@ -19,7 +19,6 @@ const authenticateToken = require('../middleware/authenticateToken');
 const axios = require('axios');
 const path = require('path');
 
-
 // Configure AWS S3
 const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -27,21 +26,6 @@ const s3 = new AWS.S3({
   region: process.env.AWS_REGION || 'us-east-1',
 });
 const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
-
-
-// Configure multer for temporary local storage (for /signup)
-const upload = multer({
-  dest: 'uploads/',
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
-  fileFilter: (req, file, cb) => {
-    if (['application/pdf', 'image/png', 'image/jpeg'].includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only PDF, PNG, or JPEG allowed'), false);
-    }
-  },
-});
-
 
 // Configure multer for in-memory storage (for /signup)
 const memoryStorage = multer.memoryStorage();
@@ -335,117 +319,7 @@ router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (re
 
 // End Admin ..........................................................
 
-router.post('/register', uploadS3.fields([
-  { name: 'tpinCertificate', maxCount: 1 },
-  { name: 'pacraCertificate', maxCount: 1 },
-]), async (req, res) => {
-  const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
-  const tpinCertificate = req.files?.tpinCertificate?.[0];
-  const pacraCertificate = req.files?.pacraCertificate?.[0];
-
-  if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !tpinCertificate || !pacraCertificate) {
-    return res.status(400).json({ error: 'Business ID, name, username, PIN, phone number, TPIN certificate, and PACRA certificate required' });
-  }
-  if (!/^\d{10}$/.test(businessId)) {
-    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
-  }
-  if (!/^[a-zA-Z0-9]{3,}$/.test(ownerUsername)) {
-    return res.status(400).json({ error: 'Username must be at least 3 alphanumeric characters' });
-  }
-  if (!/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-  }
-  if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(phoneNumber)) {
-    return res.status(400).json({ error: 'Invalid Zambian phone number' });
-  }
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Invalid email address' });
-  }
-  if (bankDetails) {
-    try {
-      const parsedBankDetails = typeof bankDetails === 'string' ? JSON.parse(bankDetails) : bankDetails;
-      if (!['bank', 'mobile_money', 'zambia_coin'].includes(parsedBankDetails.accountType)) {
-        return res.status(400).json({ error: 'Account type must be bank, mobile_money, or zambia_coin' });
-      }
-      if (parsedBankDetails.accountNumber) {
-        if (parsedBankDetails.accountType === 'bank') {
-          if (!/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
-            return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
-          }
-        } else if (parsedBankDetails.accountType === 'mobile_money') {
-          if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(parsedBankDetails.accountNumber)) {
-            return res.status(400).json({ error: 'Invalid mobile money number' });
-          }
-        }
-        if (!parsedBankDetails.bankName?.trim()) {
-          return res.status(400).json({ error: 'Bank or mobile name required' });
-        }
-      }
-    } catch (error) {
-      return res.status(400).json({ error: 'Invalid bankDetails format' });
-    }
-  }
-
-  try {
-    const existingBusiness = await Business.findOne({
-      $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}].filter(Boolean),
-    });
-    if (existingBusiness) {
-      return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
-    }
-
-    const hashedPin = await bcrypt.hash(pin, 10);
-    const qrCodeData = JSON.stringify({ type: 'business_payment', businessId, businessName: name });
-    const business = new Business({
-      businessId,
-      name,
-      ownerUsername,
-      pin: hashedPin,
-      phoneNumber,
-      email,
-      bankDetails: bankDetails && (bankDetails.bankName || bankDetails.accountNumber) ? {
-        bankName: bankDetails.bankName?.trim(),
-        accountNumber: bankDetails.accountNumber,
-        accountType: bankDetails.accountType,
-      } : undefined,
-      tpinCertificate: tpinCertificate.location,
-      pacraCertificate: pacraCertificate.location,
-      qrCode: qrCodeData,
-      balance: 0,
-      transactions: [],
-      pendingDeposits: [],
-      pendingWithdrawals: [],
-      kycStatus: 'pending',
-      role: 'business',
-      isActive: false,
-    });
-
-    await business.save();
-
-    if (business.email) {
-      await sendEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
-    }
-    const admin = await User.findOne({ role: 'admin' });
-    if (admin && admin.pushToken) {
-      await sendPushNotification(
-        admin.pushToken,
-        'New Business Registration',
-        `Business ${name} (${businessId}) needs approval`,
-        { businessId }
-      );
-    }
-
-    res.status(201).json({
-      message: 'Business registered, awaiting approval',
-      business: { businessId, name, kycStatus: 'pending' },
-    });
-  } catch (error) {
-    console.error('[BusinessRegister] Error:', error.message);
-    res.status(500).json({ error: 'Server error during business registration' });
-  }
-});
-
-router.post('/signup', upload.fields([
+router.post('/signup', uploadMemory.fields([
   { name: 'tpinCertificate', maxCount: 1 },
   { name: 'pacraCertificate', maxCount: 1 },
 ]), async (req, res) => {
@@ -545,22 +419,22 @@ router.post('/signup', upload.fields([
     const uploadFile = async (file, key) => {
       try {
         console.log('[SignUp] Uploading:', key);
-        const fileStream = fs.createReadStream(file.path);
         const params = {
           Bucket: S3_BUCKET,
           Key: `kyc/${key}`,
-          Body: fileStream,
+          Body: file.buffer,
           ContentType: file.mimetype,
           ACL: 'private',
         };
         const result = await s3.upload(params).promise();
         console.log('[SignUp] Uploaded:', key, result.Location);
-        fs.unlinkSync(file.path); // Clean up temporary file
         return result;
       } catch (error) {
-        console.error('[SignUp] S3 upload failed:', key, error.message);
-        if (fs.existsSync(file.path)) {
-          fs.unlinkSync(file.path); // Clean up on error
+        console.error('[SignUp] S3 upload failed:', key, error.message, error.stack);
+        if (error.code === 'AccessDenied') {
+          throw new Error('S3 Access Denied: Check AWS credentials and bucket permissions');
+        } else if (error.code === 'NoSuchBucket') {
+          throw new Error(`S3 Bucket ${S3_BUCKET} does not exist`);
         }
         throw new Error(`Failed to upload ${key}: ${error.message}`);
       }
@@ -616,19 +490,10 @@ router.post('/signup', upload.fields([
     res.json({ message: 'Business registered successfully' });
   } catch (error) {
     console.error('[SignUp] Error:', error.message, error.stack);
-    // Clean up any remaining temporary files
-    if (req.files) {
-      ['tpinCertificate', 'pacraCertificate'].forEach(field => {
-        if (req.files[field]?.[0]?.path && fs.existsSync(req.files[field][0].path)) {
-          fs.unlinkSync(req.files[field][0].path);
-        }
-      });
-    }
     res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
 
-// The rest of the routes remain unchanged from the previous artifact
 router.post('/register', uploadS3.fields([
   { name: 'tpinCertificate', maxCount: 1 },
   { name: 'pacraCertificate', maxCount: 1 },
@@ -1190,7 +1055,7 @@ router.post('/refund', authenticateToken(['business']), async (req, res) => {
 router.post('/deposit/manual', authenticateToken(['business']), async (req, res) => {
   const { amount, transactionId } = req.body;
   try {
-    const business = await Business.model.findOne({ businessId: req.user.businessId });
+    const business = await Business.findOne({ businessId: req.user.businessId });
     if (!business || !business.isActive) {
       return res.status(403).json({ error: 'Business not found or inactive' });
     }
