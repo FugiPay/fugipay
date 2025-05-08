@@ -345,9 +345,9 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
     }
 
-    if (!/^[a-zA-Z0-9]{3,}$/.test(ownerUsername)) {
+    if (ownerUsername.length < 3) {
       console.error('[SignUp] Invalid ownerUsername:', ownerUsername);
-      return res.status(400).json({ error: 'Username must be at least 3 alphanumeric characters' });
+      return res.status(400).json({ error: 'Username must be at least 3 characters' });
     }
 
     if (!/^\d{4}$/.test(pin)) {
@@ -355,7 +355,7 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
 
-    if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(phoneNumber)) {
+    if (!/^\+260(9[5678]|7[346789])\d{7}$/.test(phoneNumber)) {
       console.error('[SignUp] Invalid phoneNumber:', phoneNumber);
       return res.status(400).json({ error: 'Invalid Zambian phone number' });
     }
@@ -365,12 +365,23 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ error: 'Invalid email address' });
     }
 
-    const existingBusiness = await Business.findOne({
-      $or: [{ businessId }, { phoneNumber }, { email }]
-    });
-    if (existingBusiness) {
-      console.error('[SignUp] Duplicate entry:', { businessId, phoneNumber, email });
-      return res.status(400).json({ error: 'Business ID, phone number, or email already exists' });
+    // Check for duplicates individually
+    const existingByBusinessId = await Business.findOne({ businessId });
+    if (existingByBusinessId) {
+      console.error('[SignUp] Duplicate businessId:', businessId);
+      return res.status(409).json({ error: 'Business ID already taken' });
+    }
+
+    const existingByPhone = await Business.findOne({ phoneNumber });
+    if (existingByPhone) {
+      console.error('[SignUp] Duplicate phoneNumber:', phoneNumber);
+      return res.status(409).json({ error: 'Phone number already taken' });
+    }
+
+    const existingByEmail = await Business.findOne({ email });
+    if (existingByEmail) {
+      console.error('[SignUp] Duplicate email:', email);
+      return res.status(409).json({ error: 'Email already taken' });
     }
 
     let parsedBankDetails = null;
@@ -396,7 +407,7 @@ router.post('/signup', async (req, res) => {
           console.error('[SignUp] Invalid bank accountNumber:', parsedBankDetails.accountNumber);
           return res.status(400).json({ error: 'Bank account number must be 10-12 digits' });
         }
-        if (parsedBankDetails.accountType === 'mobile_money' && !/^\+260(9[5678]|7[34679])\d{7}$/.test(parsedBankDetails.accountNumber)) {
+        if (parsedBankDetails.accountType === 'mobile_money' && !/^\+260(9[5678]|7[346789])\d{7}$/.test(parsedBankDetails.accountNumber)) {
           console.error('[SignUp] Invalid mobile money accountNumber:', parsedBankDetails.accountNumber);
           return res.status(400).json({ error: 'Mobile money number must be a valid Zambian number' });
         }
