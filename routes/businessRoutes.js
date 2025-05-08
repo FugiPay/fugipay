@@ -345,9 +345,9 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
     }
 
-    if (ownerUsername.length < 3) {
+    if (!/^[a-zA-Z0-9]{3,}$/.test(ownerUsername)) {
       console.error('[SignUp] Invalid ownerUsername:', ownerUsername);
-      return res.status(400).json({ error: 'Username must be at least 3 characters' });
+      return res.status(400).json({ error: 'Username must be at least 3 alphanumeric characters' });
     }
 
     if (!/^\d{4}$/.test(pin)) {
@@ -355,7 +355,7 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
 
-    if (!/^\+260(9[5678]|7[346789])\d{7}$/.test(phoneNumber)) {
+    if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(phoneNumber)) {
       console.error('[SignUp] Invalid phoneNumber:', phoneNumber);
       return res.status(400).json({ error: 'Invalid Zambian phone number' });
     }
@@ -370,6 +370,12 @@ router.post('/signup', async (req, res) => {
     if (existingByBusinessId) {
       console.error('[SignUp] Duplicate businessId:', businessId);
       return res.status(409).json({ error: 'Business ID already taken' });
+    }
+
+    const existingByUsername = await Business.findOne({ ownerUsername });
+    if (existingByUsername) {
+      console.error('[SignUp] Duplicate ownerUsername:', ownerUsername);
+      return res.status(409).json({ error: 'Username already taken' });
     }
 
     const existingByPhone = await Business.findOne({ phoneNumber });
@@ -398,18 +404,19 @@ router.post('/signup', async (req, res) => {
           console.error('[SignUp] Invalid accountNumber:', parsedBankDetails.accountNumber);
           return res.status(400).json({ error: 'Account number is required' });
         }
-        if (!parsedBankDetails.accountType || !['bank', 'mobile_money'].includes(parsedBankDetails.accountType)) {
+        if (!parsedBankDetails.accountType || !['bank', 'mobile_money', 'zambia_coin'].includes(parsedBankDetails.accountType)) {
           console.error('[SignUp] Invalid accountType:', parsedBankDetails.accountType);
-          return res.status(400).json({ error: 'Account type must be bank or mobile_money' });
+          return res.status(400).json({ error: 'Account type must be bank, mobile_money, or zambia_coin' });
         }
         // Validate accountNumber based on accountType
         if (parsedBankDetails.accountType === 'bank' && !/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
           console.error('[SignUp] Invalid bank accountNumber:', parsedBankDetails.accountNumber);
           return res.status(400).json({ error: 'Bank account number must be 10-12 digits' });
         }
-        if (parsedBankDetails.accountType === 'mobile_money' && !/^\+260(9[5678]|7[346789])\d{7}$/.test(parsedBankDetails.accountNumber)) {
-          console.error('[SignUp] Invalid mobile money accountNumber:', parsedBankDetails.accountNumber);
-          return res.status(400).json({ error: 'Mobile money number must be a valid Zambian number' });
+        if ((parsedBankDetails.accountType === 'mobile_money' || parsedBankDetails.accountType === 'zambia_coin') && 
+            !/^\+260(9[5678]|7[34679])\d{7}$/.test(parsedBankDetails.accountNumber)) {
+          console.error('[SignUp] Invalid mobile money/zambia_coin accountNumber:', parsedBankDetails.accountNumber);
+          return res.status(400).json({ error: 'Mobile money or Zambia Coin number must be a valid Zambian number' });
         }
       } catch (error) {
         console.error('[SignUp] Invalid bankDetails format:', bankDetails, error.message);
@@ -425,12 +432,26 @@ router.post('/signup', async (req, res) => {
       phoneNumber,
       email,
       bankDetails: parsedBankDetails,
-      kycDocuments: { tpinCertificate: 'test', pacraCertificate: 'test' },
+      tpinCertificate: null,
+      pacraCertificate: null,
       kycStatus: 'pending',
       registrationDate: new Date()
     });
 
-    console.log('[SignUp] Saving business to MongoDB:', businessId);
+    console.log('[SignUp] Prepared business document:', {
+      businessId,
+      name,
+      ownerUsername,
+      pin: '****',
+      phoneNumber,
+      email,
+      bankDetails: parsedBankDetails,
+      tpinCertificate: business.tpinCertificate,
+      pacraCertificate: business.pacraCertificate,
+      kycStatus: business.kycStatus,
+      registrationDate: business.registrationDate
+    });
+
     await business.save();
     console.log('[SignUp] Business saved:', businessId);
 

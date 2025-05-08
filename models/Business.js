@@ -74,8 +74,8 @@ const businessSchema = new mongoose.Schema({
     required: true,
     match: [/^\d{4}$/, 'PIN must be a 4-digit number'],
   },
-  resetToken: { type: String }, // Re-added for /forgot-pin, /reset-pin
-  resetTokenExpiry: { type: Date }, // Re-added for /forgot-pin, /reset-pin
+  resetToken: { type: String },
+  resetTokenExpiry: { type: Date },
   balance: { type: mongoose.Schema.Types.Decimal128, default: 0 },
   zambiaCoinBalance: { type: mongoose.Schema.Types.Decimal128, default: 0 },
   qrCode: { type: String },
@@ -84,8 +84,8 @@ const businessSchema = new mongoose.Schema({
     accountNumber: String,
     accountType: { type: String, enum: ['bank', 'mobile_money', 'zambia_coin'] },
   },
-  tpinCertificate: { type: String, required: true }, // File path for ZRA TPIN Certificate
-  pacraCertificate: { type: String, required: true }, // File path for PACRA Certificate
+  tpinCertificate: { type: String, default: null }, // Made optional
+  pacraCertificate: { type: String, default: null }, // Made optional
   kycStatus: { type: String, enum: ['pending', 'verified', 'rejected'], default: 'pending' },
   role: { type: String, enum: ['business', 'admin'], default: 'business' },
   trustScore: { type: Number, default: 0, min: 0, max: 100 },
