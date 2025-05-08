@@ -325,17 +325,9 @@ router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (re
 
 // End Admin ..........................................................
 
-router.post('/signup', uploadMemory.fields([
-  { name: 'tpinCertificate', maxCount: 1 },
-  { name: 'pacraCertificate', maxCount: 1 }
-]), async (req, res) => {
+router.post('/signup', async (req, res) => {
   console.log('[SignUp] Received request:', {
-    body: { ...req.body, pin: '****' },
-    files: req.files ? Object.keys(req.files).map(key => ({
-      field: key,
-      name: req.files[key][0].originalname,
-      size: req.files[key][0].size
-    })) : null
+    body: { ...req.body, pin: '****' }
   });
 
   try {
@@ -343,10 +335,9 @@ router.post('/signup', uploadMemory.fields([
       businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails
     } = req.body;
 
-    if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !email ||
-        !req.files?.tpinCertificate || !req.files?.pacraCertificate) {
-      console.error('[SignUp] Missing fields or documents');
-      return res.status(400).json({ error: 'All fields and KYC documents are required' });
+    if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !email) {
+      console.error('[SignUp] Missing fields');
+      return res.status(400).json({ error: 'All fields are required' });
     }
 
     if (!/^\d{10}$/.test(businessId)) {
@@ -393,52 +384,6 @@ router.post('/signup', uploadMemory.fields([
       }
     }
 
-    const tpinFile = req.files.tpinCertificate[0];
-    const pacraFile = req.files.pacraCertificate[0];
-    const uploadPromises = [];
-
-    const tpinParams = {
-      Bucket: process.env.S3_BUCKET,
-      Key: `kyc/${businessId}_tpin_${Date.now()}.${tpinFile.originalname.split('.').pop()}`,
-      Body: tpinFile.buffer,
-      ContentType: tpinFile.mimetype
-    };
-
-    const pacraParams = {
-      Bucket: process.env.S3_BUCKET,
-      Key: `kyc/${businessId}_pacra_${Date.now()}.${pacraFile.originalname.split('.').pop()}`,
-      Body: pacraFile.buffer,
-      ContentType: pacraFile.mimetype
-    };
-
-    console.log('[SignUp] Uploading to S3:', tpinParams.Key);
-    uploadPromises.push(
-      s3.upload(tpinParams).promise()
-        .then(data => {
-          console.log('[SignUp] Uploaded tpin:', data.Location);
-          return data.Location;
-        })
-        .catch(err => {
-          console.error('[SignUp] S3 tpin upload failed:', err.message, err.stack);
-          throw err;
-        })
-    );
-
-    console.log('[SignUp] Uploading to S3:', pacraParams.Key);
-    uploadPromises.push(
-      s3.upload(pacraParams).promise()
-        .then(data => {
-          console.log('[SignUp] Uploaded pacra:', data.Location);
-          return data.Location;
-        })
-        .catch(err => {
-          console.error('[SignUp] S3 pacra upload failed:', err.message, err.stack);
-          throw err;
-        })
-    );
-
-    const [tpinUrl, pacraUrl] = await Promise.all(uploadPromises);
-
     const business = new Business({
       businessId,
       name,
@@ -447,7 +392,7 @@ router.post('/signup', uploadMemory.fields([
       phoneNumber,
       email,
       bankDetails: parsedBankDetails,
-      kycDocuments: { tpinCertificate: tpinUrl, pacraCertificate: pacraUrl },
+      kycDocuments: { tpinCertificate: 'test', pacraCertificate: 'test' },
       kycStatus: 'pending',
       registrationDate: new Date()
     });
@@ -475,9 +420,6 @@ router.post('/signup', uploadMemory.fields([
       code: error.code,
       details: error.details
     });
-    if (error.message.includes('Invalid file type')) {
-      return res.status(400).json({ error: error.message });
-    }
     res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
