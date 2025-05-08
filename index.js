@@ -51,7 +51,7 @@ app.get('/wake', (req, res) => {
 });
 
 // Routes
- app.use('/api', require('./routes/api'));
+// app.use('/api', require('./routes/api'));
 
 // Routes
 app.use('/api/users', userRoutes); // User-related endpoints
