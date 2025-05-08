@@ -1,260 +1,181 @@
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
-import { useNavigate } from 'react-router-dom';
-import './AdminPanels.css';
+const express = require('express');
+const router = express.Router();
+const mongoose = require('mongoose');
+const crypto = require('crypto');
+const User = require('../models/User');
+const Business = require('../models/Business');
+const AdminLedger = require('../models/AdminLedger');
+const authenticateToken = require('../middleware/authenticateToken');
 
-const AdminPanels = () => {
-  const [activeTab, setActiveTab] = useState('users');
-  const [users, setUsers] = useState([]);
-  const [businesses, setBusinesses] = useState([]);
-  const [ledger, setLedger] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const navigate = useNavigate();
-
-  // Check admin access and fetch initial data
-  useEffect(() => {
-    const userData = JSON.parse(localStorage.getItem('user'));
-    if (!userData || userData.role !== 'admin') {
-      navigate('/login');
-      return;
+// Middleware to check admin role
+const requireAdmin = async (req, res, next) => {
+  try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
     }
-
-    fetchUsers();
-    fetchBusinesses();
-    fetchLedger();
-  }, [navigate]);
-
-  // Fetch all users
-  const fetchUsers = async () => {
-    setLoading(true);
-    try {
-      const token = localStorage.getItem('token');
-      const response = await axios.get('https://zangena-e33a7e55637a.herokuapp.com/api/users', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setUsers(response.data);
-    } catch (err) {
-      setError('Failed to fetch users');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Fetch all businesses
-  const fetchBusinesses = async () => {
-    setLoading(true);
-    try {
-      const token = localStorage.getItem('token');
-      const response = await axios.get('https://zangena-e33a7e55637a.herokuapp.com/api/business', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setBusinesses(response.data);
-    } catch (err) {
-      setError('Failed to fetch businesses');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Fetch admin ledger
-  const fetchLedger = async () => {
-    try {
-      const token = localStorage.getItem('token');
-      const response = await axios.get('https://zangena-e33a7e55637a.herokuapp.com/api/admin/ledger', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setLedger(response.data);
-    } catch (err) {
-      setError('Failed to fetch ledger');
-      console.error(err);
-    }
-  };
-
-  // Handle KYC status update
-  const updateKYCStatus = async (id, type, status) => {
-    try {
-      const token = localStorage.getItem('token');
-      const endpoint = type === 'users' ? '/api/users/update-kyc' : '/api/business/update-kyc';
-      await axios.post(
-        `https://zangena-e33a7e55637a.herokuapp.com${endpoint}`,
-        { id, kycStatus: status },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (type === 'users') {
-        setUsers(users.map(u => (u._id === id ? { ...u, kycStatus: status } : u)));
-      } else {
-        setBusinesses(businesses.map(b => (b._id === id ? { ...b, kycStatus: status } : b)));
-      }
-    } catch (err) {
-      setError(`Failed to update KYC status for ${type}`);
-      console.error(err);
-    }
-  };
-
-  // Render user panel
-  const renderUserPanel = () => (
-    <div className="panel">
-      <h2 className="text-2xl font-bold mb-4">User Management</h2>
-      {loading && <p>Loading...</p>}
-      {error && <p className="text-red-500">{error}</p>}
-      <table className="w-full border-collapse">
-        <thead>
-          <tr className="bg-gray-200">
-            <th className="p-2">Username</th>
-            <th className="p-2">Phone</th>
-            <th className="p-2">Balance</th>
-            <th className="p-2">KYC Status</th>
-            <th className="p-2">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {users.map(user => (
-            <tr key={user._id} className="border-b">
-              <td className="p-2">{user.username}</td>
-              <td className="p-2">{user.phoneNumber}</td>
-              <td className="p-2">{user.balance} ZMW</td>
-              <td className="p-2">{user.kycStatus}</td>
-              <td className="p-2">
-                <select
-                  onChange={e => updateKYCStatus(user._id, 'users', e.target.value)}
-                  value={user.kycStatus}
-                  className="border p-1 mr-2"
-                >
-                  <option value="pending">Pending</option>
-                  <option value="verified">Verified</option>
-                  <option value="rejected">Rejected</option>
-                </select>
-                <button
-                  onClick={() => navigate(`/admin/user/${user._id}`)}
-                  className="bg-blue-500 text-white px-2 py-1 rounded"
-                >
-                  Details
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-
-  // Render business panel
-  const renderBusinessPanel = () => (
-    <div className="panel">
-      <h2 className="text-2xl font-bold mb-4">Business Management</h2>
-      {loading && <p>Loading...</p>}
-      {error && <p className="text-red-500">{error}</p>}
-      <table className="w-full border-collapse">
-        <thead>
-          <tr className="bg-gray-200">
-            <th className="p-2">Business ID</th>
-            <th className="p-2">Name</th>
-            <th className="p-2">Balance</th>
-            <th className="p-2">KYC Status</th>
-            <th className="p-2">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {businesses.map(business => (
-            <tr key={business._id} className="border-b">
-              <td className="p-2">{business.businessId}</td>
-              <td className="p-2">{business.name}</td>
-              <td className="p-2">{business.balance} ZMW</td>
-              <td className="p-2">{business.kycStatus}</td>
-              <td className="p-2">
-                <select
-                  onChange={e => updateKYCStatus(business._id, 'businesses', e.target.value)}
-                  value={business.kycStatus}
-                  className="border p-1 mr-2"
-                >
-                  <option value="pending">Pending</option>
-                  <option value="verified">Verified</option>
-                  <option value="rejected">Rejected</option>
-                </select>
-                <button
-                  onClick={() => navigate(`/admin/business/${business._id}`)}
-                  className="bg-blue-500 text-white px-2 py-1 rounded"
-                >
-                  Details
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-
-  // Render ledger panel
-  const renderLedgerPanel = () => (
-    <div className="panel">
-      <h2 className="text-2xl font-bold mb-4">Admin Ledger</h2>
-      {ledger ? (
-        <div>
-          <p>Total Balance: {ledger.totalBalance} ZMW</p>
-          <p>Last Updated: {new Date(ledger.lastUpdated).toLocaleString()}</p>
-          <h3 className="text-xl font-semibold mt-4">Transactions</h3>
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="bg-gray-200">
-                <th className="p-2">Type</th>
-                <th className="p-2">Amount</th>
-                <th className="p-2">Sender</th>
-                <th className="p-2">Receiver</th>
-                <th className="p-2">Date</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ledger.transactions.map(tx => (
-                <tr key={tx._id || tx.date} className="border-b">
-                  <td className="p-2">{tx.type}</td>
-                  <td className="p-2">{tx.amount} ZMW</td>
-                  <td className="p-2">{tx.sender}</td>
-                  <td className="p-2">{tx.receiver}</td>
-                  <td className="p-2">{new Date(tx.date).toLocaleString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p>Loading ledger...</p>
-      )}
-    </div>
-  );
-
-  return (
-    <div className="admin-container p-4">
-      <script src="https://cdn.tailwindcss.com"></script>
-      <h1 className="text-3xl font-bold mb-6">Zangena Admin Dashboard</h1>
-      <div className="tabs flex mb-4">
-        <button
-          className={`px-4 py-2 mr-2 ${activeTab === 'users' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
-          onClick={() => setActiveTab('users')}
-        >
-          Users
-        </button>
-        <button
-          className={`px-4 py-2 mr-2 ${activeTab === 'businesses' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
-          onClick={() => setActiveTab('businesses')}
-        >
-          Businesses
-        </button>
-        <button
-          className={`px-4 py-2 ${activeTab === 'ledger' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
-          onClick={() => setActiveTab('ledger')}
-        >
-          Ledger
-        </button>
-      </div>
-      {activeTab === 'users' && renderUserPanel()}
-      {activeTab === 'businesses' && renderBusinessPanel()}
-      {activeTab === 'ledger' && renderLedgerPanel()}
-    </div>
-  );
+    next();
+  } catch (error) {
+    console.error('[ADMIN] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
 };
 
-export default AdminPanels;
+router.post('/verify-withdrawal', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { userId, withdrawalIndex, approved } = req.body;
+  console.log('Verify Withdrawal Request:', { userId, withdrawalIndex, approved });
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const withdrawal = user.pendingWithdrawals[withdrawalIndex];
+    if (!withdrawal || withdrawal.status !== 'pending') {
+      return res.status(400).json({ error: 'Invalid or already processed withdrawal' });
+    }
+    if (approved) {
+      const withdrawFee = Math.max(withdrawal.amount * 0.01, 2);
+      const totalDeduction = withdrawal.amount + withdrawFee;
+      if (user.balance < totalDeduction) {
+        return res.status(400).json({ error: 'Insufficient balance' });
+      }
+      user.balance -= totalDeduction;
+      user.transactions.push({
+        _id: crypto.randomBytes(16).toString('hex'),
+        type: 'withdrawn',
+        amount: withdrawal.amount,
+        toFrom: 'manual-mobile-money',
+        fee: withdrawFee,
+        date: new Date(),
+      });
+      withdrawal.status = 'completed';
+    } else {
+      withdrawal.status = 'rejected';
+    }
+    await user.save();
+    res.json({ message: `Withdrawal ${approved ? 'completed' : 'rejected'}` });
+  } catch (error) {
+    console.error('Verify Withdrawal Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to verify withdrawal' });
+  }
+});
+
+router.post('/verify-deposit', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { userId, transactionId, approved } = req.body;
+  console.log('Verify Deposit Request:', { userId, transactionId, approved });
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const deposit = user.pendingDeposits.find(d => d.transactionId === transactionId);
+    if (!deposit || deposit.status !== 'pending') {
+      return res.status(400).json({ error: 'Invalid or already processed deposit' });
+    }
+    if (approved) {
+      const amount = deposit.amount;
+      let creditedAmount = amount;
+      const isFirstDeposit = !user.transactions.some(tx => tx.type === 'deposited');
+      if (isFirstDeposit) {
+        const bonus = Math.min(amount * 0.05, 10);
+        creditedAmount += bonus;
+      }
+      user.balance += creditedAmount;
+      user.transactions.push({
+        _id: crypto.randomBytes(16).toString('hex'),
+        type: 'deposited',
+        amount: creditedAmount,
+        toFrom: 'manual-mobile-money',
+        fee: 0,
+        date: new Date(),
+      });
+      deposit.status = 'approved';
+      const adminLedger = await AdminLedger.findOne();
+      if (adminLedger) {
+        adminLedger.totalBalance += creditedAmount;
+        adminLedger.lastUpdated = new Date();
+        await adminLedger.save();
+      }
+    } else {
+      deposit.status = 'rejected';
+    }
+    await user.save();
+    res.json({ message: `Deposit ${approved ? 'approved' : 'rejected'}` });
+  } catch (error) {
+    console.error('Verify Deposit Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to verify deposit' });
+  }
+});
+
+router.post('/verify-business-deposit', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { businessId, transactionId, approved } = req.body;
+  try {
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    const deposit = business.pendingDeposits.find(d => d.transactionId === transactionId);
+    if (!deposit || deposit.status !== 'pending') {
+      return res.status(400).json({ error: 'Invalid or already processed deposit' });
+    }
+    if (approved) {
+      business.balance += deposit.amount;
+      business.transactions.push({
+        _id: crypto.randomBytes(16).toString('hex'),
+        type: 'deposited',
+        amount: deposit.amount,
+        toFrom: 'manual-mobile-money',
+        fee: 0,
+        date: new Date(),
+      });
+      deposit.status = 'approved';
+      const adminLedger = await AdminLedger.findOne();
+      if (adminLedger) {
+        adminLedger.totalBalance += deposit.amount;
+        adminLedger.lastUpdated = new Date();
+        adminLedger.save();
+      }
+    } else {
+      deposit.status = 'rejected';
+    }
+    await business.save();
+    res.json({ message: `Business deposit ${approved ? 'approved' : 'rejected'}` });
+  } catch (error) {
+    console.error('Verify Business Deposit Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to verify business deposit' });
+  }
+});
+
+router.get('/ledger', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  try {
+    const { startDate, endDate, limit = 50, skip = 0 } = req.query;
+    const query = {};
+    if (startDate || endDate) {
+      query['transactions.date'] = {};
+      if (startDate) query['transactions.date'].$gte = new Date(startDate);
+      if (endDate) query['transactions.date'].$lte = new Date(endDate);
+    }
+    const ledger = await AdminLedger.findOne(query)
+      .select('totalBalance lastUpdated transactions')
+      .lean();
+    if (!ledger) {
+      return res.status(404).json({ error: 'Ledger not found' });
+    }
+    ledger.transactions = ledger.transactions
+      .slice(Number(skip), Number(skip) + Number(limit))
+      .map(tx => ({
+        type: tx.type,
+        amount: tx.amount,
+        sender: tx.sender,
+        receiver: tx.receiver,
+        userTransactionIds: tx.userTransactionIds,
+        date: tx.date,
+      }));
+    res.json(ledger);
+  } catch (error) {
+    console.error('Ledger Fetch Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to fetch ledger' });
+  }
+});
+
+module.exports = router;
