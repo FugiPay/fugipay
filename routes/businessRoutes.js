@@ -9,7 +9,6 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const Flutterwave = require('flutterwave-node-v3');
 const mongoose = require('mongoose');
-const { Queue, Worker } = require('bullmq');
 const { Expo } = require('expo-server-sdk');
 const Business = require('../models/Business');
 const BusinessTransaction = require('../models/BusinessTransaction');
@@ -19,31 +18,6 @@ const QRCode = require('qrcode');
 const authenticateToken = require('../middleware/authenticateToken');
 const axios = require('axios');
 const path = require('path');
-
-// Configure BullMQ queue for emails
-const emailQueue = new Queue('email-notifications', {
-  connection: { host: process.env.REDIS_URL || 'localhost', port: 6379 },
-});
-
-// Configure BullMQ worker for email queue
-const emailWorker = new Worker('email-notifications', async (job) => {
-  const { mailOptions } = job.data;
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Sent email to ${mailOptions.to}: ${mailOptions.subject}`);
-  } catch (error) {
-    console.error('Error sending email from queue:', error.message);
-    throw error; // Retry on failure
-  }
-}, {
-  connection: { host: process.env.REDIS_URL || 'localhost', port: 6379 },
-  concurrency: 5, // Process up to 5 emails concurrently
-});
-
-// Handle worker errors
-emailWorker.on('failed', (job, error) => {
-  console.error(`Email job ${job.id} failed: ${error.message}`);
-});
 
 // Configure AWS S3
 const s3 = new AWS.S3({
@@ -106,34 +80,30 @@ const transporter = nodemailer.createTransport({
 // Initialize Expo SDK
 const expo = new Expo();
 
-// Helper function to queue email notifications
-async function queueEmail(to, subject, html) {
+// Helper function to send email notifications directly
+async function sendEmail(to, subject, html) {
   if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
-    console.error('Invalid email address:', to);
+    console.error('[SendEmail] Invalid email address:', to);
     return;
   }
   try {
-    await emailQueue.add('send-email', {
-      mailOptions: {
-        from: process.env.EMAIL_USER || 'no-reply@zangena.com',
-        to,
-        subject,
-        html,
-      },
-    }, {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 1000 },
-    });
-    console.log(`Queued email to ${to}: ${subject}`);
+    const mailOptions = {
+      from: process.env.EMAIL_USER || 'no-reply@zangena.com',
+      to,
+      subject,
+      html,
+    };
+    await transporter.sendMail(mailOptions);
+    console.log(`[SendEmail] Sent email to ${to}: ${subject}`);
   } catch (error) {
-    console.error('Error queuing email:', error.message);
+    console.error(`[SendEmail] Error sending email to ${to}: ${error.message}`);
   }
 }
 
 // Helper function to send push notifications
 async function sendPushNotification(pushToken, title, body, data = {}) {
   if (!pushToken || !Expo.isExpoPushToken(pushToken)) {
-    console.error('Invalid push token:', pushToken);
+    console.error('[PushNotification] Invalid push token:', pushToken);
     return;
   }
   const message = {
@@ -145,9 +115,9 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
   };
   try {
     await expo.sendPushNotificationsAsync([message]);
-    console.log(`Push notification sent to ${pushToken}: ${title} - ${body}`);
+    console.log(`[PushNotification] Sent to ${pushToken}: ${title} - ${body}`);
   } catch (error) {
-    console.error('Error sending push notification:', error.message);
+    console.error(`[PushNotification] Error sending to ${pushToken}: ${error.message}`);
   }
 }
 
@@ -318,7 +288,7 @@ router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => 
     );
     res.json(businesses);
   } catch (error) {
-    console.error('Fetch Businesses Error:', error.message);
+    console.error('[BusinessFetch] Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch businesses' });
   }
 });
@@ -342,7 +312,7 @@ router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (re
     await business.save();
     res.json({ message: `KYC ${approved ? 'approved' : 'rejected'}` });
   } catch (error) {
-    console.error('Verify KYC Error:', error.message);
+    console.error('[VerifyKYC] Error:', error.message);
     res.status(500).json({ error: 'Failed to verify KYC' });
   }
 });
@@ -437,7 +407,7 @@ router.post('/register', uploadS3.fields([
     await business.save();
 
     if (business.email) {
-      await queueEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
+      await sendEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
     }
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
@@ -454,7 +424,7 @@ router.post('/register', uploadS3.fields([
       business: { businessId, name, kycStatus: 'pending' },
     });
   } catch (error) {
-    console.error('Business Register Error:', error.message);
+    console.error('[BusinessRegister] Error:', error.message);
     res.status(500).json({ error: 'Server error during business registration' });
   }
 });
@@ -594,8 +564,8 @@ router.post('/signup', uploadMemory.fields([{ name: 'tpinCertificate' }, { name:
 
     // Send email notification
     if (business.email) {
-      console.log('[SignUp] Queuing email notification');
-      await queueEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
+      console.log('[SignUp] Sending email notification');
+      await sendEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
     }
 
     // Send push notification to admin
@@ -631,7 +601,7 @@ router.post('/login', async (req, res) => {
     const token = jwt.sign({ businessId, role: business.role, ownerUsername: business.ownerUsername }, JWT_SECRET, { expiresIn: '30d' });
     res.status(200).json({ token, businessId, role: business.role, kycStatus: business.kycStatus });
   } catch (error) {
-    console.error('Business Login Error:', error.message, error.stack);
+    console.error('[BusinessLogin] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Server error during business login', details: error.message });
   }
 });
@@ -665,7 +635,7 @@ router.post('/signin', async (req, res) => {
       business: { businessId: business.businessId, name: business.name, role: business.role, phoneNumber: business.phoneNumber },
     });
   } catch (error) {
-    console.error('Business Signin Error:', error);
+    console.error('[BusinessSignin] Error:', error.message);
     res.status(500).json({ error: 'Server error during signin' });
   }
 });
@@ -697,14 +667,14 @@ router.post('/forgot-pin', async (req, res) => {
     business.resetTokenExpiry = resetTokenExpiry;
     await business.save();
     if (business.email) {
-      await queueEmail(business.email, 'Zangena PIN Reset', emailTemplates.forgotPin(business, resetToken));
+      await sendEmail(business.email, 'Zangena PIN Reset', emailTemplates.forgotPin(business, resetToken));
     }
     if (business.pushToken) {
       await sendPushNotification(business.pushToken, 'PIN Reset Requested', 'A PIN reset token has been sent to your email.');
     }
     res.json({ message: 'Reset instructions have been sent to your email, if provided.' });
   } catch (error) {
-    console.error('Forgot PIN Error:', error);
+    console.error('[ForgotPin] Error:', error.message);
     res.status(500).json({ error: 'Server error during PIN reset request' });
   }
 });
@@ -735,7 +705,7 @@ router.post('/reset-pin', async (req, res) => {
     business.resetTokenExpiry = null;
     await business.save();
     if (business.email) {
-      await queueEmail(business.email, 'PIN Reset Successful', `
+      await sendEmail(business.email, 'PIN Reset Successful', `
         <h2>PIN Reset Successful</h2>
         <p>Dear ${business.name},</p>
         <p>Your Zangena account PIN has been successfully reset.</p>
@@ -748,7 +718,7 @@ router.post('/reset-pin', async (req, res) => {
     }
     res.json({ message: 'PIN reset successfully' });
   } catch (error) {
-    console.error('Reset PIN Error:', error);
+    console.error('[ResetPin] Error:', error.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -777,7 +747,7 @@ router.get('/:businessId', authenticateToken(['business', 'admin']), async (req,
     };
     res.json(response);
   } catch (error) {
-    console.error('Business Fetch Error:', error.message, error.stack);
+    console.error('[BusinessFetch] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Server error fetching business', details: error.message });
   }
 });
@@ -822,7 +792,7 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
     await transaction.save();
     res.status(201).json({ qrCodeId, qrCodeUrl, transactionId, expiresAt: expiresAt.toISOString() });
   } catch (error) {
-    console.error('QR Generate Error:', error.message);
+    console.error('[QRGenerate] Error:', error.message);
     res.status(500).json({ error: 'Failed to generate QR code' });
   }
 });
@@ -899,7 +869,7 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
     await Promise.all([user.save({ session }), business.save({ session }), ledger.save({ session }), transaction.save({ session })]);
     await session.commitTransaction();
     if (business.email) {
-      await queueEmail(business.email, 'Payment Received', emailTemplates.transaction(business, {
+      await sendEmail(business.email, 'Payment Received', emailTemplates.transaction(business, {
         ...businessTransaction,
         transactionId: txId,
         amount: paymentAmount,
@@ -922,7 +892,7 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
     });
   } catch (error) {
     await session.abortTransaction();
-    console.error('QR Pay Error:', error.message);
+    console.error('[QRPay] Error:', error.message);
     res.status(error.message.includes('not found') ? 404 : 400).json({ error: error.message });
   } finally {
     session.endSession();
@@ -977,7 +947,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
     };
     res.json(response);
   } catch (error) {
-    console.error('Dashboard Error:', error.message);
+    console.error('[Dashboard] Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch dashboard data' });
   }
 });
@@ -1047,7 +1017,7 @@ router.post('/refund', authenticateToken(['business']), async (req, res) => {
     await Promise.all([business.save({ session }), user.save({ session }), ledger.save({ session }), transaction.save({ session })]);
     await session.commitTransaction();
     if (business.email) {
-      await queueEmail(business.email, 'Refund Processed', emailTemplates.refund(business, refundTransaction));
+      await sendEmail(business.email, 'Refund Processed', emailTemplates.refund(business, refundTransaction));
     }
     if (user.pushToken) {
       await sendPushNotification(user.pushToken, 'Refund Received', `Received ${netRefund.toFixed(2)} ZMW refund from ${business.name}`, { refundId });
@@ -1058,7 +1028,7 @@ router.post('/refund', authenticateToken(['business']), async (req, res) => {
     res.json({ refundId, message: 'Refund processed', refundAmount: netRefund, refundFee });
   } catch (error) {
     await session.abortTransaction();
-    console.error('Refund Error:', error.message);
+    console.error('[Refund] Error:', error.message);
     res.status(error.message.includes('not found') ? 404 : 400).json({ error: error.message });
   } finally {
     session.endSession();
@@ -1068,7 +1038,7 @@ router.post('/refund', authenticateToken(['business']), async (req, res) => {
 router.post('/deposit/manual', authenticateToken(['business']), async (req, res) => {
   const { amount, transactionId } = req.body;
   try {
-    const business = await Business.findOne({ businessId: req.user.businessId });
+    const business = await Business.model.findOne({ businessId: req.user.businessId });
     if (!business || !business.isActive) {
       return res.status(403).json({ error: 'Business not found or inactive' });
     }
@@ -1083,18 +1053,18 @@ router.post('/deposit/manual', authenticateToken(['business']), async (req, res)
     business.pendingDeposits.push(deposit);
     await business.save();
     if (business.email) {
-      await queueEmail(business.email, 'Manual Deposit Submitted', emailTemplates.deposit(business, deposit));
+      await sendEmail(business.email, 'Manual Deposit Submitted', emailTemplates.deposit(business, deposit));
     }
     if (business.pushToken) {
       await sendPushNotification(business.pushToken, 'Deposit Submitted', `Manual deposit of ${amount.toFixed(2)} ZMW submitted for verification`, { transactionId });
     }
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
-      await sendPushNotification(admin.pushToken, 'New Business Deposit', `Deposit of ${amount} ZMW from ${business.name} (${business.businessId}) needs couleur approval`, { businessId: business.businessId, transactionId });
+      await sendPushNotification(admin.pushToken, 'New Business Deposit', `Deposit of ${amount} ZMW from ${business.name} (${business.businessId}) needs approval`, { businessId: business.businessId, transactionId });
     }
     res.json({ message: 'Business deposit submitted for verification' });
   } catch (error) {
-    console.error('Business Deposit Error:', error.message, error.stack);
+    console.error('[BusinessDeposit] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to submit business deposit' });
   }
 });
@@ -1114,7 +1084,7 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     business.pendingWithdrawals.push(withdrawal);
     await business.save();
     if (business.email) {
-      await queueEmail(business.email, 'Withdrawal Request Submitted', emailTemplates.withdrawal(business, withdrawal));
+      await sendEmail(business.email, 'Withdrawal Request Submitted', emailTemplates.withdrawal(business, withdrawal));
     }
     if (business.pushToken) {
       await sendPushNotification(business.pushToken, 'Withdrawal Requested', `Your request for ${withdrawalAmount.toFixed(2)} ZMW (Fee: ${withdrawalFee.toFixed(2)} ZMW) is pending approval`, { businessId: business.businessId });
@@ -1125,7 +1095,7 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     }
     res.json({ message: 'Business withdrawal requested. Awaiting approval', withdrawalFee });
   } catch (error) {
-    console.error('Business Withdraw Error:', error.message, error.stack);
+    console.error('[BusinessWithdraw] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to request business withdrawal' });
   }
 });
@@ -1140,7 +1110,7 @@ router.post('/register-push-token', authenticateToken(['business']), async (req,
     await business.save();
     res.status(200).json({ message: 'Push token registered for business' });
   } catch (error) {
-    console.error('Register Push Token Error:', error.message);
+    console.error('[RegisterPushToken] Error:', error.message);
     res.status(500).json({ error: 'Failed to register push token' });
   }
 });
