@@ -445,67 +445,43 @@ router.post('/register', upload.fields([
   }
 });
 
-router.post('/signup', upload.fields([
-  { name: 'tpinCertificate', maxCount: 1 },
-  { name: 'pacraCertificate', maxCount: 1 },
-]), async (req, res) => {
-  const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
-  const tpinCertificate = req.files?.tpinCertificate?.[0];
-  const pacraCertificate = req.files?.pacraCertificate?.[0];
-
-  if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !tpinCertificate || !pacraCertificate) {
-    return res.status(400).json({ error: 'Business ID, name, username, PIN, phone number, TPIN certificate, and PACRA certificate required' });
-  }
-  if (!/^\d{10}$/.test(businessId)) {
-    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
-  }
-  if (!/^[a-zA-Z0-9]{3,}$/.test(ownerUsername)) {
-    return res.status(400).json({ error: 'Username must be at least 3 alphanumeric characters' });
-  }
-  if (!/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-  }
-  if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(phoneNumber)) {
-    return res.status(400).json({ error: 'Invalid Zambian phone number' });
-  }
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Invalid email address' });
-  }
-  if (bankDetails) {
-    try {
-      const parsedBankDetails = typeof bankDetails === 'string' ? JSON.parse(bankDetails) : bankDetails;
-      if (!['bank', 'mobile_money', 'zambia_coin'].includes(parsedBankDetails.accountType)) {
-        return res.status(400).json({ error: 'Account type must be bank, mobile_money, or zambia_coin' });
-      }
-      if (parsedBankDetails.accountNumber) {
-        if (parsedBankDetails.accountType === 'bank') {
-          if (!/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
-            return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
-          }
-        } else if (parsedBankDetails.accountType === 'mobile_money') {
-          if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(parsedBankDetails.accountNumber)) {
-            return res.status(400).json({ error: 'Invalid mobile money number' });
-          }
-        }
-        if (!parsedBankDetails.bankName?.trim()) {
-          return res.status(400).json({ error: 'Bank or mobile name required' });
-        }
-      }
-    } catch (error) {
-      return res.status(400).json({ error: 'Invalid bankDetails format' });
-    }
-  }
-
+router.post('/signup', upload.fields([{ name: 'tpinCertificate' }, { name: 'pacraCertificate' }]), async (req, res) => {
   try {
-    const existingBusiness = await Business.findOne({
-      $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}].filter(Boolean),
-    });
+    const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
+    const tpinCertificate = req.files['tpinCertificate']?.[0];
+    const pacraCertificate = req.files['pacraCertificate']?.[0];
+
+    if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !email || !tpinCertificate || !pacraCertificate) {
+      return res.status(400).json({ error: 'All fields and KYC documents are required' });
+    }
+
+    const existingBusiness = await Business.findOne({ $or: [{ businessId }, { phoneNumber }, { email }] });
     if (existingBusiness) {
-      return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
+      return res.status(400).json({ error: 'Business ID, phone number, or email already exists' });
     }
 
     const hashedPin = await bcrypt.hash(pin, 10);
-    const qrCodeData = JSON.stringify({ type: 'business_payment', businessId, businessName: name });
+    const s3 = new AWS.S3({
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      region: process.env.AWS_REGION,
+    });
+
+    const uploadFile = async (file, key) => {
+      const params = {
+        Bucket: process.env.S3_BUCKET,
+        Key: `zangena/kyc/${key}`,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+      };
+      return s3.upload(params).promise();
+    };
+
+    const [tpinResult, pacraResult] = await Promise.all([
+      uploadFile(tpinCertificate, `${businessId}_tpin_${Date.now()}`),
+      uploadFile(pacraCertificate, `${businessId}_pacra_${Date.now()}`),
+    ]);
+
     const business = new Business({
       businessId,
       name,
@@ -513,45 +489,18 @@ router.post('/signup', upload.fields([
       pin: hashedPin,
       phoneNumber,
       email,
-      bankDetails: bankDetails && (bankDetails.bankName || bankDetails.accountNumber) ? {
-        bankName: bankDetails.bankName?.trim(),
-        accountNumber: bankDetails.accountNumber,
-        accountType: bankDetails.accountType,
-      } : undefined,
-      tpinCertificate: tpinCertificate.location,
-      pacraCertificate: pacraCertificate.location,
-      qrCode: qrCodeData,
-      balance: 0,
-      transactions: [],
-      pendingDeposits: [],
-      pendingWithdrawals: [],
+      bankDetails: bankDetails ? JSON.parse(bankDetails) : undefined,
+      tpinCertificate: tpinResult.Location,
+      pacraCertificate: pacraResult.Location,
       kycStatus: 'pending',
-      role: 'business',
       isActive: false,
     });
 
     await business.save();
-
-    if (business.email) {
-      await queueEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
-    }
-    const admin = await User.findOne({ role: 'admin' });
-    if (admin && admin.pushToken) {
-      await sendPushNotification(
-        admin.pushToken,
-        'New Business Signup',
-        `Business ${name} (${businessId}) awaits approval`,
-        { businessId }
-      );
-    }
-
-    res.status(201).json({
-      message: 'Business registered, awaiting approval',
-      business: { businessId, name, kycStatus: 'pending' },
-    });
+    res.json({ message: 'Business registered successfully' });
   } catch (error) {
-    console.error(`Business Signup Error [businessId: ${businessId}]:`, error.message, error.stack);
-    res.status(500).json({ error: 'Internal server error. Contact support.' });
+    console.error('SignUp Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
