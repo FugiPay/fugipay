@@ -25,20 +25,26 @@ const s3 = new AWS.S3({
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   region: process.env.AWS_REGION || 'us-east-1',
 });
+
 const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
 
 // Configure multer for in-memory storage (for /signup)
 const memoryStorage = multer.memoryStorage();
+
 const uploadMemory = multer({
-  storage: memoryStorage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (['application/pdf', 'image/png', 'image/jpeg'].includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only PDF, PNG, or JPEG allowed'), false);
+    console.log('[FileFilter] Checking file:', file.originalname, file.mimetype);
+    const filetypes = /pdf|png|jpeg/;
+    const mimetype = filetypes.test(file.mimetype);
+    const extname = filetypes.test(file.originalname.split('.').pop().toLowerCase());
+    if (mimetype && extname) {
+      return cb(null, true);
     }
-  },
+    console.error('[FileFilter] Invalid file type:', file.mimetype);
+    cb(new Error('Invalid file type. Only PDF, PNG, or JPEG allowed'));
+  }
 });
 
 // Configure multer-s3 for file uploads (for /register)
@@ -321,175 +327,157 @@ router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (re
 
 router.post('/signup', uploadMemory.fields([
   { name: 'tpinCertificate', maxCount: 1 },
-  { name: 'pacraCertificate', maxCount: 1 },
+  { name: 'pacraCertificate', maxCount: 1 }
 ]), async (req, res) => {
+  console.log('[SignUp] Received request:', {
+    body: { ...req.body, pin: '****' },
+    files: req.files ? Object.keys(req.files).map(key => ({
+      field: key,
+      name: req.files[key][0].originalname,
+      size: req.files[key][0].size
+    })) : null
+  });
+
   try {
-    console.log('[SignUp] Received request:', {
-      body: req.body,
-      files: req.files ? Object.keys(req.files).map(key => ({ field: key, name: req.files[key][0].originalname })) : null,
-    });
+    const {
+      businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails
+    } = req.body;
 
-    const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
-    const tpinCertificate = req.files['tpinCertificate']?.[0];
-    const pacraCertificate = req.files['pacraCertificate']?.[0];
-
-    // Validate required fields
-    if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !email || !tpinCertificate || !pacraCertificate) {
-      console.log('[SignUp] Missing required fields:', {
-        businessId,
-        name,
-        ownerUsername,
-        pin,
-        phoneNumber,
-        email,
-        tpinCertificate: !!tpinCertificate,
-        pacraCertificate: !!pacraCertificate,
-      });
+    if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !email ||
+        !req.files?.tpinCertificate || !req.files?.pacraCertificate) {
+      console.error('[SignUp] Missing fields or documents');
       return res.status(400).json({ error: 'All fields and KYC documents are required' });
     }
 
-    // Validate field formats
     if (!/^\d{10}$/.test(businessId)) {
-      console.log('[SignUp] Invalid businessId:', businessId);
+      console.error('[SignUp] Invalid businessId:', businessId);
       return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
     }
+
     if (!/^[a-zA-Z0-9]{3,}$/.test(ownerUsername)) {
-      console.log('[SignUp] Invalid ownerUsername:', ownerUsername);
+      console.error('[SignUp] Invalid ownerUsername:', ownerUsername);
       return res.status(400).json({ error: 'Username must be at least 3 alphanumeric characters' });
     }
+
     if (!/^\d{4}$/.test(pin)) {
-      console.log('[SignUp] Invalid pin:', pin);
+      console.error('[SignUp] Invalid pin:', pin);
       return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
+
     if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(phoneNumber)) {
-      console.log('[SignUp] Invalid phoneNumber:', phoneNumber);
+      console.error('[SignUp] Invalid phoneNumber:', phoneNumber);
       return res.status(400).json({ error: 'Invalid Zambian phone number' });
     }
+
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      console.log('[SignUp] Invalid email:', email);
+      console.error('[SignUp] Invalid email:', email);
       return res.status(400).json({ error: 'Invalid email address' });
     }
 
-    // Validate bankDetails
-    let parsedBankDetails;
-    if (bankDetails) {
-      try {
-        parsedBankDetails = typeof bankDetails === 'string' ? JSON.parse(bankDetails) : bankDetails;
-        if (!['bank', 'mobile_money', 'zambia_coin'].includes(parsedBankDetails.accountType)) {
-          console.log('[SignUp] Invalid bankDetails.accountType:', parsedBankDetails.accountType);
-          return res.status(400).json({ error: 'Account type must be bank, mobile_money, or zambia_coin' });
-        }
-        if (parsedBankDetails.accountNumber) {
-          if (parsedBankDetails.accountType === 'bank') {
-            if (!/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
-              console.log('[SignUp] Invalid bank accountNumber:', parsedBankDetails.accountNumber);
-              return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
-            }
-          } else if (parsedBankDetails.accountType === 'mobile_money') {
-            if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(parsedBankDetails.accountNumber)) {
-              console.log('[SignUp] Invalid mobile money accountNumber:', parsedBankDetails.accountNumber);
-              return res.status(400).json({ error: 'Invalid mobile money number' });
-            }
-          }
-          if (!parsedBankDetails.bankName?.trim()) {
-            console.log('[SignUp] Missing bankName');
-            return res.status(400).json({ error: 'Bank or mobile name required' });
-          }
-        }
-      } catch (error) {
-        console.log('[SignUp] Invalid bankDetails format:', bankDetails);
-        return res.status(400).json({ error: 'Invalid bankDetails format' });
-      }
-    }
-
-    // Check for duplicates
-    console.log('[SignUp] Checking for existing business');
-    const existingBusiness = await Business.findOne({ $or: [{ businessId }, { phoneNumber }, { email }] });
+    const existingBusiness = await Business.findOne({
+      $or: [{ businessId }, { phoneNumber }, { email }]
+    });
     if (existingBusiness) {
-      console.log('[SignUp] Duplicate found:', { businessId, phoneNumber, email });
+      console.error('[SignUp] Duplicate entry:', { businessId, phoneNumber, email });
       return res.status(400).json({ error: 'Business ID, phone number, or email already exists' });
     }
 
-    // Hash PIN
-    console.log('[SignUp] Hashing PIN');
-    const hashedPin = await bcrypt.hash(pin, 10);
-
-    // Upload files to S3
-    console.log('[SignUp] Uploading files to S3');
-    const uploadFile = async (file, key) => {
+    let parsedBankDetails = null;
+    if (bankDetails) {
       try {
-        console.log('[SignUp] Uploading:', key);
-        const params = {
-          Bucket: S3_BUCKET,
-          Key: `kyc/${key}`,
-          Body: file.buffer,
-          ContentType: file.mimetype,
-          ACL: 'private',
-        };
-        const result = await s3.upload(params).promise();
-        console.log('[SignUp] Uploaded:', key, result.Location);
-        return result;
+        parsedBankDetails = JSON.parse(bankDetails);
+        console.log('[SignUp] Parsed bankDetails:', parsedBankDetails);
       } catch (error) {
-        console.error('[SignUp] S3 upload failed:', key, error.message, error.stack);
-        if (error.code === 'AccessDenied') {
-          throw new Error('S3 Access Denied: Check AWS credentials and bucket permissions');
-        } else if (error.code === 'NoSuchBucket') {
-          throw new Error(`S3 Bucket ${S3_BUCKET} does not exist`);
-        }
-        throw new Error(`Failed to upload ${key}: ${error.message}`);
+        console.error('[SignUp] Invalid bankDetails format:', bankDetails, error.message);
+        return res.status(400).json({ error: 'Invalid bank details format' });
       }
+    }
+
+    const tpinFile = req.files.tpinCertificate[0];
+    const pacraFile = req.files.pacraCertificate[0];
+    const uploadPromises = [];
+
+    const tpinParams = {
+      Bucket: process.env.S3_BUCKET,
+      Key: `kyc/${businessId}_tpin_${Date.now()}.${tpinFile.originalname.split('.').pop()}`,
+      Body: tpinFile.buffer,
+      ContentType: tpinFile.mimetype
     };
 
-    const [tpinResult, pacraResult] = await Promise.all([
-      uploadFile(tpinCertificate, `${businessId}_tpin_${Date.now()}`),
-      uploadFile(pacraCertificate, `${businessId}_pacra_${Date.now()}`),
-    ]);
+    const pacraParams = {
+      Bucket: process.env.S3_BUCKET,
+      Key: `kyc/${businessId}_pacra_${Date.now()}.${pacraFile.originalname.split('.').pop()}`,
+      Body: pacraFile.buffer,
+      ContentType: pacraFile.mimetype
+    };
 
-    console.log('[SignUp] S3 uploads successful:', {
-      tpin: tpinResult.Location,
-      pacra: pacraResult.Location,
-    });
+    console.log('[SignUp] Uploading to S3:', tpinParams.Key);
+    uploadPromises.push(
+      s3.upload(tpinParams).promise()
+        .then(data => {
+          console.log('[SignUp] Uploaded tpin:', data.Location);
+          return data.Location;
+        })
+        .catch(err => {
+          console.error('[SignUp] S3 tpin upload failed:', err.message, err.stack);
+          throw err;
+        })
+    );
 
-    // Save business to MongoDB
-    console.log('[SignUp] Saving business to MongoDB');
+    console.log('[SignUp] Uploading to S3:', pacraParams.Key);
+    uploadPromises.push(
+      s3.upload(pacraParams).promise()
+        .then(data => {
+          console.log('[SignUp] Uploaded pacra:', data.Location);
+          return data.Location;
+        })
+        .catch(err => {
+          console.error('[SignUp] S3 pacra upload failed:', err.message, err.stack);
+          throw err;
+        })
+    );
+
+    const [tpinUrl, pacraUrl] = await Promise.all(uploadPromises);
+
     const business = new Business({
       businessId,
       name,
       ownerUsername,
-      pin: hashedPin,
+      pin,
       phoneNumber,
       email,
       bankDetails: parsedBankDetails,
-      tpinCertificate: tpinResult.Location,
-      pacraCertificate: pacraResult.Location,
+      kycDocuments: { tpinCertificate: tpinUrl, pacraCertificate: pacraUrl },
       kycStatus: 'pending',
-      isActive: false,
+      registrationDate: new Date()
     });
 
+    console.log('[SignUp] Saving business to MongoDB:', businessId);
     await business.save();
     console.log('[SignUp] Business saved:', businessId);
 
-    // Send email notification
-    if (business.email) {
-      console.log('[SignUp] Sending email notification');
-      await sendEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
-    }
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Business Registration Submitted',
+      text: `Dear ${ownerUsername},\n\nYour business (${name}, TPIN: ${businessId}) has been submitted for review. You'll be notified once approved.\n\nZangena Team`
+    };
 
-    // Send push notification to admin
-    const admin = await User.findOne({ role: 'admin' });
-    if (admin && admin.pushToken) {
-      console.log('[SignUp] Sending push notification to admin');
-      await sendPushNotification(
-        admin.pushToken,
-        'New Business Registration',
-        `Business ${name} (${businessId}) needs approval`,
-        { businessId }
-      );
-    }
+    console.log('[SendEmail] Sending email to:', email);
+    await transporter.sendMail(mailOptions);
+    console.log('[SendEmail] Sent email to:', email);
 
-    res.json({ message: 'Business registered successfully' });
+    res.status(201).json({ message: 'Business registered successfully' });
   } catch (error) {
-    console.error('[SignUp] Error:', error.message, error.stack);
+    console.error('[SignUp] Error:', {
+      message: error.message,
+      stack: error.stack,
+      code: error.code,
+      details: error.details
+    });
+    if (error.message.includes('Invalid file type')) {
+      return res.status(400).json({ error: error.message });
+    }
     res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
