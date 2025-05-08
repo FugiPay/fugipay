@@ -1082,4 +1082,51 @@ router.post('/register-push-token', authenticateToken(['business']), async (req,
   }
 });
 
+// Get all businesses
+router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  try {
+    const businesses = await Business.find().select(
+      'businessId name balance kycStatus pendingDeposits pendingWithdrawals transactions'
+    ).lean();
+    res.json(businesses);
+  } catch (error) {
+    console.error('Fetch Businesses Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch businesses' });
+  }
+});
+
+// Get business by ID
+router.get('/:id', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  try {
+    const business = await Business.findById(req.params.id);
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    res.json(business);
+  } catch (error) {
+    console.error('Fetch Business Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch business' });
+  }
+});
+
+// Update KYC status
+router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { id, kycStatus } = req.body;
+  if (!id || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
+    return res.status(400).json({ error: 'Invalid business ID or KYC status' });
+  }
+  try {
+    const business = await Business.findById(id);
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    business.kycStatus = kycStatus;
+    await business.save();
+    res.json({ message: 'KYC status updated' });
+  } catch (error) {
+    console.error('Update KYC Error:', error.message);
+    res.status(500).json({ error: 'Failed to update KYC status' });
+  }
+});
+
 module.exports = router;

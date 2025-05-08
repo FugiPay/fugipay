@@ -14,7 +14,6 @@ const AdminLedger = require('../models/AdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
 const axios = require('axios');
 
-
 // Ensure indexes
 User.createIndexes({ username: 1, phoneNumber: 1 });
 QRPin.createIndexes({ qrId: 1 });
@@ -62,6 +61,54 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
   }
 }
 
+// Middleware to check admin role
+const requireAdmin = async (req, res, next) => {
+  try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+  } catch (error) {
+    console.error('[ADMIN] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// Get all users
+router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  try {
+    const users = await User.find().select(
+      'username phoneNumber balance kycStatus trustScore pendingDeposits pendingWithdrawals transactions'
+    ).lean();
+    res.json(users);
+  } catch (error) {
+    console.error('Fetch Users Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+// Update KYC status
+router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { id, kycStatus } = req.body;
+  if (!id || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
+    return res.status(400).json({ error: 'Invalid user ID or KYC status' });
+  }
+  try {
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    user.kycStatus = kycStatus;
+    await user.save();
+    res.json({ message: 'KYC status updated' });
+  } catch (error) {
+    console.error('Update KYC Error:', error.message);
+    res.status(500).json({ error: 'Failed to update KYC status' });
+  }
+});
+
+// Register
 router.post('/register', upload.single('idImage'), async (req, res) => {
   const { username, name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
@@ -123,6 +170,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
   }
 });
 
+// Login
 router.post('/login', async (req, res) => {
   const { identifier, password } = req.body;
   if (!identifier || !password) {
@@ -155,6 +203,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// Forgot Password
 router.post('/forgot-password', async (req, res) => {
   const { identifier } = req.body;
   if (!identifier) {
@@ -188,6 +237,7 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
+// Reset Password
 router.post('/reset-password', async (req, res) => {
   const { token, newPassword } = req.body;
   if (!token || !newPassword) {
@@ -212,6 +262,7 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
+// Get User by Username
 router.get('/user/:username', authenticateToken(), async (req, res) => {
   const start = Date.now();
   console.log(`[${req.method}] ${req.path} - Starting fetch for ${req.params.username}`);
@@ -223,7 +274,7 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
     await mongoose.connection.db.admin().ping();
     const user = await User.findOne(
       { username: req.params.username },
-      { username: 1, name: 1, phoneNumber: 1, email: 1, balance: 1, zambiaCoinBalance: 1, trustScore: 1, transactions: { $slice: -10 }, kycStatus: 1, isActive: 1 }
+      { username: 1, name: 1, phoneNumber: 1, email: 1, balance: 1, zambiaCoinBalance: 1, trustScore: 1, transactions: { $slice: -10 }, kycStatus: 1, isActive: 1, pendingDeposits: 1, pendingWithdrawals: 1 }
     ).lean().exec();
     if (!user) {
       console.log(`[${req.method}] ${req.path} - User not found`);
@@ -239,6 +290,7 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
       username: user.username, name: user.name, phoneNumber: user.phoneNumber, email: user.email,
       balance: user.balance, zambiaCoinBalance: user.zambiaCoinBalance, trustScore: user.trustScore,
       transactions: user.transactions, kycStatus: user.kycStatus, isActive: user.isActive,
+      pendingDeposits: user.pendingDeposits, pendingWithdrawals: user.pendingWithdrawals
     };
     console.log(`[${req.method}] ${req.path} - Total time: ${Date.now() - start}ms`);
     clearTimeout(timeout);
@@ -250,6 +302,7 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
   }
 });
 
+// Get User by Phone Number
 router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) => {
   try {
     const { phoneNumber } = req.params;
@@ -271,6 +324,8 @@ router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) =>
       kycStatus: user.kycStatus || 'rejected',
       role: user.role || 'user',
       lastViewedTimestamp: user.lastViewedTimestamp || 0,
+      pendingDeposits: user.pendingDeposits,
+      pendingWithdrawals: user.pendingWithdrawals
     });
   } catch (error) {
     console.error('[USER] Error:', error.message);
@@ -278,6 +333,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) =>
   }
 });
 
+// Get User by Phone Number (Alternative)
 router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => {
   try {
     const user = await User.findOne({ phoneNumber: req.params.phoneNumber });
@@ -293,6 +349,8 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
       kycStatus: user.kycStatus,
       role: user.role,
       lastViewedTimestamp: user.lastViewedTimestamp || 0,
+      pendingDeposits: user.pendingDeposits,
+      pendingWithdrawals: user.pendingWithdrawals
     });
   } catch (error) {
     console.error('[USER] Error:', error.message);
@@ -300,6 +358,7 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
   }
 });
 
+// Update Notification Timestamp
 router.put('/user/update-notification', authenticateToken(), async (req, res) => {
   try {
     const { phoneNumber, lastViewedTimestamp } = req.body;
@@ -322,212 +381,215 @@ router.put('/user/update-notification', authenticateToken(), async (req, res) =>
   }
 });
 
+// Store QR PIN
 router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
-    const { username, pin } = req.body;
-    if (!username || !pin) {
-      return res.status(400).json({ error: 'Username and PIN are required' });
-    }
-    if (!/^\d{4}$/.test(pin)) {
-      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-    }
-    try {
-      const qrId = crypto.randomBytes(16).toString('hex');
-      const session = await mongoose.startSession();
-      session.startTransaction({ writeConcern: { w: 'majority' } });
-      try {
-        const user = await User.findOneAndUpdate(
-          { username: req.user.username, isActive: true },
-          {
-            $push: {
-              transactions: {
-                type: 'pending-pin',
-                amount: 0,
-                toFrom: 'Self',
-                date: new Date(),
-                qrId,
-              },
-            },
-          },
-          { new: true, session }
-        );
-        if (!user) {
-          await session.abortTransaction();
-          session.endSession();
-          console.error('QR Pin Store: User not found or inactive', { username: req.user.username });
-          return res.status(404).json({ error: 'User not found or inactive' });
-        }
-        if (username !== user.username) {
-          await session.abortTransaction();
-          session.endSession();
-          console.error('QR Pin Store: Unauthorized', { requested: username, actual: user.username });
-          return res.status(403).json({ error: 'Unauthorized' });
-        }
-        await new QRPin({ username, qrId, pin }).save({ session });
-        await session.commitTransaction();
-        session.endSession();
-        console.log('QR Pin Store: Success', { username, qrId });
-        res.json({ qrId });
-      } catch (error) {
-        await session.abortTransaction();
-        session.endSession();
-        throw error;
-      }
-    } catch (error) {
-      console.error('QR Pin Store Error:', {
-        message: error.message,
-        stack: error.stack,
-        username,
-        pinLength: pin?.length,
-      });
-      res.status(500).json({ error: 'Server error storing QR pin' });
-    }
-  });
-  
-  router.post('/pay-qr', authenticateToken(), async (req, res) => {
-    const { qrId, amount, pin, senderUsername } = req.body;
-    if (!qrId || !amount || !pin || !senderUsername) {
-      return res.status(400).json({ error: 'QR ID, amount, PIN, and sender username required' });
-    }
-    if (amount <= 0 || amount > 10000) {
-      return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
-    }
+  const { username, pin } = req.body;
+  if (!username || !pin) {
+    return res.status(400).json({ error: 'Username and PIN are required' });
+  }
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
+  try {
+    const qrId = crypto.randomBytes(16).toString('hex');
     const session = await mongoose.startSession();
     session.startTransaction({ writeConcern: { w: 'majority' } });
     try {
-      const sender = await User.findOne({ username: senderUsername, isActive: true }).session(session);
-      if (!sender || sender.username !== req.user.username) {
+      const user = await User.findOneAndUpdate(
+        { username: req.user.username, isActive: true },
+        {
+          $push: {
+            transactions: {
+              type: 'pending-pin',
+              amount: 0,
+              toFrom: 'Self',
+              date: new Date(),
+              qrId,
+            },
+          },
+        },
+        { new: true, session }
+      );
+      if (!user) {
         await session.abortTransaction();
         session.endSession();
-        return res.status(403).json({ error: 'Unauthorized sender' });
+        console.error('QR Pin Store: User not found or inactive', { username: req.user.username });
+        return res.status(404).json({ error: 'User not found or inactive' });
       }
-      const qrPin = await QRPin.findOne({ qrId }).session(session);
-      if (!qrPin || qrPin.pin !== pin) {
+      if (username !== user.username) {
         await session.abortTransaction();
         session.endSession();
-        return res.status(404).json({ error: 'Invalid QR code or PIN' });
+        console.error('QR Pin Store: Unauthorized', { requested: username, actual: user.username });
+        return res.status(403).json({ error: 'Unauthorized' });
       }
-      const receiver = await User.findOne({ username: qrPin.username, isActive: true }).session(session);
-      if (!receiver) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(404).json({ error: 'Receiver not found or inactive' });
-      }
-      const sendingFee = amount <= 50 ? 0.50 : 
+      await new QRPin({ username, qrId, pin }).save({ session });
+      await session.commitTransaction();
+      session.endSession();
+      console.log('QR Pin Store: Success', { username, qrId });
+      res.json({ qrId });
+    } catch (error) {
+      await session.abortTransaction();
+      session.endSession();
+      throw error;
+    }
+  } catch (error) {
+    console.error('QR Pin Store Error:', {
+      message: error.message,
+      stack: error.stack,
+      username,
+      pinLength: pin?.length,
+    });
+    res.status(500).json({ error: 'Server error storing QR pin' });
+  }
+});
+
+// Pay QR
+router.post('/pay-qr', authenticateToken(), async (req, res) => {
+  const { qrId, amount, pin, senderUsername } = req.body;
+  if (!qrId || !amount || !pin || !senderUsername) {
+    return res.status(400).json({ error: 'QR ID, amount, PIN, and sender username required' });
+  }
+  if (amount <= 0 || amount > 10000) {
+    return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
+  }
+  const session = await mongoose.startSession();
+  session.startTransaction({ writeConcern: { w: 'majority' } });
+  try {
+    const sender = await User.findOne({ username: senderUsername, isActive: true }).session(session);
+    if (!sender || sender.username !== req.user.username) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(403).json({ error: 'Unauthorized sender' });
+    }
+    const qrPin = await QRPin.findOne({ qrId }).session(session);
+    if (!qrPin || qrPin.pin !== pin) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'Invalid QR code or PIN' });
+    }
+    const receiver = await User.findOne({ username: qrPin.username, isActive: true }).session(session);
+    if (!receiver) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'Receiver not found or inactive' });
+    }
+    const sendingFee = amount <= 50 ? 0.50 : 
+                      amount <= 100 ? 1.00 : 
+                      amount <= 500 ? 2.00 :
+                      amount <= 1000 ? 2.50 : 
+                      amount <= 5000 ? 3.50 : 5.00;
+    const receivingFee = amount <= 50 ? 0.50 : 
                         amount <= 100 ? 1.00 : 
-                        amount <= 500 ? 2.00 :
-                        amount <= 1000 ? 2.50 : 
-                        amount <= 5000 ? 3.50 : 5.00;
-      const receivingFee = amount <= 50 ? 0.50 : 
-                          amount <= 100 ? 1.00 : 
-                          amount <= 500 ? 1.50 :
-                          amount <= 1000 ? 2.00 : 
-                          amount <= 5000 ? 3.00 : 5.00;
-      if (sender.balance < amount + sendingFee) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({ error: 'Insufficient balance' });
-      }
-      const sentTxId = new mongoose.Types.ObjectId().toString();
-      const receivedTxId = new mongoose.Types.ObjectId().toString();
-      const transactionDate = new Date();
-  
-      // Batch User updates
-      await User.bulkWrite([
-        {
-          updateOne: {
-            filter: { _id: sender._id },
-            update: {
-              $inc: { balance: -(amount + sendingFee) },
-              $push: {
-                transactions: {
-                  _id: sentTxId,
-                  type: 'sent',
-                  amount,
-                  toFrom: receiver.username,
-                  fee: sendingFee,
-                  date: transactionDate,
-                  qrId,
-                },
-              },
-            },
-          },
-        },
-        {
-          updateOne: {
-            filter: { _id: receiver._id },
-            update: {
-              $inc: { balance: amount - receivingFee },
-              $push: {
-                transactions: {
-                  _id: receivedTxId,
-                  type: 'received',
-                  amount,
-                  toFrom: sender.username,
-                  fee: receivingFee,
-                  date: transactionDate,
-                  qrId,
-                },
-              },
-            },
-          },
-        },
-      ], { session });
-  
-      // Delete QRPin and update AdminLedger
-      const updates = Promise.all([
-        QRPin.deleteOne({ qrId }, { session }),
-        AdminLedger.updateOne(
-          {},
-          {
-            $inc: { totalBalance: sendingFee + receivingFee },
-            $set: { lastUpdated: new Date() },
+                        amount <= 500 ? 1.50 :
+                        amount <= 1000 ? 2.00 : 
+                        amount <= 5000 ? 3.00 : 5.00;
+    if (sender.balance < amount + sendingFee) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+    const sentTxId = new mongoose.Types.ObjectId().toString();
+    const receivedTxId = new mongoose.Types.ObjectId().toString();
+    const transactionDate = new Date();
+
+    // Batch User updates
+    await User.bulkWrite([
+      {
+        updateOne: {
+          filter: { _id: sender._id },
+          update: {
+            $inc: { balance: -(amount + sendingFee) },
             $push: {
               transactions: {
-                type: 'fee-collected',
-                amount: sendingFee + receivingFee,
-                sender: sender.username,
-                receiver: receiver.username,
-                userTransactionIds: [sentTxId, receivedTxId],
+                _id: sentTxId,
+                type: 'sent',
+                amount,
+                toFrom: receiver.username,
+                fee: sendingFee,
                 date: transactionDate,
                 qrId,
               },
             },
           },
-          { upsert: true, session }
-        ),
-      ]);
-  
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Transaction update timeout')), 15000);
-      });
-      await Promise.race([updates, timeoutPromise]);
-  
-      await session.commitTransaction();
-      session.endSession();
-      console.log('[PAY-QR] Transaction:', {
-        amount,
-        sendingFee,
-        receivingFee,
-        sender: sender.username,
-        receiver: receiver.username,
-        qrId,
-        transactionDate,
-      });
-      res.json({ sendingFee, receivingFee, amount });
-    } catch (error) {
-      await session.abortTransaction();
-      session.endSession();
-      console.error('[PAY-QR] Error:', {
-        message: error.message,
-        stack: error.stack,
-        qrId,
-        senderUsername,
-        amount,
-      });
-      res.status(500).json({ error: error.message === 'Transaction update timeout' ? 'Transaction timed out' : 'Server error processing payment' });
-    }
-  });
+        },
+      },
+      {
+        updateOne: {
+          filter: { _id: receiver._id },
+          update: {
+            $inc: { balance: amount - receivingFee },
+            $push: {
+              transactions: {
+                _id: receivedTxId,
+                type: 'received',
+                amount,
+                toFrom: sender.username,
+                fee: receivingFee,
+                date: transactionDate,
+                qrId,
+              },
+            },
+          },
+        },
+      },
+    ], { session });
 
+    // Delete QRPin and update AdminLedger
+    const updates = Promise.all([
+      QRPin.deleteOne({ qrId }, { session }),
+      AdminLedger.updateOne(
+        {},
+        {
+          $inc: { totalBalance: sendingFee + receivingFee },
+          $set: { lastUpdated: new Date() },
+          $push: {
+            transactions: {
+              type: 'fee-collected',
+              amount: sendingFee + receivingFee,
+              sender: sender.username,
+              receiver: receiver.username,
+              userTransactionIds: [sentTxId, receivedTxId],
+              date: transactionDate,
+              qrId,
+            },
+          },
+        },
+        { upsert: true, session }
+      ),
+    ]);
+
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Transaction update timeout')), 15000);
+    });
+    await Promise.race([updates, timeoutPromise]);
+
+    await session.commitTransaction();
+    session.endSession();
+    console.log('[PAY-QR] Transaction:', {
+      amount,
+      sendingFee,
+      receivingFee,
+      sender: sender.username,
+      receiver: receiver.username,
+      qrId,
+      transactionDate,
+    });
+    res.json({ sendingFee, receivingFee, amount });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    console.error('[PAY-QR] Error:', {
+      message: error.message,
+      stack: error.stack,
+      qrId,
+      senderUsername,
+      amount,
+    });
+    res.status(500).json({ error: error.message === 'Transaction update timeout' ? 'Transaction timed out' : 'Server error processing payment' });
+  }
+});
+
+// Manual Deposit
 router.post('/deposit/manual', authenticateToken(), async (req, res) => {
   const { amount, transactionId } = req.body;
   console.log('Manual Deposit Request:', { amount, transactionId });
@@ -556,6 +618,7 @@ router.post('/deposit/manual', authenticateToken(), async (req, res) => {
   }
 });
 
+// Withdraw Request
 router.post('/withdraw/request', authenticateToken(), async (req, res) => {
   const { amount } = req.body;
   console.log('Withdraw Request:', { amount });
@@ -581,6 +644,7 @@ router.post('/withdraw/request', authenticateToken(), async (req, res) => {
   }
 });
 
+// Withdraw (Direct)
 router.post('/api/withdraw', authenticateToken(), async (req, res) => {
   const { amount } = req.body;
   console.log('Withdraw Request Received:', { amount });
@@ -656,6 +720,7 @@ router.post('/api/withdraw', authenticateToken(), async (req, res) => {
   }
 });
 
+// Save Push Token
 router.post('/save-push-token', authenticateToken(), async (req, res) => {
   const { pushToken } = req.body;
   if (!pushToken) return res.status(400).json({ error: 'Push token is required' });
@@ -671,13 +736,12 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
   }
 });
 
-// New Routes for Profile Update and Account Deletion
+// Update Profile
 router.put('/user/update', authenticateToken(['user']), async (req, res) => {
   try {
     const { email, password, pin } = req.body;
     const updates = {};
 
-    // Validate and add email
     if (email) {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         console.log('[USER] Invalid email format:', email);
@@ -691,7 +755,6 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
       updates.email = email;
     }
 
-    // Validate and hash password
     if (password) {
       if (password.length < 6) {
         console.log('[USER] Password too short:', password.length);
@@ -700,7 +763,6 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
       updates.password = await bcrypt.hash(password, 10);
     }
 
-    // Validate PIN
     if (pin) {
       if (pin.length !== 4 || !/^\d{4}$/.test(pin)) {
         console.log('[USER] Invalid PIN:', pin);
@@ -726,7 +788,6 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Generate new JWT
     const token = jwt.sign(
       { _id: user._id, phoneNumber: user.phoneNumber, role: user.role || 'user' },
       process.env.JWT_SECRET || 'Zangena123$@2025',
@@ -752,7 +813,7 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
   }
 });
 
-// Delete user
+// Delete User
 router.delete('/user/delete', authenticateToken(['user']), async (req, res) => {
   try {
     const user = await User.findOneAndDelete({ phoneNumber: req.user.phoneNumber });
@@ -772,7 +833,7 @@ router.delete('/user/delete', authenticateToken(['user']), async (req, res) => {
   }
 });
 
-// Refresh token
+// Refresh Token
 router.post('/refresh-token', async (req, res) => {
   const { refreshToken } = req.body;
   if (!refreshToken) {
@@ -817,6 +878,7 @@ router.post('/refresh-token', async (req, res) => {
   }
 });
 
+// Update Timestamp
 router.patch('/update-timestamp', authenticateToken(['user']), async (req, res) => {
   try {
     const { phoneNumber, lastViewedTimestamp } = req.body;
