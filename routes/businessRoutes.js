@@ -332,7 +332,7 @@ router.post('/signup', async (req, res) => {
 
   try {
     const {
-      businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails
+      businessId, name, ownerUsername, pin, phoneNumber, email
     } = req.body;
 
     if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !email) {
@@ -390,40 +390,6 @@ router.post('/signup', async (req, res) => {
       return res.status(409).json({ error: 'Email already taken' });
     }
 
-    let parsedBankDetails = null;
-    if (bankDetails) {
-      try {
-        parsedBankDetails = JSON.parse(bankDetails);
-        console.log('[SignUp] Parsed bankDetails:', parsedBankDetails);
-        // Validate bankDetails fields
-        if (!parsedBankDetails.bankName || typeof parsedBankDetails.bankName !== 'string') {
-          console.error('[SignUp] Invalid bankName:', parsedBankDetails.bankName);
-          return res.status(400).json({ error: 'Bank or mobile money provider name is required' });
-        }
-        if (!parsedBankDetails.accountNumber || typeof parsedBankDetails.accountNumber !== 'string') {
-          console.error('[SignUp] Invalid accountNumber:', parsedBankDetails.accountNumber);
-          return res.status(400).json({ error: 'Account number is required' });
-        }
-        if (!parsedBankDetails.accountType || !['bank', 'mobile_money', 'zambia_coin'].includes(parsedBankDetails.accountType)) {
-          console.error('[SignUp] Invalid accountType:', parsedBankDetails.accountType);
-          return res.status(400).json({ error: 'Account type must be bank, mobile_money, or zambia_coin' });
-        }
-        // Validate accountNumber based on accountType
-        if (parsedBankDetails.accountType === 'bank' && !/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
-          console.error('[SignUp] Invalid bank accountNumber:', parsedBankDetails.accountNumber);
-          return res.status(400).json({ error: 'Bank account number must be 10-12 digits' });
-        }
-        if ((parsedBankDetails.accountType === 'mobile_money' || parsedBankDetails.accountType === 'zambia_coin') && 
-            !/^\+260(9[5678]|7[34679])\d{7}$/.test(parsedBankDetails.accountNumber)) {
-          console.error('[SignUp] Invalid mobile money/zambia_coin accountNumber:', parsedBankDetails.accountNumber);
-          return res.status(400).json({ error: 'Mobile money or Zambia Coin number must be a valid Zambian number' });
-        }
-      } catch (error) {
-        console.error('[SignUp] Invalid bankDetails format:', bankDetails, error.message);
-        return res.status(400).json({ error: 'Invalid bank details format' });
-      }
-    }
-
     const business = new Business({
       businessId,
       name,
@@ -431,7 +397,7 @@ router.post('/signup', async (req, res) => {
       pin,
       phoneNumber,
       email,
-      bankDetails: parsedBankDetails,
+      bankDetails: null,
       tpinCertificate: null,
       pacraCertificate: null,
       kycStatus: 'pending',
@@ -445,7 +411,7 @@ router.post('/signup', async (req, res) => {
       pin: '****',
       phoneNumber,
       email,
-      bankDetails: parsedBankDetails,
+      bankDetails: business.bankDetails,
       tpinCertificate: business.tpinCertificate,
       pacraCertificate: business.pacraCertificate,
       kycStatus: business.kycStatus,
