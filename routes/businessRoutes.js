@@ -53,8 +53,22 @@ const s3 = new AWS.S3({
 });
 const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
 
-// Configure multer-s3 for file uploads
-const upload = multer({
+// Configure multer for in-memory storage (for /signup)
+const memoryStorage = multer.memoryStorage();
+const uploadMemory = multer({
+  storage: memoryStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: (req, file, cb) => {
+    if (['application/pdf', 'image/png', 'image/jpeg'].includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only PDF, PNG, or JPEG allowed'), false);
+    }
+  },
+});
+
+// Configure multer-s3 for file uploads (for /register)
+const uploadS3 = multer({
   storage: multerS3({
     s3,
     bucket: S3_BUCKET,
@@ -335,7 +349,7 @@ router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (re
 
 // End Admin ..........................................................
 
-router.post('/register', upload.fields([
+router.post('/register', uploadS3.fields([
   { name: 'tpinCertificate', maxCount: 1 },
   { name: 'pacraCertificate', maxCount: 1 },
 ]), async (req, res) => {
@@ -445,36 +459,108 @@ router.post('/register', upload.fields([
   }
 });
 
-router.post('/signup', upload.fields([{ name: 'tpinCertificate' }, { name: 'pacraCertificate' }]), async (req, res) => {
+router.post('/signup', uploadMemory.fields([{ name: 'tpinCertificate' }, { name: 'pacraCertificate' }]), async (req, res) => {
   try {
+    console.log('[SignUp] Received request:', {
+      body: req.body,
+      files: req.files ? Object.keys(req.files).map(key => ({ field: key, name: req.files[key][0].originalname })) : null
+    });
+
     const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
     const tpinCertificate = req.files['tpinCertificate']?.[0];
     const pacraCertificate = req.files['pacraCertificate']?.[0];
 
+    // Validate required fields
     if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !email || !tpinCertificate || !pacraCertificate) {
+      console.log('[SignUp] Missing required fields:', { businessId, name, ownerUsername, pin, phoneNumber, email, tpinCertificate: !!tpinCertificate, pacraCertificate: !!pacraCertificate });
       return res.status(400).json({ error: 'All fields and KYC documents are required' });
     }
 
+    // Validate field formats
+    if (!/^\d{10}$/.test(businessId)) {
+      console.log('[SignUp] Invalid businessId:', businessId);
+      return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+    }
+    if (!/^[a-zA-Z0-9]{3,}$/.test(ownerUsername)) {
+      console.log('[SignUp] Invalid ownerUsername:', ownerUsername);
+      return res.status(400).json({ error: 'Username must be at least 3 alphanumeric characters' });
+    }
+    if (!/^\d{4}$/.test(pin)) {
+      console.log('[SignUp] Invalid pin:', pin);
+      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+    }
+    if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(phoneNumber)) {
+      console.log('[SignUp] Invalid phoneNumber:', phoneNumber);
+      return res.status(400).json({ error: 'Invalid Zambian phone number' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      console.log('[SignUp] Invalid email:', email);
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+
+    // Validate bankDetails
+    let parsedBankDetails;
+    if (bankDetails) {
+      try {
+        parsedBankDetails = typeof bankDetails === 'string' ? JSON.parse(bankDetails) : bankDetails;
+        if (!['bank', 'mobile_money', 'zambia_coin'].includes(parsedBankDetails.accountType)) {
+          console.log('[SignUp] Invalid bankDetails.accountType:', parsedBankDetails.accountType);
+          return res.status(400).json({ error: 'Account type must be bank, mobile_money, or zambia_coin' });
+        }
+        if (parsedBankDetails.accountNumber) {
+          if (parsedBankDetails.accountType === 'bank') {
+            if (!/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
+              console.log('[SignUp] Invalid bank accountNumber:', parsedBankDetails.accountNumber);
+              return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
+            }
+          } else if (parsedBankDetails.accountType === 'mobile_money') {
+            if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(parsedBankDetails.accountNumber)) {
+              console.log('[SignUp] Invalid mobile money accountNumber:', parsedBankDetails.accountNumber);
+              return res.status(400).json({ error: 'Invalid mobile money number' });
+            }
+          }
+          if (!parsedBankDetails.bankName?.trim()) {
+            console.log('[SignUp] Missing bankName');
+            return res.status(400).json({ error: 'Bank or mobile name required' });
+          }
+        }
+      } catch (error) {
+        console.log('[SignUp] Invalid bankDetails format:', bankDetails);
+        return res.status(400).json({ error: 'Invalid bankDetails format' });
+      }
+    }
+
+    // Check for duplicates
+    console.log('[SignUp] Checking for existing business');
     const existingBusiness = await Business.findOne({ $or: [{ businessId }, { phoneNumber }, { email }] });
     if (existingBusiness) {
+      console.log('[SignUp] Duplicate found:', { businessId, phoneNumber, email });
       return res.status(400).json({ error: 'Business ID, phone number, or email already exists' });
     }
 
+    // Hash PIN
+    console.log('[SignUp] Hashing PIN');
     const hashedPin = await bcrypt.hash(pin, 10);
-    const s3 = new AWS.S3({
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-      region: process.env.AWS_REGION,
-    });
 
+    // Upload files to S3
+    console.log('[SignUp] Uploading files to S3');
     const uploadFile = async (file, key) => {
-      const params = {
-        Bucket: process.env.S3_BUCKET,
-        Key: `zangena/kyc/${key}`,
-        Body: file.buffer,
-        ContentType: file.mimetype,
-      };
-      return s3.upload(params).promise();
+      try {
+        console.log('[SignUp] Uploading:', key);
+        const params = {
+          Bucket: S3_BUCKET,
+          Key: `kyc/${key}`,
+          Body: file.buffer,
+          ContentType: file.mimetype,
+          ACL: 'private',
+        };
+        const result = await s3.upload(params).promise();
+        console.log('[SignUp] Uploaded:', key, result.Location);
+        return result;
+      } catch (error) {
+        console.error('[SignUp] S3 upload failed:', key, error.message);
+        throw new Error(`Failed to upload ${key}: ${error.message}`);
+      }
     };
 
     const [tpinResult, pacraResult] = await Promise.all([
@@ -482,6 +568,13 @@ router.post('/signup', upload.fields([{ name: 'tpinCertificate' }, { name: 'pacr
       uploadFile(pacraCertificate, `${businessId}_pacra_${Date.now()}`),
     ]);
 
+    console.log('[SignUp] S3 uploads successful:', {
+      tpin: tpinResult.Location,
+      pacra: pacraResult.Location
+    });
+
+    // Save business to MongoDB
+    console.log('[SignUp] Saving business to MongoDB');
     const business = new Business({
       businessId,
       name,
@@ -489,7 +582,7 @@ router.post('/signup', upload.fields([{ name: 'tpinCertificate' }, { name: 'pacr
       pin: hashedPin,
       phoneNumber,
       email,
-      bankDetails: bankDetails ? JSON.parse(bankDetails) : undefined,
+      bankDetails: parsedBankDetails,
       tpinCertificate: tpinResult.Location,
       pacraCertificate: pacraResult.Location,
       kycStatus: 'pending',
@@ -497,10 +590,30 @@ router.post('/signup', upload.fields([{ name: 'tpinCertificate' }, { name: 'pacr
     });
 
     await business.save();
+    console.log('[SignUp] Business saved:', businessId);
+
+    // Send email notification
+    if (business.email) {
+      console.log('[SignUp] Queuing email notification');
+      await queueEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
+    }
+
+    // Send push notification to admin
+    const admin = await User.findOne({ role: 'admin' });
+    if (admin && admin.pushToken) {
+      console.log('[SignUp] Sending push notification to admin');
+      await sendPushNotification(
+        admin.pushToken,
+        'New Business Registration',
+        `Business ${name} (${businessId}) needs approval`,
+        { businessId }
+      );
+    }
+
     res.json({ message: 'Business registered successfully' });
   } catch (error) {
-    console.error('SignUp Error:', error.message);
-    res.status(500).json({ error: 'Server error' });
+    console.error('[SignUp] Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
 
@@ -977,7 +1090,7 @@ router.post('/deposit/manual', authenticateToken(['business']), async (req, res)
     }
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
-      await sendPushNotification(admin.pushToken, 'New Business Deposit', `Deposit of ${amount} ZMW from ${business.name} (${business.businessId}) needs approval`, { businessId: business.businessId, transactionId });
+      await sendPushNotification(admin.pushToken, 'New Business Deposit', `Deposit of ${amount} ZMW from ${business.name} (${business.businessId}) needs couleur approval`, { businessId: business.businessId, transactionId });
     }
     res.json({ message: 'Business deposit submitted for verification' });
   } catch (error) {
