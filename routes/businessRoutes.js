@@ -1150,32 +1150,31 @@ router.get('/:id', authenticateToken(['admin']), requireAdmin, async (req, res) 
 });
 
 // Update KYC status
-router.post('/update-kyc', auth, ensureAdmin, async (req, res) => {
+router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId, kycStatus } = req.body;
   if (!businessId || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
-    return res.status(400).json({ error: 'Invalid businessId or kycStatus' });
+    console.log('Invalid request:', { businessId, kycStatus });
+    return res.status(400).json({ error: 'Invalid business ID or KYC status' });
   }
   try {
-    const business = await Business.findOneAndUpdate(
-      { businessId },
-      { kycStatus, updatedAt: new Date() },
-      { new: true }
-    );
+    const business = await Business.findOne({ businessId });
     if (!business) {
+      console.log('Business not found for businessId:', businessId);
       return res.status(404).json({ error: 'Business not found' });
     }
-    res.json({ message: `KYC status updated to ${kycStatus}`, business });
+    business.kycStatus = kycStatus;
+    await business.save();
+    res.json({ message: 'KYC status updated', businessId, kycStatus });
   } catch (error) {
-    console.error('Update KYC error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Update KYC Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to update KYC status' });
   }
 });
 
-// PUT /api/business/toggle-active - Toggle active status for a business
-router.put('/toggle-active', auth, ensureAdmin, async (req, res) => {
+router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId } = req.body;
   if (!businessId) {
-    return res.status(400).json({ error: 'Invalid businessId' });
+    return res.status(400).json({ error: 'Business ID required' });
   }
   try {
     const business = await Business.findOne({ businessId });
@@ -1183,12 +1182,12 @@ router.put('/toggle-active', auth, ensureAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Business not found' });
     }
     business.isActive = !business.isActive;
-    business.updatedAt = new Date();
     await business.save();
-    res.json({ message: `Business ${business.isActive ? 'activated' : 'deactivated'}`, business });
+    const formattedBusiness = convertDecimal128(business.toObject());
+    res.json({ message: `Business ${businessId} is now ${business.isActive ? 'active' : 'inactive'}`, business: formattedBusiness });
   } catch (error) {
-    console.error('Toggle active error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Toggle Active Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to toggle business status' });
   }
 });
 
