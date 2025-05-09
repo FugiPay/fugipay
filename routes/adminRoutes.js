@@ -178,4 +178,123 @@ router.get('/ledger', authenticateToken(['admin']), requireAdmin, async (req, re
   }
 });
 
+router.get('/stats', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  try {
+    const [users, businesses, ledger] = await Promise.all([
+      User.find().lean(),
+      Business.find().lean(),
+      AdminLedger.findOne().lean(),
+    ]);
+    const stats = {
+      totalUsers: users.length,
+      totalUserBalance: users.reduce((sum, u) => sum + u.balance, 0),
+      pendingUserDepositsCount: users.flatMap(u => u.pendingDeposits).filter(d => d.status === 'pending').length,
+      pendingUserWithdrawalsCount: users.flatMap(u => u.pendingWithdrawals).filter(w => w.status === 'pending').length,
+      totalBusinesses: businesses.length,
+      totalBusinessBalance: businesses.reduce((sum, b) => sum + Number(b.balance), 0),
+      pendingBusinessDepositsCount: businesses.flatMap(b => b.pendingDeposits).filter(d => d.status === 'pending').length,
+      pendingBusinessWithdrawalsCount: businesses.flatMap(b => b.pendingWithdrawals).filter(w => w.status === 'pending').length,
+      totalBalance: ledger?.totalBalance || 0,
+      recentTxCount: users
+        .flatMap(u => u.transactions)
+        .concat(businesses.flatMap(b => b.transactions))
+        .filter(tx => new Date(tx.date) > new Date(Date.now() - 24 * 60 * 60 * 1000)).length,
+    };
+    res.json(stats);
+  } catch (error) {
+    console.error('Stats Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+});
+
+router.post('/credit', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { adminUsername, toUsername, amount } = req.body;
+  if (!toUsername || !amount || amount <= 0) {
+    return res.status(400).json({ error: 'Invalid username or amount' });
+  }
+  try {
+    const user = await User.findOne({ username: toUsername });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    user.balance += amount;
+    user.transactions.push({
+      _id: crypto.randomBytes(16).toString('hex'),
+      type: 'credited',
+      amount,
+      toFrom: adminUsername,
+      date: new Date(),
+    });
+    await user.save();
+    if (user.pushToken) {
+      await sendPushNotification(user.pushToken, 'Balance Credited', `Your account was credited ${amount.toFixed(2)} ZMW by admin.`);
+    }
+    res.json({ message: `Credited ${amount} ZMW to ${toUsername}` });
+  } catch (error) {
+    console.error('Credit Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to credit user' });
+  }
+});
+
+router.post('/verify-business-withdrawal', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { businessId, withdrawalIndex, approved } = req.body;
+  console.log('Verify Business Withdrawal Request:', { businessId, withdrawalIndex, approved });
+  try {
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    const withdrawal = business.pendingWithdrawals[withdrawalIndex];
+    if (!withdrawal || withdrawal.status !== 'pending') {
+      return res.status(400).json({ error: 'Invalid or already processed withdrawal' });
+    }
+    if (approved) {
+      const withdrawFee = Number(withdrawal.fee) || Math.max(Number(withdrawal.amount) * 0.01, 2);
+      const totalDeduction = Number(withdrawal.amount) + withdrawFee;
+      if (Number(business.balance) < totalDeduction) {
+        return res.status(400).json({ error: 'Insufficient balance' });
+      }
+      business.balance = Number(business.balance) - totalDeduction;
+      business.transactions.push({
+        _id: crypto.randomBytes(16).toString('hex'),
+        type: 'withdrawn',
+        amount: withdrawal.amount,
+        toFrom: withdrawal.destination?.accountDetails || 'manual-mobile-money',
+        fee: withdrawFee,
+        date: new Date(),
+      });
+      withdrawal.status = 'approved';
+      const adminLedger = await AdminLedger.findOne();
+      if (adminLedger) {
+        adminLedger.totalBalance += withdrawFee;
+        adminLedger.lastUpdated = new Date();
+        await adminLedger.save();
+      }
+    } else {
+      withdrawal.status = 'rejected';
+    }
+    await business.save();
+    if (business.email) {
+      await sendEmail(
+        business.email,
+        `Withdrawal ${approved ? 'Approved' : 'Rejected'}`,
+        `<h2>Withdrawal ${approved ? 'Approved' : 'Rejected'}</h2>
+         <p>Your withdrawal request for ${withdrawal.amount.toFixed(2)} ZMW has been ${approved ? 'approved' : 'rejected'}.</p>
+         <p>Best regards,<br>Zangena Team</p>`
+      );
+    }
+    if (business.pushToken) {
+      await sendPushNotification(
+        business.pushToken,
+        `Withdrawal ${approved ? 'Approved' : 'Rejected'}`,
+        `Your withdrawal of ${withdrawal.amount.toFixed(2)} ZMW was ${approved ? 'approved' : 'rejected'}.`
+      );
+    }
+    res.json({ message: `Business withdrawal ${approved ? 'approved' : 'rejected'}` });
+  } catch (error) {
+    console.error('Verify Business Withdrawal Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to verify business withdrawal' });
+  }
+});
+
 module.exports = router;

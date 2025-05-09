@@ -11,16 +11,22 @@ const adminRoutes = require('./routes/adminRoutes');
 const app = express();
 app.use(express.json());
 
+app.use((err, req, res, next) => {
+  console.error('Error:', err.message, err.stack);
+  res.status(err.status || 500).json({ error: err.message || 'Server error' });
+});
+
 // CORS Configuration
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3002',
-  'http://localhost:19006', // Expo dev
+  'http://localhost:19006',
   'https://nzubo.net',
   'https://nzubo-admin.web.app',
   'https://kayah.net',
   'https://khah-334000.web.app',
   'https://api.ipify.org',
+  'https://zangena-e33a7e55637a.herokuapp.com',
 ];
 
 const corsOptions = {
@@ -48,6 +54,29 @@ app.get('/health', (req, res) => {
 app.get('/wake', (req, res) => {
   console.log('[WAKE] Server pinged');
   res.send('Awake');
+});
+
+const convertDecimal128 = (obj) => {
+  if (Array.isArray(obj)) {
+    return obj.map(convertDecimal128);
+  } else if (obj && typeof obj === 'object') {
+    Object.keys(obj).forEach((key) => {
+      if (obj[key] && obj[key].$numberDecimal) {
+        obj[key] = parseFloat(obj[key].$numberDecimal);
+      } else if (typeof obj[key] === 'object') {
+        obj[key] = convertDecimal128(obj[key]);
+      }
+    });
+  }
+  return obj;
+};
+
+app.use((req, res, next) => {
+  const originalJson = res.json;
+  res.json = function (data) {
+    return originalJson.call(this, convertDecimal128(data));
+  };
+  next();
 });
 
 // Routes

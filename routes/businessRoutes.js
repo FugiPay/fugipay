@@ -1105,12 +1105,28 @@ router.post('/register-push-token', authenticateToken(['business']), async (req,
 // Get all businesses
 router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   try {
-    const businesses = await Business.find()
-      .select('businessId name balance kycStatus pendingDeposits pendingWithdrawals transactions zambiaCoinBalance')
-      .lean();
-    // Convert all Decimal128 fields to numbers
+    const { page = 1, limit = 10, search = '' } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
+    const query = search
+      ? {
+          $or: [
+            { businessId: { $regex: search, $options: 'i' } },
+            { name: { $regex: search, $options: 'i' } },
+            { ownerUsername: { $regex: search, $options: 'i' } },
+            { phoneNumber: { $regex: search, $options: 'i' } },
+          ],
+        }
+      : {};
+    const [businesses, total] = await Promise.all([
+      Business.find(query)
+        .select('businessId name balance kycStatus pendingDeposits pendingWithdrawals transactions zambiaCoinBalance')
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+      Business.countDocuments(query),
+    ]);
     const formattedBusinesses = businesses.map(business => convertDecimal128(business));
-    res.json(formattedBusinesses);
+    res.json({ businesses: formattedBusinesses, total, page: Number(page), limit: Number(limit) });
   } catch (error) {
     console.error('Fetch Businesses Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch businesses' });
@@ -1134,24 +1150,45 @@ router.get('/:id', authenticateToken(['admin']), requireAdmin, async (req, res) 
 });
 
 // Update KYC status
-router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+router.post('/update-kyc', auth, ensureAdmin, async (req, res) => {
   const { businessId, kycStatus } = req.body;
   if (!businessId || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
-    console.log('Invalid request:', { businessId, kycStatus });
-    return res.status(400).json({ error: 'Invalid business ID or KYC status' });
+    return res.status(400).json({ error: 'Invalid businessId or kycStatus' });
+  }
+  try {
+    const business = await Business.findOneAndUpdate(
+      { businessId },
+      { kycStatus, updatedAt: new Date() },
+      { new: true }
+    );
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    res.json({ message: `KYC status updated to ${kycStatus}`, business });
+  } catch (error) {
+    console.error('Update KYC error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/business/toggle-active - Toggle active status for a business
+router.put('/toggle-active', auth, ensureAdmin, async (req, res) => {
+  const { businessId } = req.body;
+  if (!businessId) {
+    return res.status(400).json({ error: 'Invalid businessId' });
   }
   try {
     const business = await Business.findOne({ businessId });
     if (!business) {
-      console.log('Business not found for businessId:', businessId);
       return res.status(404).json({ error: 'Business not found' });
     }
-    business.kycStatus = kycStatus;
+    business.isActive = !business.isActive;
+    business.updatedAt = new Date();
     await business.save();
-    res.json({ message: 'KYC status updated', businessId, kycStatus });
+    res.json({ message: `Business ${business.isActive ? 'activated' : 'deactivated'}`, business });
   } catch (error) {
-    console.error('Update KYC Error:', error.message, error.stack);
-    res.status(500).json({ error: 'Failed to update KYC status' });
+    console.error('Toggle active error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

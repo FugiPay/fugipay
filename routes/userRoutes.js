@@ -78,10 +78,26 @@ const requireAdmin = async (req, res, next) => {
 // Get all users
 router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   try {
-    const users = await User.find().select(
-      'username phoneNumber balance kycStatus trustScore pendingDeposits pendingWithdrawals transactions'
-    ).lean();
-    res.json(users);
+    const { page = 1, limit = 10, search = '' } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
+    const query = search
+      ? {
+          $or: [
+            { username: { $regex: search, $options: 'i' } },
+            { phoneNumber: { $regex: search, $options: 'i' } },
+            { email: { $regex: search, $options: 'i' } },
+          ],
+        }
+      : {};
+    const [users, total] = await Promise.all([
+      User.find(query)
+        .select('username phoneNumber balance kycStatus trustScore pendingDeposits pendingWithdrawals transactions')
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+      User.countDocuments(query),
+    ]);
+    res.json({ users, total, page: Number(page), limit: Number(limit) });
   } catch (error) {
     console.error('Fetch Users Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch users' });
@@ -915,6 +931,62 @@ router.patch('/update-timestamp', authenticateToken(['user']), async (req, res) 
       stack: error.stack,
     });
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { username } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: 'Username required' });
+  }
+  try {
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    user.isActive = !user.isActive;
+    await user.save();
+    res.json({ message: `User ${username} is now ${user.isActive ? 'active' : 'inactive'}` });
+  } catch (error) {
+    console.error('Toggle Active Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to toggle user status' });
+  }
+});
+
+router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { username } = req.params;
+  const { startDate, endDate, limit = 50, skip = 0 } = req.query;
+  try {
+    const query = { username };
+    const transactionQuery = {};
+    if (startDate || endDate) {
+      transactionQuery.date = {};
+      if (startDate) transactionQuery.date.$gte = new Date(startDate);
+      if (endDate) transactionQuery.date.$lte = new Date(endDate);
+    }
+    const user = await User.findOne(query).lean();
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const transactions = user.transactions
+      .filter(tx => {
+        if (startDate && new Date(tx.date) < new Date(startDate)) return false;
+        if (endDate && new Date(tx.date) > new Date(endDate)) return false;
+        return true;
+      })
+      .slice(Number(skip), Number(skip) + Number(limit))
+      .map(tx => ({
+        _id: tx._id,
+        type: tx.type,
+        amount: tx.amount,
+        toFrom: tx.toFrom,
+        fee: tx.fee,
+        date: tx.date,
+      }));
+    res.json({ transactions, total: user.transactions.length });
+  } catch (error) {
+    console.error('Fetch Transactions Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to fetch transactions' });
   }
 });
 
