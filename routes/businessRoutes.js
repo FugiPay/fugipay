@@ -1150,7 +1150,7 @@ router.get('/:id', authenticateToken(['admin']), requireAdmin, async (req, res) 
 });
 
 // Update KYC status
-// POST /api/business/update-kyc - Update KYC status for a business
+// Update KYC status
 router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId, kycStatus } = req.body;
   if (!businessId || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
@@ -1159,7 +1159,11 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (re
   try {
     const business = await Business.findOneAndUpdate(
       { businessId },
-      { kycStatus, updatedAt: new Date() },
+      { 
+        kycStatus, 
+        isActive: kycStatus === 'verified' ? true : kycStatus === 'rejected' ? false : business.isActive,
+        updatedAt: new Date() 
+      },
       { new: true }
     );
     if (!business) {
@@ -1172,8 +1176,8 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (re
   }
 });
 
-// PUT /api/business/toggle-active - Toggle active status for a business
-router.put('/toggle-active',  authenticateToken(['admin']), requireAdmin, async (req, res) => {
+// Toggle active status for a business
+router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId } = req.body;
   if (!businessId) {
     return res.status(400).json({ error: 'Invalid businessId' });
