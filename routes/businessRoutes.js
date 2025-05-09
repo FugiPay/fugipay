@@ -1151,7 +1151,7 @@ router.get('/:id', authenticateToken(['admin']), requireAdmin, async (req, res) 
 
 // Update KYC status
 // POST /api/business/update-kyc - Update KYC status for a business
-router.post('/update-kyc', auth, ensureAdmin, async (req, res) => {
+router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId, kycStatus } = req.body;
   if (!businessId || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
     return res.status(400).json({ error: 'Invalid businessId or kycStatus' });
@@ -1173,7 +1173,7 @@ router.post('/update-kyc', auth, ensureAdmin, async (req, res) => {
 });
 
 // PUT /api/business/toggle-active - Toggle active status for a business
-router.put('/toggle-active', auth, ensureAdmin, async (req, res) => {
+router.put('/toggle-active',  authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId } = req.body;
   if (!businessId) {
     return res.status(400).json({ error: 'Invalid businessId' });
