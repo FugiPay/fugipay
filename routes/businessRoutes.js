@@ -1150,7 +1150,6 @@ router.get('/:id', authenticateToken(['admin']), requireAdmin, async (req, res) 
 });
 
 // Update KYC status
-// Update KYC status
 router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId, kycStatus } = req.body;
   if (!businessId || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
@@ -1159,11 +1158,7 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (re
   try {
     const business = await Business.findOneAndUpdate(
       { businessId },
-      { 
-        kycStatus, 
-        isActive: kycStatus === 'verified' ? true : kycStatus === 'rejected' ? false : business.isActive,
-        updatedAt: new Date() 
-      },
+      { kycStatus, updatedAt: new Date() }, // Only update kycStatus, leave isActive unchanged
       { new: true }
     );
     if (!business) {
@@ -1187,7 +1182,7 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
     if (!business) {
       return res.status(404).json({ error: 'Business not found' });
     }
-    business.isActive = !business.isActive; // Toggle independently of kycStatus
+    business.isActive = !business.isActive;
     business.updatedAt = new Date();
     await business.save();
     res.json({ message: `Business ${business.isActive ? 'activated' : 'deactivated'}`, business });
