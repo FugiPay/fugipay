@@ -1187,7 +1187,7 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
     if (!business) {
       return res.status(404).json({ error: 'Business not found' });
     }
-    business.isActive = !business.isActive;
+    business.isActive = !business.isActive; // Toggle independently of kycStatus
     business.updatedAt = new Date();
     await business.save();
     res.json({ message: `Business ${business.isActive ? 'activated' : 'deactivated'}`, business });
