@@ -1182,14 +1182,15 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
     if (!business) {
       return res.status(404).json({ error: 'Business not found' });
     }
+    console.log(`Before toggle: businessId=${businessId}, isActive=${business.isActive}`);
     business.isActive = !business.isActive;
     business.updatedAt = new Date();
     await business.save();
+    console.log(`After toggle: businessId=${businessId}, isActive=${business.isActive}`);
     res.json({ message: `Business ${business.isActive ? 'activated' : 'deactivated'}`, business });
   } catch (error) {
     console.error('Toggle active error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
-
 module.exports = router;
