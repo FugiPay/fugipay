@@ -1187,6 +1187,8 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
     business.updatedAt = new Date();
     await business.save();
     console.log(`After toggle: businessId=${businessId}, isActive=${business.isActive}`);
+    // Invalidate cache if used
+    await redis.del(`business:${businessId}`);
     res.json({ message: `Business ${business.isActive ? 'activated' : 'deactivated'}`, business });
   } catch (error) {
     console.error('Toggle active error:', error);
