@@ -1168,6 +1168,7 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
     }
     console.log(`Before toggle: businessId=${businessId}, isActive=${business.isActive}`);
     const newIsActive = !business.isActive;
+    // Use updateOne to avoid validation
     const updateResult = await Business.updateOne(
       { businessId },
       { $set: { isActive: newIsActive, updatedAt: new Date() } }
@@ -1177,10 +1178,17 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
       return res.status(404).json({ error: 'Business not found during update' });
     }
     console.log(`After toggle: businessId=${businessId}, isActive=${newIsActive}`);
+    // Invalidate cache if used
+    if (redis) {
+      console.log(`Invalidating cache for business:${businessId}`);
+      await redis.del(`business:${businessId}`);
+      console.log(`Cache invalidated for business:${businessId}`);
+    }
+    // Fetch updated business for response
     const updatedBusiness = await Business.findOne({ businessId });
     res.json({ message: `Business ${newIsActive ? 'activated' : 'deactivated'}`, business: updatedBusiness });
   } catch (error) {
-    console.error('Toggle active error:', error.message);
+    console.error('Toggle active error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
