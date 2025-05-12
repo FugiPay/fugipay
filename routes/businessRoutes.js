@@ -1086,33 +1086,47 @@ router.post('/register-push-token', authenticateToken(['business']), async (req,
   }
 });
 
-// Get all businesses
+// Get businesses with pagination and search
 router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   try {
     const { page = 1, limit = 10, search = '' } = req.query;
-    const skip = (Number(page) - 1) * Number(limit);
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+
     const query = search
       ? {
           $or: [
             { businessId: { $regex: search, $options: 'i' } },
-            { name: { $regex: search, $options: 'i' } },
-            { ownerUsername: { $regex: search, $options: 'i' } },
-            { phoneNumber: { $regex: search, $options: 'i' } },
-          ],
+            { name: { $regex: search, $options: 'i' } }
+          ]
         }
       : {};
-    const [businesses, total] = await Promise.all([
-      Business.find(query)
-        .select('businessId name balance kycStatus pendingDeposits pendingWithdrawals transactions zambiaCoinBalance')
-        .skip(skip)
-        .limit(Number(limit))
-        .lean(),
-      Business.countDocuments(query),
-    ]);
-    const formattedBusinesses = businesses.map(business => convertDecimal128(business));
-    res.json({ businesses: formattedBusinesses, total, page: Number(page), limit: Number(limit) });
+
+    const businesses = await Business.find(query)
+      .select('businessId name isActive balance zambiaCoinBalance')
+      .skip((pageNum - 1) * limitNum)
+      .limit(limitNum)
+      .lean();
+
+    const total = await Business.countDocuments(query);
+
+    res.status(200).json({
+      businesses: businesses.map(b => ({
+        businessId: b.businessId,
+        name: b.name || '',
+        isActive: b.isActive === true,
+        balance: Number(b.balance) || 0,
+        zambiaCoinBalance: Number(b.zambiaCoinBalance) || 0
+      })),
+      total,
+      page: pageNum,
+      totalPages: Math.ceil(total / limitNum) || 1
+    });
   } catch (error) {
-    console.error('Fetch Businesses Error:', error.message);
+    console.error('Error fetching businesses:', {
+      message: error.message,
+      stack: error.stack
+    });
     res.status(500).json({ error: 'Failed to fetch businesses' });
   }
 });
