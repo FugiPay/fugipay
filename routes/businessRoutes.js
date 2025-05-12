@@ -1158,37 +1158,51 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (re
 // Toggle active status for a business
 router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId } = req.body;
-  if (!businessId) {
-    return res.status(400).json({ error: 'Invalid businessId' });
-  }
+
   try {
+    if (!businessId) {
+      console.error('Toggle error: Missing businessId');
+      return res.status(400).json({ error: 'Invalid businessId' });
+    }
+
     const business = await Business.findOne({ businessId });
     if (!business) {
+      console.error(`Toggle error: Business not found for businessId=${businessId}`);
       return res.status(404).json({ error: 'Business not found' });
     }
+
     console.log(`Before toggle: businessId=${businessId}, isActive=${business.isActive}`);
     const newIsActive = !business.isActive;
-    // Use updateOne to avoid validation
+
     const updateResult = await Business.updateOne(
       { businessId },
       { $set: { isActive: newIsActive, updatedAt: new Date() } }
     );
+
     console.log(`Update result: matched=${updateResult.matchedCount}, modified=${updateResult.modifiedCount}`);
     if (updateResult.matchedCount === 0) {
+      console.error(`Toggle error: No business matched for businessId=${businessId}`);
       return res.status(404).json({ error: 'Business not found during update' });
     }
-    console.log(`After toggle: businessId=${businessId}, isActive=${newIsActive}`);
-    // Invalidate cache if used
-    if (redis) {
-      console.log(`Invalidating cache for business:${businessId}`);
-      await redis.del(`business:${businessId}`);
-      console.log(`Cache invalidated for business:${businessId}`);
-    }
-    // Fetch updated business for response
+
     const updatedBusiness = await Business.findOne({ businessId });
-    res.json({ message: `Business ${newIsActive ? 'activated' : 'deactivated'}`, business: updatedBusiness });
+    console.log(`After toggle: businessId=${businessId}, isActive=${updatedBusiness.isActive}`);
+
+    res.status(200).json({
+      message: updatedBusiness.isActive ? 'Business activated' : 'Business deactivated',
+      business: {
+        businessId: updatedBusiness.businessId,
+        name: updatedBusiness.name || '',
+        isActive: updatedBusiness.isActive,
+        balance: updatedBusiness.balance || 0,
+        zambiaCoinBalance: updatedBusiness.zambiaCoinBalance || 0
+      }
+    });
   } catch (error) {
-    console.error('Toggle active error:', error);
+    console.error(`Toggle active error for businessId=${businessId}:`, {
+      message: error.message,
+      stack: error.stack
+    });
     res.status(500).json({ error: 'Server error' });
   }
 });
