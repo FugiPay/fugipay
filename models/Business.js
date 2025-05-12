@@ -69,11 +69,8 @@ const businessSchema = new mongoose.Schema({
     sparse: true,
     match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email address'],
   },
-  pin: {
-    type: String,
-    required: true,
-    match: [/^\d{4}$/, 'PIN must be a 4-digit number'],
-  },
+  pin: { type: String }, // Temporary 4-digit PIN, cleared after hashing
+  hashedPin: { type: String, required: true }, // Stores bcrypt hash
   resetToken: { type: String },
   resetTokenExpiry: { type: Date },
   balance: { type: mongoose.Schema.Types.Decimal128, default: 0 },
@@ -84,8 +81,8 @@ const businessSchema = new mongoose.Schema({
     accountNumber: String,
     accountType: { type: String, enum: ['bank', 'mobile_money', 'zambia_coin'] },
   },
-  tpinCertificate: { type: String, default: null }, // Made optional
-  pacraCertificate: { type: String, default: null }, // Made optional
+  tpinCertificate: { type: String, default: null },
+  pacraCertificate: { type: String, default: null },
   kycStatus: { type: String, enum: ['pending', 'verified', 'rejected'], default: 'pending' },
   role: { type: String, enum: ['business', 'admin'], default: 'business' },
   trustScore: { type: Number, default: 0, min: 0, max: 100 },
@@ -99,8 +96,12 @@ const businessSchema = new mongoose.Schema({
 
 // Hash PIN before saving
 businessSchema.pre('save', async function (next) {
-  if (this.isModified('pin')) {
-    this.pin = await bcrypt.hash(this.pin, 10);
+  if (this.isModified('pin') && this.pin) {
+    if (!/^\d{4}$/.test(this.pin)) {
+      return next(new Error('PIN must be a 4-digit number'));
+    }
+    this.hashedPin = await bcrypt.hash(this.pin, 10);
+    this.pin = undefined; // Clear plain PIN
   }
   next();
 });

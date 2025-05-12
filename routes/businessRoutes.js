@@ -304,21 +304,6 @@ const convertDecimal128 = (obj) => {
   return obj;
 };
 
-// Get all businesses (with optional kycStatus filter)
-/* router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
-  try {
-    const { kycStatus } = req.query;
-    const query = kycStatus ? { kycStatus } : {};
-    const businesses = await Business.find(query).select(
-      'businessId name ownerUsername email phoneNumber balance kycStatus tpinCertificate pacraCertificate pendingDeposits isActive'
-    );
-    res.json(businesses);
-  } catch (error) {
-    console.error('[BusinessFetch] Error:', error.message);
-    res.status(500).json({ error: 'Failed to fetch businesses' });
-  }
-}); */
-
 // Verify KYC for a business
 router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId, approved, rejectionReason } = req.body;
@@ -523,13 +508,12 @@ router.post('/register', uploadS3.fields([
       return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
     }
 
-    const hashedPin = await bcrypt.hash(pin, 10);
     const qrCodeData = JSON.stringify({ type: 'business_payment', businessId, businessName: name });
     const business = new Business({
       businessId,
       name,
       ownerUsername,
-      pin: hashedPin,
+      pin, // Will be hashed to hashedPin in pre('save')
       phoneNumber,
       email,
       bankDetails: bankDetails && (bankDetails.bankName || bankDetails.accountNumber) ? {
@@ -583,7 +567,7 @@ router.post('/login', async (req, res) => {
     const business = await Business.findOne({ businessId });
     if (!business) return res.status(400).json({ error: 'Invalid credentials' });
     if (!business.isActive) return res.status(403).json({ error: 'Business not approved or inactive' });
-    const isMatch = await bcrypt.compare(pin, business.pin);
+    const isMatch = await bcrypt.compare(pin, business.hashedPin);
     if (!isMatch) return res.status(400).json({ error: 'Invalid PIN' });
     const token = jwt.sign({ businessId, role: business.role, ownerUsername: business.ownerUsername }, JWT_SECRET, { expiresIn: '30d' });
     res.status(200).json({ token, businessId, role: business.role, kycStatus: business.kycStatus });
@@ -612,7 +596,7 @@ router.post('/signin', async (req, res) => {
     if (business.kycStatus !== 'verified') {
       return res.status(403).json({ error: 'Business KYC is not yet verified by admin' });
     }
-    const isMatch = await bcrypt.compare(pin, business.pin);
+    const isMatch = await bcrypt.compare(pin, business.hashedPin);
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid PIN' });
     }
@@ -687,7 +671,7 @@ router.post('/reset-pin', async (req, res) => {
     if (!business.resetToken || business.resetToken !== resetToken || business.resetTokenExpiry < Date.now()) {
       return res.status(401).json({ error: 'Invalid or expired reset token' });
     }
-    business.pin = await bcrypt.hash(newPin, 10);
+    business.pin = newPin; // Will be hashed to hashedPin in pre('save')
     business.resetToken = null;
     business.resetTokenExpiry = null;
     await business.save();
@@ -1158,7 +1142,7 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (re
   try {
     const business = await Business.findOneAndUpdate(
       { businessId },
-      { kycStatus, updatedAt: new Date() }, // Only update kycStatus, leave isActive unchanged
+      { kycStatus, updatedAt: new Date() },
       { new: true }
     );
     if (!business) {
@@ -1183,13 +1167,23 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
       return res.status(404).json({ error: 'Business not found' });
     }
     console.log(`Before toggle: businessId=${businessId}, isActive=${business.isActive}`);
-    business.isActive = !business.isActive;
-    business.updatedAt = new Date();
-    await business.save();
-    console.log(`After toggle: businessId=${businessId}, isActive=${business.isActive}`);
-    // Invalidate cache if used
-    await redis.del(`business:${businessId}`);
-    res.json({ message: `Business ${business.isActive ? 'activated' : 'deactivated'}`, business });
+    const newIsActive = !business.isActive;
+    const updateResult = await Business.updateOne(
+      { businessId },
+      { $set: { isActive: newIsActive, updatedAt: new Date() } }
+    );
+    console.log(`Update result: matched=${updateResult.matchedCount}, modified=${updateResult.modifiedCount}`);
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({ error: 'Business not found during update' });
+    }
+    console.log(`After toggle: businessId=${businessId}, isActive=${newIsActive}`);
+    if (redis) {
+      console.log(`Invalidating cache for business:${businessId}`);
+      await redis.del(`business:${businessId}`);
+      console.log(`Cache invalidated for business:${businessId}`);
+    }
+    const updatedBusiness = await Business.findOne({ businessId });
+    res.json({ message: `Business ${newIsActive ? 'activated' : 'deactivated'}`, business: updatedBusiness });
   } catch (error) {
     console.error('Toggle active error:', error);
     res.status(500).json({ error: 'Server error' });
