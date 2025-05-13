@@ -281,7 +281,7 @@ const requireAdmin = async (req, res, next) => {
 
 // Helper function to convert Decimal128 fields to numbers
 const convertDecimal128 = (obj) => {
-  if (obj === null || obj === undefined) return null; // Return null for null/undefined
+  if (obj === null || obj === undefined) return null;
   if (obj.constructor.name === 'Decimal128') {
     const strValue = obj.toString();
     return isNaN(strValue) ? 0 : parseFloat(strValue);
@@ -299,163 +299,18 @@ const convertDecimal128 = (obj) => {
   return obj;
 };
 
-// Verify KYC for a business
-router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
-  const { businessId, approved, rejectionReason } = req.body;
+// Debug Dashboard (temporary)
+router.get('/debug-dashboard', authenticateToken(['business']), async (req, res) => {
   try {
-    if (!businessId || typeof approved !== 'boolean') {
-      return res.status(400).json({ error: 'businessId and approved status required' });
-    }
-    const business = await Business.findOne({ businessId });
-    if (!business) {
-      return res.status(404).json({ error: 'Business not found' });
-    }
-    if (business.kycStatus !== 'pending') {
-      return res.status(400).json({ error: 'KYC already processed' });
-    }
-    business.kycStatus = approved ? 'verified' : 'rejected';
-    business.isActive = approved;
-    if (!approved) {
-      business.rejectionReason = rejectionReason || 'KYC documents invalid';
-    }
-    await business.save();
-    if (business.email) {
-      await sendEmail(business.email, `KYC ${approved ? 'Approved' : 'Rejected'}`, `
-        <h2>KYC Status Update</h2>
-        <p>Dear ${business.name},</p>
-        <p>Your KYC verification has been ${approved ? 'approved' : 'rejected'}.</p>
-        ${!approved ? `<p><strong>Reason:</strong> ${rejectionReason || 'Invalid documents'}</p>` : ''}
-        <p>${approved ? 'You can now use your Zangena account fully.' : 'Please contact support for assistance.'}</p>
-        <p>Best regards,<br>Zangena Team</p>
-      `);
-    }
-    res.json({ message: `KYC ${approved ? 'approved' : 'rejected'}` });
+    console.log('[DebugDashboard] Fetching for businessId:', req.user?.businessId, 'User:', req.user);
+    res.json({ businessId: req.user?.businessId, user: req.user });
   } catch (error) {
-    console.error('[VerifyKYC] Error:', error.message);
-    res.status(500).json({ error: 'Failed to verify KYC', details: error.message });
-  }
-});
-
-// Consolidated Registration Route
-router.post('/register', uploadS3.fields([
-  { name: 'tpinCertificate', maxCount: 1 },
-  { name: 'pacraCertificate', maxCount: 1 },
-]), async (req, res) => {
-  const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
-  const tpinCertificate = req.files?.tpinCertificate?.[0];
-  const pacraCertificate = req.files?.pacraCertificate?.[0];
-
-  try {
-    // Input Validation
-    if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !tpinCertificate || !pacraCertificate) {
-      return res.status(400).json({ error: 'Business ID, name, username, PIN, phone number, TPIN certificate, and PACRA certificate required' });
-    }
-    if (!/^\d{10}$/.test(businessId)) {
-      return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
-    }
-    if (!/^[a-zA-Z0-9]{3,}$/.test(ownerUsername)) {
-      return res.status(400).json({ error: 'Username must be at least 3 alphanumeric characters' });
-    }
-    if (!/^\d{4}$/.test(pin)) {
-      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-    }
-    if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(phoneNumber)) {
-      return res.status(400).json({ error: 'Invalid Zambian phone number' });
-    }
-    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return res.status(400).json({ error: 'Invalid email address' });
-    }
-    let parsedBankDetails;
-    if (bankDetails) {
-      try {
-        parsedBankDetails = typeof bankDetails === 'string' ? JSON.parse(bankDetails) : bankDetails;
-        if (!['bank', 'mobile_money', 'zambia_coin'].includes(parsedBankDetails.accountType)) {
-          return res.status(400).json({ error: 'Account type must be bank, mobile_money, or zambia_coin' });
-        }
-        if (parsedBankDetails.accountNumber) {
-          if (parsedBankDetails.accountType === 'bank' && !/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
-            return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
-          }
-          if (parsedBankDetails.accountType === 'mobile_money' && !/^\+260(9[5678]|7[34679])\d{7}$/.test(parsedBankDetails.accountNumber)) {
-            return res.status(400).json({ error: 'Invalid mobile money number' });
-          }
-          if (!parsedBankDetails.bankName?.trim()) {
-            return res.status(400).json({ error: 'Bank or mobile name required' });
-          }
-        }
-      } catch (error) {
-        return res.status(400).json({ error: 'Invalid bankDetails format' });
-      }
-    }
-
-    // Check for duplicates
-    const existingBusiness = await Business.findOne({
-      $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}].filter(Boolean),
-    });
-    if (existingBusiness) {
-      return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
-    }
-
-    // Generate QR code data
-    const qrCodeData = JSON.stringify({ type: 'business_payment', businessId, businessName: name });
-
-    // Hash PIN
-    const hashedPin = await bcrypt.hash(pin, 10);
-
-    // Create business
-    const business = new Business({
-      businessId,
-      name,
-      ownerUsername,
-      hashedPin,
-      phoneNumber,
-      email,
-      bankDetails: parsedBankDetails && (parsedBankDetails.bankName || parsedBankDetails.accountNumber) ? {
-        bankName: parsedBankDetails.bankName?.trim(),
-        accountNumber: parsedBankDetails.accountNumber,
-        accountType: parsedBankDetails.accountType,
-      } : null,
-      tpinCertificate: tpinCertificate?.location,
-      pacraCertificate: pacraCertificate?.location,
-      qrCode: qrCodeData,
-      balance: mongoose.Types.Decimal128.fromString('0'),
-      zambiaCoinBalance: mongoose.Types.Decimal128.fromString('0'),
-      transactions: [],
-      pendingDeposits: [],
-      pendingWithdrawals: [],
-      kycStatus: 'pending',
-      role: 'business',
-      isActive: false,
-    });
-
-    await business.save();
-
-    // Notifications
-    if (business.email) {
-      await sendEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
-    }
-    const admin = await User.findOne({ role: 'admin' });
-    if (admin && admin.pushToken) {
-      await sendPushNotification(
-        admin.pushToken,
-        'New Business Registration',
-        `Business ${name} (${businessId}) needs approval`,
-        { businessId }
-      );
-    }
-
-    res.status(201).json({
-      message: 'Business registered, awaiting approval',
-      business: { businessId, name, kycStatus: 'pending' },
-    });
-  } catch (error) {
-    console.error('[BusinessRegister] Error:', error.message, error.stack);
-    res.status(500).json({ error: 'Server error during business registration', details: error.message });
+    console.error('[DebugDashboard] Error:', error.message);
+    res.status(500).json({ error: 'Debug error' });
   }
 });
 
 // Consolidated Login Route
-// Login
 router.post('/login', async (req, res) => {
   const { businessId, pin } = req.body;
   try {
@@ -478,13 +333,23 @@ router.post('/login', async (req, res) => {
       console.error('[Login] Business not found:', businessId);
       return res.status(404).json({ error: 'Business not found' });
     }
+    console.log('[Login] Business document:', {
+      businessId: business.businessId,
+      hashedPin: business.hashedPin ? '[REDACTED]' : 'undefined',
+      isActive: business.isActive,
+      fields: Object.keys(business),
+    });
     if (!business.isActive) {
       console.error('[Login] Business inactive:', businessId);
       return res.status(403).json({ error: 'Business is inactive' });
     }
 
-    // Compare PIN (assuming PIN is hashed in the database)
-    const isPinValid = await bcrypt.compare(pin, business.pin);
+    if (!business.hashedPin) {
+      console.error('[Login] No hashedPin field in business document:', businessId);
+      return res.status(400).json({ error: 'No PIN set for this business' });
+    }
+
+    const isPinValid = await bcrypt.compare(pin, business.hashedPin);
     if (!isPinValid) {
       console.error('[Login] Invalid PIN for businessId:', businessId);
       return res.status(401).json({ error: 'Invalid PIN' });
@@ -1000,7 +865,7 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     const withdrawal = {
       amount: mongoose.Types.Decimal128.fromString(withdrawalAmount.toString()),
       fee: mongoose.Types.Decimal128.fromString(withdrawalFee.toString()),
-      date: new Date(),
+      date: New Date(),
       status: 'pending',
       destination,
     };
@@ -1164,6 +1029,161 @@ router.post('/admin/reset-all-pins', authenticateToken(['admin']), requireAdmin,
   } catch (error) {
     console.error('[ResetAllPins] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to reset PINs', details: error.message });
+  }
+});
+
+// Verify KYC for a business
+router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { businessId, approved, rejectionReason } = req.body;
+  try {
+    if (!businessId || typeof approved !== 'boolean') {
+      return res.status(400).json({ error: 'businessId and approved status required' });
+    }
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    if (business.kycStatus !== 'pending') {
+      return res.status(400).json({ error: 'KYC already processed' });
+    }
+    business.kycStatus = approved ? 'verified' : 'rejected';
+    business.isActive = approved;
+    if (!approved) {
+      business.rejectionReason = rejectionReason || 'KYC documents invalid';
+    }
+    await business.save();
+    if (business.email) {
+      await sendEmail(business.email, `KYC ${approved ? 'Approved' : 'Rejected'}`, `
+        <h2>KYC Status Update</h2>
+        <p>Dear ${business.name},</p>
+        <p>Your KYC verification has been ${approved ? 'approved' : 'rejected'}.</p>
+        ${!approved ? `<p><strong>Reason:</strong> ${rejectionReason || 'Invalid documents'}</p>` : ''}
+        <p>${approved ? 'You can now use your Zangena account fully.' : 'Please contact support for assistance.'}</p>
+        <p>Best regards,<br>Zangena Team</p>
+      `);
+    }
+    res.json({ message: `KYC ${approved ? 'approved' : 'rejected'}` });
+  } catch (error) {
+    console.error('[VerifyKYC] Error:', error.message);
+    res.status(500).json({ error: 'Failed to verify KYC', details: error.message });
+  }
+});
+
+// Consolidated Registration Route
+router.post('/register', uploadS3.fields([
+  { name: 'tpinCertificate', maxCount: 1 },
+  { name: 'pacraCertificate', maxCount: 1 },
+]), async (req, res) => {
+  const { businessId, name, ownerUsername, pin, phoneNumber, email, bankDetails } = req.body;
+  const tpinCertificate = req.files?.tpinCertificate?.[0];
+  const pacraCertificate = req.files?.pacraCertificate?.[0];
+
+  try {
+    // Input Validation
+    if (!businessId || !name || !ownerUsername || !pin || !phoneNumber || !tpinCertificate || !pacraCertificate) {
+      return res.status(400).json({ error: 'Business ID, name, username, PIN, phone number, TPIN certificate, and PACRA certificate required' });
+    }
+    if (!/^\d{10}$/.test(businessId)) {
+      return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+    }
+    if (!/^[a-zA-Z0-9]{3,}$/.test(ownerUsername)) {
+      return res.status(400).json({ error: 'Username must be at least 3 alphanumeric characters' });
+    }
+    if (!/^\d{4}$/.test(pin)) {
+      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+    }
+    if (!/^\+260(9[5678]|7[34679])\d{7}$/.test(phoneNumber)) {
+      return res.status(400).json({ error: 'Invalid Zambian phone number' });
+    }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+    let parsedBankDetails;
+    if (bankDetails) {
+      try {
+        parsedBankDetails = typeof bankDetails === 'string' ? JSON.parse(bankDetails) : bankDetails;
+        if (!['bank', 'mobile_money', 'zambia_coin'].includes(parsedBankDetails.accountType)) {
+          return res.status(400).json({ error: 'Account type must be bank, mobile_money, or zambia_coin' });
+        }
+        if (parsedBankDetails.accountNumber) {
+          if (parsedBankDetails.accountType === 'bank' && !/^\d{10,12}$/.test(parsedBankDetails.accountNumber)) {
+            return res.status(400).json({ error: 'Bank account must be 10-12 digits' });
+          }
+          if (parsedBankDetails.accountType === 'mobile_money' && !/^\+260(9[5678]|7[34679])\d{7}$/.test(parsedBankDetails.accountNumber)) {
+            return res.status(400).json({ error: 'Invalid mobile money number' });
+          }
+          if (!parsedBankDetails.bankName?.trim()) {
+            return res.status(400).json({ error: 'Bank or mobile name required' });
+          }
+        }
+      } catch (error) {
+        return res.status(400).json({ error: 'Invalid bankDetails format' });
+      }
+    }
+
+    // Check for duplicates
+    const existingBusiness = await Business.findOne({
+      $or: [{ businessId }, { ownerUsername }, { phoneNumber }, email ? { email } : {}].filter(Boolean),
+    });
+    if (existingBusiness) {
+      return res.status(409).json({ error: 'TPIN, username, phone, or email already taken' });
+    }
+
+    // Generate QR code data
+    const qrCodeData = JSON.stringify({ type: 'business_payment', businessId, businessName: name });
+
+    // Hash PIN
+    const hashedPin = await bcrypt.hash(pin, 10);
+
+    // Create business
+    const business = new Business({
+      businessId,
+      name,
+      ownerUsername,
+      hashedPin,
+      phoneNumber,
+      email,
+      bankDetails: parsedBankDetails && (parsedBankDetails.bankName || parsedBankDetails.accountNumber) ? {
+        bankName: parsedBankDetails.bankName?.trim(),
+        accountNumber: parsedBankDetails.accountNumber,
+        accountType: parsedBankDetails.accountType,
+      } : null,
+      tpinCertificate: tpinCertificate?.location,
+      pacraCertificate: pacraCertificate?.location,
+      qrCode: qrCodeData,
+      balance: mongoose.Types.Decimal128.fromString('0'),
+      zambiaCoinBalance: mongoose.Types.Decimal128.fromString('0'),
+      transactions: [],
+      pendingDeposits: [],
+      pendingWithdrawals: [],
+      kycStatus: 'pending',
+      role: 'business',
+      isActive: false,
+    });
+
+    await business.save();
+
+    // Notifications
+    if (business.email) {
+      await sendEmail(business.email, 'Business Registration Submitted', emailTemplates.signup(business));
+    }
+    const admin = await User.findOne({ role: 'admin' });
+    if (admin && admin.pushToken) {
+      await sendPushNotification(
+        admin.pushToken,
+        'New Business Registration',
+        `Business ${name} (${businessId}) needs approval`,
+        { businessId }
+      );
+    }
+
+    res.status(201).json({
+      message: 'Business registered, awaiting approval',
+      business: { businessId, name, kycStatus: 'pending' },
+    });
+  } catch (error) {
+    console.error('[BusinessRegister] Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Server error during business registration', details: error.message });
   }
 });
 
