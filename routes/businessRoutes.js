@@ -560,20 +560,48 @@ router.post('/register', uploadS3.fields([
 
 router.post('/login', async (req, res) => {
   const { businessId, pin } = req.body;
-  if (!businessId || !pin) return res.status(400).json({ error: 'Business ID and PIN are required' });
-  if (!/^\d{10}$/.test(businessId)) return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
-  if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  if (!businessId || !pin) {
+    return res.status(400).json({ error: 'Business ID and PIN are required' });
+  }
+  if (!/^\d{10}$/.test(businessId)) {
+    return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
+  }
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
   try {
     const business = await Business.findOne({ businessId });
-    if (!business) return res.status(400).json({ error: 'Invalid credentials' });
-    if (!business.isActive) return res.status(403).json({ error: 'Business not approved or inactive' });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    if (!business.isActive || business.kycStatus !== 'verified') {
+      return res.status(403).json({ error: 'Business not approved or KYC not verified' });
+    }
     const isMatch = await bcrypt.compare(pin, business.hashedPin);
-    if (!isMatch) return res.status(400).json({ error: 'Invalid PIN' });
-    const token = jwt.sign({ businessId, role: business.role, ownerUsername: business.ownerUsername }, JWT_SECRET, { expiresIn: '30d' });
-    res.status(200).json({ token, businessId, role: business.role, kycStatus: business.kycStatus });
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid PIN' });
+    }
+    const token = jwt.sign(
+      { businessId, role: business.role, ownerUsername: business.ownerUsername },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    res.status(200).json({
+      token,
+      businessId: business.businessId,
+      business: {
+        businessId: business.businessId,
+        name: business.name,
+        role: business.role,
+        phoneNumber: business.phoneNumber,
+        kycStatus: business.kycStatus,
+        balance: business.balance.toString(), // Convert Decimal128 to string
+        isActive: business.isActive,
+      },
+    });
   } catch (error) {
     console.error('[BusinessLogin] Error:', error.message, error.stack);
-    res.status(500).json({ error: 'Server error during business login', details: error.message });
+    res.status(500).json({ error: 'Server error during business login' });
   }
 });
 
