@@ -8,7 +8,7 @@ const AWS = require('aws-sdk');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { Expo } = require('expo-server-sdk');
-const { Business, BusinessTransaction } = require('../models/businessSchema');
+const { Business, BusinessTransaction } = require('../models/Business');
 const authenticateToken = require('../middleware/authenticateToken');
 const path = require('path');
 
