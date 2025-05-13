@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 
+// Transaction Schema (embedded in Business)
 const transactionSchema = new mongoose.Schema({
   _id: { type: String, default: () => crypto.randomBytes(16).toString('hex') },
   type: {
@@ -23,6 +24,7 @@ const transactionSchema = new mongoose.Schema({
   date: { type: Date, default: Date.now, index: true },
 });
 
+// Pending Deposit Schema (embedded in Business)
 const pendingDepositSchema = new mongoose.Schema({
   amount: { type: mongoose.Schema.Types.Decimal128, required: true },
   transactionId: { type: String, required: true },
@@ -31,6 +33,7 @@ const pendingDepositSchema = new mongoose.Schema({
   rejectionReason: { type: String },
 });
 
+// Pending Withdrawal Schema (embedded in Business)
 const pendingWithdrawalSchema = new mongoose.Schema({
   amount: { type: mongoose.Schema.Types.Decimal128, required: true },
   fee: { type: mongoose.Schema.Types.Decimal128, default: 0 },
@@ -43,6 +46,7 @@ const pendingWithdrawalSchema = new mongoose.Schema({
   },
 });
 
+// Business Schema
 const businessSchema = new mongoose.Schema({
   businessId: {
     type: String,
@@ -106,4 +110,23 @@ businessSchema.pre('save', async function (next) {
   next();
 });
 
-module.exports = mongoose.model('Business', businessSchema);
+// Business Transaction Schema
+const businessTransactionSchema = new mongoose.Schema({
+  transactionId: { type: String, unique: true, required: true },
+  businessId: { type: String, required: true, index: true },
+  amount: { type: Number },
+  status: { type: String, enum: ['pending', 'completed', 'expired'], default: 'pending' },
+  qrCodeId: { type: String, unique: true },
+  qrCodeUrl: { type: String },
+  description: { type: String },
+  fromUsername: { type: String },
+  expiresAt: { type: Date },
+  createdAt: { type: Date, default: Date.now, index: true },
+  refundedAmount: { type: Number, default: 0 },
+});
+
+// Export both models
+module.exports = {
+  Business: mongoose.model('Business', businessSchema),
+  BusinessTransaction: mongoose.model('BusinessTransaction', businessTransactionSchema),
+};
