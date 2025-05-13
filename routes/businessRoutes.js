@@ -281,7 +281,7 @@ const requireAdmin = async (req, res, next) => {
 
 // Helper function to convert Decimal128 fields to numbers
 const convertDecimal128 = (obj) => {
-  if (obj === null || obj === undefined) return 0;
+  if (obj === null || obj === undefined) return null; // Return null for null/undefined
   if (obj.constructor.name === 'Decimal128') {
     const strValue = obj.toString();
     return isNaN(strValue) ? 0 : parseFloat(strValue);
@@ -414,7 +414,7 @@ router.post('/register', uploadS3.fields([
         bankName: parsedBankDetails.bankName?.trim(),
         accountNumber: parsedBankDetails.accountNumber,
         accountType: parsedBankDetails.accountType,
-      } : undefined,
+      } : null,
       tpinCertificate: tpinCertificate?.location,
       pacraCertificate: pacraCertificate?.location,
       qrCode: qrCodeData,
@@ -779,7 +779,11 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
 router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
   const { startDate, endDate } = req.query;
   try {
-    console.log('[Dashboard] Fetching for businessId:', req.user.businessId, 'User:', req.user);
+    console.log('[Dashboard] Fetching for businessId:', req.user?.businessId, 'User:', req.user);
+    if (!req.user?.businessId) {
+      console.error('[Dashboard] No businessId in req.user');
+      return res.status(401).json({ error: 'Authentication error: Missing businessId' });
+    }
     const business = await Business.findOne({ businessId: req.user.businessId }).lean();
     if (!business) {
       console.error('[Dashboard] Business not found:', req.user.businessId);
@@ -818,7 +822,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(10)
       .lean();
-    const settlements = business.transactions?.filter(t => t.type === 'settled')?.slice(0, 10) || [];
+    const settlements = (business.transactions || []).filter(t => t.type === 'settled').slice(0, 10);
     const response = convertDecimal128({
       totalRevenue: metrics[0]?.totalRevenue || 0,
       transactionCount: metrics[0]?.transactionCount || 0,
@@ -826,6 +830,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       settlements,
       recentTransactions,
     });
+    console.log('[Dashboard] Response:', response);
     res.json(response);
   } catch (error) {
     console.error('[Dashboard] Error:', error.message, error.stack);
