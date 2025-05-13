@@ -776,7 +776,6 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
 });
 
 // Dashboard Metrics
-// Dashboard Metrics
 router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
   const { startDate, endDate } = req.query;
   try {
