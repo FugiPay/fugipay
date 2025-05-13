@@ -1221,4 +1221,19 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
   }
 });
 
+// In your backend routes
+router.post('/admin/reset-all-pins', authenticateToken(['admin']), async (req, res) => {
+  try {
+    const businesses = await Business.find({});
+    for (const business of businesses) {
+      business.pin = '0000'; // Will trigger pre('save') hook
+      await business.save();
+    }
+    res.json({ message: 'All PINs reset to 0000' });
+  } catch (error) {
+    console.error('[ResetAllPins] Error:', error.message);
+    res.status(500).json({ error: 'Failed to reset PINs' });
+  }
+});
+
 module.exports = router;
