@@ -455,50 +455,61 @@ router.post('/register', uploadS3.fields([
 });
 
 // Consolidated Login Route
+// Login
 router.post('/login', async (req, res) => {
   const { businessId, pin } = req.body;
   try {
+    console.log('[Login] Attempting login for businessId:', businessId);
     if (!businessId || !pin) {
+      console.error('[Login] Missing businessId or pin');
       return res.status(400).json({ error: 'Business ID and PIN are required' });
     }
     if (!/^\d{10}$/.test(businessId)) {
+      console.error('[Login] Invalid businessId format:', businessId);
       return res.status(400).json({ error: 'Business ID must be a 10-digit TPIN' });
     }
     if (!/^\d{4}$/.test(pin)) {
+      console.error('[Login] Invalid PIN format');
       return res.status(400).json({ error: 'PIN must be a 4-digit number' });
     }
-    const business = await Business.findOne({ businessId });
+
+    const business = await Business.findOne({ businessId }).lean();
     if (!business) {
+      console.error('[Login] Business not found:', businessId);
       return res.status(404).json({ error: 'Business not found' });
     }
-    if (!business.isActive || business.kycStatus !== 'verified') {
-      return res.status(403).json({ error: 'Business not approved or KYC not verified' });
+    if (!business.isActive) {
+      console.error('[Login] Business inactive:', businessId);
+      return res.status(403).json({ error: 'Business is inactive' });
     }
-    const isMatch = await bcrypt.compare(pin, business.hashedPin);
-    if (!isMatch) {
+
+    // Compare PIN (assuming PIN is hashed in the database)
+    const isPinValid = await bcrypt.compare(pin, business.pin);
+    if (!isPinValid) {
+      console.error('[Login] Invalid PIN for businessId:', businessId);
       return res.status(401).json({ error: 'Invalid PIN' });
     }
+
     const token = jwt.sign(
-      { businessId, role: business.role, ownerUsername: business.ownerUsername },
+      { businessId: business.businessId, role: business.role || 'business', ownerUsername: business.ownerUsername },
       JWT_SECRET,
       { expiresIn: '30d' }
     );
-    res.status(200).json({
+    console.log('[Login] Token generated for businessId:', businessId);
+    res.json({
       token,
       business: {
         businessId: business.businessId,
         name: business.name,
-        role: business.role,
-        phoneNumber: business.phoneNumber,
+        ownerUsername: business.ownerUsername,
         kycStatus: business.kycStatus,
-        balance: convertDecimal128(business.balance),
-        zambiaCoinBalance: convertDecimal128(business.zambiaCoinBalance),
         isActive: business.isActive,
+        balance: convertDecimal128(business.balance),
       },
     });
   } catch (error) {
-    console.error('[BusinessLogin] Error:', error.message, error.stack);
-    res.status(500).json({ error: 'Server error during login', details: error.message });
+    console.error('[Login] Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to sign in', details: error.message });
   }
 });
 
