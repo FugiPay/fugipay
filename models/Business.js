@@ -8,19 +8,11 @@ const transactionSchema = new mongoose.Schema({
   type: {
     type: String,
     required: true,
-    enum: [
-      'received', 'deposited', 'withdrawn', 'refunded', 'settled', 'fee-collected',
-      'zmc-received', 'zmc-sent',
-    ],
+    enum: ['received', 'deposited', 'withdrawn', 'refunded', 'settled'],
   },
   amount: { type: mongoose.Schema.Types.Decimal128, required: true },
   toFrom: { type: String, required: true },
   fee: { type: mongoose.Schema.Types.Decimal128, default: 0 },
-  originalAmount: { type: mongoose.Schema.Types.Decimal128 },
-  sendingFee: { type: mongoose.Schema.Types.Decimal128 },
-  receivingFee: { type: mongoose.Schema.Types.Decimal128 },
-  reason: { type: String },
-  trustRating: { type: Number, min: 1, max: 5 },
   date: { type: Date, default: Date.now, index: true },
 });
 
@@ -30,7 +22,6 @@ const pendingDepositSchema = new mongoose.Schema({
   transactionId: { type: String, required: true },
   date: { type: Date, default: Date.now },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
-  rejectionReason: { type: String },
 });
 
 // Pending Withdrawal Schema (embedded in Business)
@@ -39,10 +30,10 @@ const pendingWithdrawalSchema = new mongoose.Schema({
   fee: { type: mongoose.Schema.Types.Decimal128, default: 0 },
   date: { type: Date, default: Date.now },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
-  rejectionReason: { type: String },
   destination: {
-    type: { type: String, enum: ['bank', 'mobile_money', 'zambia_coin'] },
-    accountDetails: { type: String },
+    type: { type: String, enum: ['bank', 'mobile_money'] },
+    bankName: { type: String },
+    accountNumber: { type: String },
   },
 });
 
@@ -65,7 +56,7 @@ const businessSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true,
-    match: [/^\+260(9[5678]|7[34679])\d{7}$/, 'Phone number must be a valid Zambian mobile number (e.g., +260951234567)'],
+    match: [/^\+260(9[5678]|7[34679])\d{7}$/, 'Phone number must be a valid Zambian mobile number'],
   },
   email: {
     type: String,
@@ -73,48 +64,39 @@ const businessSchema = new mongoose.Schema({
     sparse: true,
     match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email address'],
   },
-  pin: { type: String }, // Temporary 4-digit PIN, cleared after hashing
-  hashedPin: { type: String, required: true }, // Stores bcrypt hash
-  resetToken: { type: String },
-  resetTokenExpiry: { type: Date },
+  hashedPin: { type: String, required: true },
   balance: { type: mongoose.Schema.Types.Decimal128, default: 0 },
-  zambiaCoinBalance: { type: mongoose.Schema.Types.Decimal128, default: 0 },
-  qrCode: { type: String },
   bankDetails: {
     bankName: String,
     accountNumber: String,
-    accountType: { type: String, enum: ['bank', 'mobile_money', 'zambia_coin'] },
+    accountType: { type: String, enum: ['bank', 'mobile_money'] },
   },
-  tpinCertificate: { type: String, default: null },
-  pacraCertificate: { type: String, default: null },
+  tpinCertificate: { type: String },
+  pacraCertificate: { type: String },
   kycStatus: { type: String, enum: ['pending', 'verified', 'rejected'], default: 'pending' },
-  role: { type: String, enum: ['business', 'admin'], default: 'business' },
-  trustScore: { type: Number, default: 0, min: 0, max: 100 },
-  ratingCount: { type: Number, default: 0 },
+  isActive: { type: Boolean, default: false },
   transactions: [transactionSchema],
   pendingDeposits: [pendingDepositSchema],
   pendingWithdrawals: [pendingWithdrawalSchema],
-  pushToken: { type: String, default: null },
-  isActive: { type: Boolean, default: false },
+  pushToken: { type: String },
 }, { timestamps: true });
 
 // Hash PIN before saving
 businessSchema.pre('save', async function (next) {
-  if (this.isModified('pin') && this.pin) {
-    if (!/^\d{4}$/.test(this.pin)) {
+  if (this.isModified('hashedPin') && this.hashedPin && !this.hashedPin.startsWith('$2')) {
+    if (!/^\d{4}$/.test(this.hashedPin)) {
       return next(new Error('PIN must be a 4-digit number'));
     }
-    this.hashedPin = await bcrypt.hash(this.pin, 10);
-    this.pin = undefined; // Clear plain PIN
+    this.hashedPin = await bcrypt.hash(this.hashedPin, 10);
   }
   next();
 });
 
-// Business Transaction Schema
+// Business Transaction Schema (for QR payments)
 const businessTransactionSchema = new mongoose.Schema({
   transactionId: { type: String, unique: true, required: true },
   businessId: { type: String, required: true, index: true },
-  amount: { type: Number },
+  amount: { type: Number, required: true },
   status: { type: String, enum: ['pending', 'completed', 'expired'], default: 'pending' },
   qrCodeId: { type: String, unique: true },
   qrCodeUrl: { type: String },
@@ -122,10 +104,9 @@ const businessTransactionSchema = new mongoose.Schema({
   fromUsername: { type: String },
   expiresAt: { type: Date },
   createdAt: { type: Date, default: Date.now, index: true },
-  refundedAmount: { type: Number, default: 0 },
 });
 
-// Export both models
+// Export models
 module.exports = {
   Business: mongoose.model('Business', businessSchema),
   BusinessTransaction: mongoose.model('BusinessTransaction', businessTransactionSchema),
