@@ -784,11 +784,14 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       console.error('[Dashboard] No businessId in req.user');
       return res.status(401).json({ error: 'Authentication error: Missing businessId' });
     }
+    console.log('[Dashboard] Querying Business collection for businessId:', req.user.businessId);
     const business = await Business.findOne({ businessId: req.user.businessId }).lean();
     if (!business) {
       console.error('[Dashboard] Business not found:', req.user.businessId);
+      console.log('[Dashboard] Business query result:', business);
       return res.status(404).json({ error: 'Business not found' });
     }
+    console.log('[Dashboard] Business found:', business.businessId, 'Active:', business.isActive);
     if (!business.isActive) {
       console.error('[Dashboard] Business inactive:', req.user.businessId);
       return res.status(403).json({ error: 'Business is inactive' });
@@ -799,6 +802,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       if (startDate) match.createdAt.$gte = new Date(startDate);
       if (endDate) match.createdAt.$lte = new Date(endDate);
     }
+    console.log('[Dashboard] Aggregating transactions with match:', match);
     const metrics = await BusinessTransaction.aggregate([
       { $match: match },
       {
