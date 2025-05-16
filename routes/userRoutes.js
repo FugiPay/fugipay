@@ -322,26 +322,50 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
 router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) => {
   try {
     const { phoneNumber } = req.params;
+    const { limit = 10, skip = 0 } = req.query;
     if (req.user.phoneNumber !== phoneNumber && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Unauthorized' });
     }
     const user = await User.findOne({ phoneNumber })
-      .select('-password -pin')
+      .select('phoneNumber username email name balance zambiaCoinBalance trustScore kycStatus role lastViewedTimestamp pendingDeposits pendingWithdrawals transactions')
+      .slice('transactions', [Number(skip), Number(limit)])
       .lean()
       .exec();
     if (!user) return res.status(404).json({ error: 'User not found' });
+    // Convert Decimal128 fields
+    const convertedUser = {
+      ...user,
+      balance: user.balance?.$numberDecimal ? parseSensei.parseFloat(user.balance.$numberDecimal) : user.balance || 0,
+      zambiaCoinBalance: user.zambiaCoinBalance?.$numberDecimal ? parseFloat(user.zambiaCoinBalance.$numberDecimal) : user.zambiaCoinBalance || 0,
+      trustScore: user.trustScore?.$numberDecimal ? parseFloat(user.trustScore.$numberDecimal) : user.trustScore || 0,
+      transactions: user.transactions?.map(tx => ({
+        ...tx,
+        amount: tx.amount?.$numberDecimal ? parseFloat(tx.amount.$numberDecimal) : tx.amount || 0,
+        fee: tx.fee?.$numberDecimal ? parseFloat(tx.fee.$numberDecimal) : tx.fee || 0,
+      })) || [],
+      pendingDeposits: user.pendingDeposits?.map(dep => ({
+        ...dep,
+        amount: dep.amount?.$numberDecimal ? parseFloat(dep.amount.$numberDecimal) : dep.amount || 0,
+      })) || [],
+      pendingWithdrawals: user.pendingWithdrawals?.map(wd => ({
+        ...wd,
+        amount: wd.amount?.$numberDecimal ? parseFloat(wd.amount.$numberDecimal) : wd.amount || 0,
+      })) || [],
+    };
     res.json({
-      phoneNumber: user.phoneNumber,
-      username: user.username,
-      email: user.email || '',
-      name: user.name || '',
-      balance: user.balance || 0,
-      transactions: user.transactions || [],
-      kycStatus: user.kycStatus || 'rejected',
-      role: user.role || 'user',
-      lastViewedTimestamp: user.lastViewedTimestamp || 0,
-      pendingDeposits: user.pendingDeposits,
-      pendingWithdrawals: user.pendingWithdrawals
+      phoneNumber: convertedUser.phoneNumber,
+      username: convertedUser.username,
+      email: convertedUser.email || '',
+      name: convertedUser.name || '',
+      balance: convertedUser.balance,
+      zambiaCoinBalance: convertedUser.zambiaCoinBalance,
+      trustScore: convertedUser.trustScore,
+      transactions: convertedUser.transactions,
+      kycStatus: convertedUser.kycStatus || 'rejected',
+      role: convertedUser.role || 'user',
+      lastViewedTimestamp: convertedUser.lastViewedTimestamp || 0,
+      pendingDeposits: convertedUser.pendingDeposits,
+      pendingWithdrawals: convertedUser.pendingWithdrawals,
     });
   } catch (error) {
     console.error('[USER] Error:', error.message);

@@ -21,6 +21,110 @@ const requireAdmin = async (req, res, next) => {
   }
 };
 
+// Get all businesses with pagination and filters
+router.get('/businesses', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  try {
+    const { page = 1, limit = 10, kycStatus, isActive } = req.query;
+    const query = {};
+    if (kycStatus) query.kycStatus = kycStatus;
+    if (isActive !== undefined) query.isActive = isActive === 'true';
+    
+    const businesses = await Business.find(query)
+      .select('businessId name kycStatus isActive accountTier createdAt')
+      .limit(Number(limit))
+      .skip((Number(page) - 1) * Number(limit))
+      .lean();
+    
+    const total = await Business.countDocuments(query);
+    
+    res.json({
+      businesses,
+      total,
+      page: Number(page),
+      pages: Math.ceil(total / Number(limit)),
+    });
+  } catch (error) {
+    console.error('[ADMIN] Fetch Businesses Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to fetch businesses' });
+  }
+});
+
+// Verify KYC for a business
+router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { businessId, approved } = req.body;
+  console.log('[ADMIN] Verify KYC Request:', { businessId, approved });
+  try {
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    if (business.kycStatus !== 'pending') {
+      return res.status(400).json({ error: 'KYC already processed' });
+    }
+    business.kycStatus = approved ? 'verified' : 'rejected';
+    await business.save();
+    
+    if (business.email) {
+      await sendEmail(
+        business.email,
+        `KYC ${approved ? 'Approved' : 'Rejected'}`,
+        `<h2>KYC ${approved ? 'Approved' : 'Rejected'}</h2>
+         <p>Your KYC verification has been ${approved ? 'approved' : 'rejected'}.</p>
+         <p>Best regards,<br>Zangena Team</p>`
+      );
+    }
+    if (business.pushToken) {
+      await sendPushNotification(
+        business.pushToken,
+        `KYC ${approved ? 'Approved' : 'Rejected'}`,
+        `Your KYC verification was ${approved ? 'approved' : 'rejected'}.`
+      );
+    }
+    
+    res.json({ message: `KYC ${approved ? 'approved' : 'rejected'}` });
+  } catch (error) {
+    console.error('[ADMIN] Verify KYC Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to verify KYC' });
+  }
+});
+
+// Set business active status
+router.post('/set-business-active', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+  const { businessId, isActive } = req.body;
+  console.log('[ADMIN] Set Business Active Request:', { businessId, isActive });
+  try {
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    business.isActive = isActive;
+    await business.save();
+    
+    if (business.email) {
+      await sendEmail(
+        business.email,
+        `Business Account ${isActive ? 'Activated' : 'Deactivated'}`,
+        `<h2>Business Account ${isActive ? 'Activated' : 'Deactivated'}</h2>
+         <p>Your business account has been ${isActive ? 'activated' : 'deactivated'}.</p>
+         <p>Best regards,<br>Zangena Team</p>`
+      );
+    }
+    if (business.pushToken) {
+      await sendPushNotification(
+        business.pushToken,
+        `Business Account ${isActive ? 'Activated' : 'Deactivated'}`,
+        `Your business account was ${isActive ? 'activated' : 'deactivated'}.`
+      );
+    }
+    
+    res.json({ message: `Business ${isActive ? 'activated' : 'deactivated'}` });
+  } catch (error) {
+    console.error('[ADMIN] Set Business Active Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to set business active status' });
+  }
+});
+
+// Existing routes (unchanged)
 router.post('/verify-withdrawal', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { userId, withdrawalIndex, approved } = req.body;
   console.log('Verify Withdrawal Request:', { userId, withdrawalIndex, approved });

@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const compression = require('compression');
 require('dotenv').config();
 
 // Import route files
@@ -9,8 +10,10 @@ const businessRoutes = require('./routes/businessRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 
 const app = express();
+app.use(compression()); // Enable response compression
 app.use(express.json());
 
+// Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Error:', err.message, err.stack);
   res.status(err.status || 500).json({ error: err.message || 'Server error' });
@@ -42,8 +45,6 @@ const corsOptions = {
   credentials: true,
 };
 app.use(cors(corsOptions));
-// index.js
-// app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE'], credentials: true }));
 
 // Health Check
 app.get('/health', (req, res) => {
@@ -55,32 +56,6 @@ app.get('/wake', (req, res) => {
   console.log('[WAKE] Server pinged');
   res.send('Awake');
 });
-
-const convertDecimal128 = (obj) => {
-  if (Array.isArray(obj)) {
-    return obj.map(convertDecimal128);
-  } else if (obj && typeof obj === 'object') {
-    Object.keys(obj).forEach((key) => {
-      if (obj[key] && obj[key].$numberDecimal) {
-        obj[key] = parseFloat(obj[key].$numberDecimal);
-      } else if (typeof obj[key] === 'object') {
-        obj[key] = convertDecimal128(obj[key]);
-      }
-    });
-  }
-  return obj;
-};
-
-app.use((req, res, next) => {
-  const originalJson = res.json;
-  res.json = function (data) {
-    return originalJson.call(this, convertDecimal128(data));
-  };
-  next();
-});
-
-// Routes
-// app.use('/api', require('./routes/api'));
 
 // Routes
 app.use('/api/users', userRoutes); // User-related endpoints
@@ -96,6 +71,9 @@ if (!mongoUri) {
 mongoose.connect(mongoUri, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
+  maxPoolSize: 10, // Connection pool size
+  minPoolSize: 2,
+  serverSelectionTimeoutMS: 5000,
 }) 
   .then(() => console.log('MongoDB connected successfully'))
   .catch(err => {
