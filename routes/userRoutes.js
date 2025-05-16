@@ -919,41 +919,46 @@ router.post('/refresh-token', async (req, res) => {
 });
 
 // Update Timestamp
-router.patch('/update-timestamp', authenticateToken(['user']), async (req, res) => {
+router.patch('/update-timestamp', authenticateToken(), async (req, res, next) => {
   try {
     const { phoneNumber, lastViewedTimestamp } = req.body;
     if (!phoneNumber || !lastViewedTimestamp) {
-      console.log('[USER] Missing phoneNumber or lastViewedTimestamp');
-      return res.status(400).json({ error: 'phoneNumber and lastViewedTimestamp are required' });
+      return res.status(400).json({ error: 'Missing required fields' });
     }
-    if (phoneNumber !== req.user.phoneNumber) {
-      console.log('[USER] Unauthorized phoneNumber:', phoneNumber);
+    if (req.user.phoneNumber !== phoneNumber) {
       return res.status(403).json({ error: 'Unauthorized' });
     }
-    if (typeof lastViewedTimestamp !== 'number' || lastViewedTimestamp <= 0) {
-      console.log('[USER] Invalid lastViewedTimestamp:', lastViewedTimestamp);
-      return res.status(400).json({ error: 'Invalid lastViewedTimestamp' });
-    }
-
-    console.log('[USER] Updating timestamp:', { phoneNumber, lastViewedTimestamp });
     const user = await User.findOneAndUpdate(
       { phoneNumber },
-      { $set: { lastViewedTimestamp } },
-      { new: true, runValidators: true }
-    ).select('-password -pin');
-
+      { lastViewedTimestamp },
+      { new: true, lean: true }
+    );
     if (!user) {
-      console.error('[USER] User not found:', phoneNumber);
       return res.status(404).json({ error: 'User not found' });
     }
-
-    console.log('[USER] Timestamp updated:', { phoneNumber });
-    res.json({ message: 'Timestamp updated', user });
-  } catch (error) {
-    console.error('[USER] Timestamp Update Error:', {
-      message: error.message,
-      stack: error.stack,
+    res.json({
+      user: {
+        ...user,
+        balance: user.balance?.$numberDecimal ? parseFloat(user.balance.$numberDecimal) : user.balance || 0,
+        zambiaCoinBalance: user.zambiaCoinBalance?.$numberDecimal ? parseFloat(user.zambiaCoinBalance.$numberDecimal) : user.zambiaCoinBalance || 0,
+        trustScore: user.trustScore?.$numberDecimal ? parseFloat(user.trustScore.$numberDecimal) : user.trustScore || 0,
+        transactions: user.transactions?.map(tx => ({
+          ...tx,
+          amount: tx.amount?.$numberDecimal ? parseFloat(tx.amount.$numberDecimal) : tx.amount || 0,
+          fee: tx.fee?.$numberDecimal ? parseFloat(tx.fee.$numberDecimal) : tx.fee || 0,
+        })) || [],
+        pendingDeposits: user.pendingDeposits?.map(dep => ({
+          ...dep,
+          amount: dep.amount?.$numberDecimal ? parseFloat(dep.amount.$numberDecimal) : dep.amount || 0,
+        })) || [],
+        pendingWithdrawals: user.pendingWithdrawals?.map(wd => ({
+          ...wd,
+          amount: wd.amount?.$numberDecimal ? parseFloat(wd.amount.$numberDecimal) : wd.amount || 0,
+        })) || [],
+      },
     });
+  } catch (error) {
+    console.error('[USER] Error:', error.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
