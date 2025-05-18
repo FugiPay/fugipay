@@ -8,6 +8,7 @@ const { S3Client } = require('@aws-sdk/client-s3');
 const multerS3 = require('multer-s3');
 const nodemailer = require('nodemailer');
 const { Expo } = require('expo-server-sdk');
+const QRPin = require('../models/QRPin');
 const QRCode = require('qrcode');
 const { Business, BusinessTransaction } = require('../models/Business');
 
@@ -52,6 +53,11 @@ const authenticateToken = (roles = ['business', 'admin']) => (req, res, next) =>
     next();
   });
 };
+
+
+// Ensure indexes
+Business.createIndexes({ businessId: 1, email: 1 });
+QRPin.createIndexes({ qrId: 1, businessId: 1 });
 
 // Convert Decimal128 to float
 const convertDecimal128 = (value) => (value ? parseFloat(value.toString()) : 0);
