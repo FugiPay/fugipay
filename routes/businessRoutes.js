@@ -138,9 +138,22 @@ router.post('/register', upload.fields([
 router.post('/login', async (req, res) => {
   const { businessId, pin } = req.body;
   try {
+    console.log('[Login] Attempting login for businessId:', businessId);
+    if (!businessId || !pin) {
+      return res.status(400).json({ error: 'Business ID and PIN are required' });
+    }
     const business = await Business.findOne({ businessId });
     if (!business) {
+      console.log('[Login] Business not found for ID:', businessId);
       return res.status(404).json({ error: 'Business not found' });
+    }
+    console.log('[Login] Business found:', business.businessId, 'isActive:', business.isActive, 'kycStatus:', business.kycStatus);
+    if (!business.isActive) {
+      return res.status(403).json({ error: 'Business account is not active' });
+    }
+    if (!business.hashedPin) {
+      console.error('[Login] Missing hashedPin for business:', businessId);
+      return res.status(500).json({ error: 'Invalid business account configuration' });
     }
     const isPinValid = await bcrypt.compare(pin, business.hashedPin);
     if (!isPinValid) {
@@ -151,9 +164,6 @@ router.post('/login', async (req, res) => {
       });
       await business.save();
       return res.status(401).json({ error: 'Invalid PIN' });
-    }
-    if (!business.isActive) {
-      return res.status(403).json({ error: 'Business account is not active' });
     }
     const token = jwt.sign(
       { businessId: business.businessId, role: business.role },
@@ -170,7 +180,7 @@ router.post('/login', async (req, res) => {
     if (business.pushToken) {
       await sendPushNotification(business.pushToken, 'Login Successful', `Welcome back, ${business.name}!`, { businessId });
     }
-    res.json({
+    const response = {
       token,
       business: {
         businessId: business.businessId,
@@ -182,10 +192,17 @@ router.post('/login', async (req, res) => {
         },
         isActive: business.isActive,
         kycStatus: business.kycStatus,
+        accountTier: business.accountTier,
       },
-    });
+    };
+    console.log('[Login] Sending response:', response);
+    res.json(response);
   } catch (error) {
-    console.error('[Login] Error:', error.message);
+    console.error('[Login] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId,
+    });
     res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
