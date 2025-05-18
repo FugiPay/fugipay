@@ -54,10 +54,22 @@ const authenticateToken = (roles = ['business', 'admin']) => (req, res, next) =>
   });
 };
 
-
-// Ensure indexes
-Business.createIndexes({ businessId: 1, email: 1 });
-QRPin.createIndexes({ qrId: 1, businessId: 1 });
+// Ensure indexes with error handling
+const ensureIndexes = async () => {
+  try {
+    await Business.createIndexes({ businessId: 1, email: 1 });
+    await QRPin.createIndexes({ qrId: 1, businessId: 1 });
+    console.log('[Indexes] Successfully ensured indexes for Business and QRPin');
+  } catch (error) {
+    console.error('[Indexes] Error creating indexes:', {
+      message: error.message,
+      code: error.code,
+      codeName: error.codeName,
+    });
+    if (error.code !== 85) throw error; // Ignore IndexOptionsConflict, rethrow others
+  }
+};
+ensureIndexes();
 
 // Convert Decimal128 to float
 const convertDecimal128 = (value) => (value ? parseFloat(value.toString()) : 0);
@@ -637,6 +649,7 @@ router.get('/:businessId', authenticateToken(['business', 'admin']), async (req,
   }
 });
 
+// Forgot PIN
 router.post('/forgot-pin', async (req, res) => {
   const { businessId, email } = req.body;
   try {
@@ -662,6 +675,7 @@ router.post('/forgot-pin', async (req, res) => {
   }
 });
 
+// Reset PIN
 router.post('/reset-pin', async (req, res) => {
   const { businessId, resetToken, newPin } = req.body;
   try {
@@ -695,7 +709,6 @@ router.post('/reset-pin', async (req, res) => {
   }
 });
 
-
 // Store QR PIN
 router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) => {
   const { businessId, pin } = req.body;
@@ -725,8 +738,15 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
       }
       // Delete existing QRPin for this business
       await QRPin.deleteOne({ businessId, type: 'business' }, { session });
-      // Create new QRPin
-      await new QRPin({ type: 'business', businessId, qrId, pin }).save({ session });
+      // Create new QRPin with explicit createdAt and persistent: true
+      await new QRPin({
+        type: 'business',
+        businessId,
+        qrId,
+        pin,
+        createdAt: new Date(),
+        persistent: true,
+      }).save({ session });
       // Add pending-pin transaction
       await Business.updateOne(
         { businessId },

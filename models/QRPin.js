@@ -10,19 +10,16 @@ const qrPinSchema = new mongoose.Schema({
     type: String,
     required: function() { return this.type === 'user'; },
     ref: 'User',
-    index: true,
   },
   businessId: {
     type: String,
     required: function() { return this.type === 'business'; },
     ref: 'Business',
-    index: true,
   },
   qrId: {
     type: String,
     required: true,
     unique: true,
-    index: true,
   },
   pin: {
     type: String,
@@ -33,8 +30,25 @@ const qrPinSchema = new mongoose.Schema({
   createdAt: {
     type: Date,
     default: Date.now,
-    expires: function() { return this.type === 'user' ? 15 * 60 : null; }, // 15 minutes for users, persistent for businesses
   },
+  persistent: {
+    type: Boolean,
+    default: function() { return this.type === 'business'; }, // Business QR pins are persistent
+  },
+});
+
+// Define indexes
+qrPinSchema.index({ username: 1 });
+qrPinSchema.index({ businessId: 1 });
+qrPinSchema.index({ qrId: 1 }, { unique: true });
+qrPinSchema.index({ createdAt: 1 }, { name: 'createdAt_1', expireAfterSeconds: 900, background: true });
+
+// Pre-save hook to ensure persistent business QR pins aren't affected by TTL
+qrPinSchema.pre('save', function(next) {
+  if (this.type === 'business') {
+    this.persistent = true;
+  }
+  next();
 });
 
 module.exports = mongoose.model('QRPin', qrPinSchema);

@@ -10,36 +10,53 @@ const nodemailer = require('nodemailer');
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
+const Business = require('../models/Business');
 const AdminLedger = require('../models/AdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
 const axios = require('axios');
 
-// Ensure indexes
-User.createIndexes({ username: 1, phoneNumber: 1 });
-QRPin.createIndexes({ qrId: 1 });
-
-// Configure multer for temporary local storage
-const upload = multer({ dest: 'uploads/' });
+// Environment variables
+const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
+const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
+const EMAIL_USER = process.env.EMAIL_USER || 'your_email@example.com';
+const EMAIL_PASS = process.env.EMAIL_PASS || 'your_email_password';
 
 // Configure AWS S3
 const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION || 'us-east-1',
+  region: AWS_REGION,
 });
-const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
 
-// Secret key for JWT
-const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
+// Configure multer for temporary local storage
+const upload = multer({ dest: 'uploads/' });
 
 // Configure Nodemailer with Gmail
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
+    user: EMAIL_USER,
+    pass: EMAIL_PASS,
   },
 });
+
+// Ensure indexes with error handling
+const ensureIndexes = async () => {
+  try {
+    await User.createIndexes({ username: 1, phoneNumber: 1 });
+    await QRPin.createIndexes({ qrId: 1 });
+    console.log('[Indexes] Successfully ensured indexes for User and QRPin');
+  } catch (error) {
+    console.error('[Indexes] Error creating indexes:', {
+      message: error.message,
+      code: error.code,
+      codeName: error.codeName,
+    });
+    if (error.code !== 85) throw error; // Ignore IndexOptionsConflict, rethrow others
+  }
+};
+ensureIndexes();
 
 // Function to send push notifications
 async function sendPushNotification(pushToken, title, body, data = {}) {
@@ -55,9 +72,9 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       timeout: 5000,
     });
-    console.log(`Push notification sent to ${pushToken}: ${title} - ${body}`);
+    console.log(`[Push] Sent to ${pushToken}: ${title} - ${body}`);
   } catch (error) {
-    console.error('Error sending push notification:', error.message);
+    console.error('[Push] Error:', error.message);
   }
 }
 
@@ -70,7 +87,7 @@ const requireAdmin = async (req, res, next) => {
     }
     next();
   } catch (error) {
-    console.error('[ADMIN] Error:', error.message);
+    console.error('[Admin] Error:', error.message);
     res.status(500).json({ error: 'Server error' });
   }
 };
@@ -99,7 +116,7 @@ router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => 
     ]);
     res.json({ users, total, page: Number(page), limit: Number(limit) });
   } catch (error) {
-    console.error('Fetch Users Error:', error.message);
+    console.error('[GetUsers] Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
@@ -119,7 +136,7 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (re
     await user.save();
     res.json({ message: 'KYC status updated' });
   } catch (error) {
-    console.error('Update KYC Error:', error.message);
+    console.error('[UpdateKYC] Error:', error.message);
     res.status(500).json({ error: 'Failed to update KYC status' });
   }
 });
@@ -181,7 +198,7 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
     }
     res.status(201).json({ token, username: user.username, role: user.role, kycStatus: user.kycStatus });
   } catch (error) {
-    console.error('Register Error:', error.message, error.stack);
+    console.error('[Register] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Server error during registration', details: error.message });
   }
 });
@@ -214,7 +231,7 @@ router.post('/login', async (req, res) => {
       isFirstLogin,
     });
   } catch (error) {
-    console.error('Login Error:', error.message, error.stack);
+    console.error('[Login] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Server error during login', details: error.message });
   }
 });
@@ -234,12 +251,12 @@ router.post('/forgot-password', async (req, res) => {
       return res.status(500).json({ error: 'Invalid user email configuration' });
     }
     const resetToken = crypto.randomBytes(20).toString('hex');
-    const resetTokenExpiry = Date.now() + 3600000;
+    const resetTokenExpiry = Date.now() + 3600000; // 1 hour
     user.resetToken = resetToken;
     user.resetTokenExpiry = resetTokenExpiry;
     await user.save();
     const mailOptions = {
-      from: process.env.EMAIL_USER,
+      from: EMAIL_USER,
       to: user.email,
       subject: 'Zangena Password Reset',
       text: `Your password reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena app to reset your password.`,
@@ -248,7 +265,7 @@ router.post('/forgot-password', async (req, res) => {
     await transporter.sendMail(mailOptions);
     res.json({ message: 'Reset instructions have been sent to your email.' });
   } catch (error) {
-    console.error('Forgot Password Error:', error.message);
+    console.error('[ForgotPassword] Error:', error.message);
     res.status(500).json({ error: 'Server error during password reset request' });
   }
 });
@@ -273,7 +290,7 @@ router.post('/reset-password', async (req, res) => {
     await user.save();
     res.json({ message: 'Password reset successful' });
   } catch (error) {
-    console.error('Reset Password Error:', error.message);
+    console.error('[ResetPassword] Error:', error.message);
     res.status(500).json({ error: 'Server error during password reset' });
   }
 });
@@ -281,9 +298,9 @@ router.post('/reset-password', async (req, res) => {
 // Get User by Username
 router.get('/user/:username', authenticateToken(), async (req, res) => {
   const start = Date.now();
-  console.log(`[${req.method}] ${req.path} - Starting fetch for ${req.params.username}`);
+  console.log(`[GET /user/${req.params.username}] Starting fetch`);
   const timeout = setTimeout(() => {
-    console.error(`[${req.method}] ${req.path} - Request timed out after 25s`);
+    console.error(`[GET /user/${req.params.username}] Request timed out after 25s`);
     res.status(503).json({ error: 'Request timed out', duration: `${Date.now() - start}ms` });
   }, 25000);
   try {
@@ -293,33 +310,41 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
       { username: 1, name: 1, phoneNumber: 1, email: 1, balance: 1, zambiaCoinBalance: 1, trustScore: 1, transactions: { $slice: -10 }, kycStatus: 1, isActive: 1, pendingDeposits: 1, pendingWithdrawals: 1 }
     ).lean().exec();
     if (!user) {
-      console.log(`[${req.method}] ${req.path} - User not found`);
+      console.log(`[GET /user/${req.params.username}] User not found`);
       clearTimeout(timeout);
       return res.status(404).json({ error: 'User not found' });
     }
     if (req.user.username !== req.params.username && !['admin', 'business'].includes(req.user.role)) {
-      console.log(`[${req.method}] ${req.path} - Unauthorized access by ${req.user.username}`);
+      console.log(`[GET /user/${req.params.username}] Unauthorized access by ${req.user.username}`);
       clearTimeout(timeout);
       return res.status(403).json({ error: 'Unauthorized' });
     }
     const responseData = {
-      username: user.username, name: user.name, phoneNumber: user.phoneNumber, email: user.email,
-      balance: user.balance, zambiaCoinBalance: user.zambiaCoinBalance, trustScore: user.trustScore,
-      transactions: user.transactions, kycStatus: user.kycStatus, isActive: user.isActive,
-      pendingDeposits: user.pendingDeposits, pendingWithdrawals: user.pendingWithdrawals
+      username: user.username,
+      name: user.name,
+      phoneNumber: user.phoneNumber,
+      email: user.email,
+      balance: user.balance,
+      zambiaCoinBalance: user.zambiaCoinBalance,
+      trustScore: user.trustScore,
+      transactions: user.transactions,
+      kycStatus: user.kycStatus,
+      isActive: user.isActive,
+      pendingDeposits: user.pendingDeposits,
+      pendingWithdrawals: user.pendingWithdrawals,
     };
-    console.log(`[${req.method}] ${req.path} - Total time: ${Date.now() - start}ms`);
+    console.log(`[GET /user/${req.params.username}] Total time: ${Date.now() - start}ms`);
     clearTimeout(timeout);
     res.json(responseData);
   } catch (error) {
-    console.error(`[${req.method}] ${req.path} - User Fetch Error:`, error.message, error.stack);
+    console.error(`[GET /user/${req.params.username}] Error:`, error.message, error.stack);
     clearTimeout(timeout);
     res.status(500).json({ error: 'Server error fetching user', details: error.message, duration: `${Date.now() - start}ms` });
   }
 });
 
 // Get User by Phone Number
-router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) => {
+router.get('/phone/:phoneNumber', authenticateToken(), async (req, res) => {
   try {
     const { phoneNumber } = req.params;
     const { limit = 10, skip = 0 } = req.query;
@@ -335,7 +360,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) =>
     // Convert Decimal128 fields
     const convertedUser = {
       ...user,
-      balance: user.balance?.$numberDecimal ? parseSensei.parseFloat(user.balance.$numberDecimal) : user.balance || 0,
+      balance: user.balance?.$numberDecimal ? parseFloat(user.balance.$numberDecimal) : user.balance || 0,
       zambiaCoinBalance: user.zambiaCoinBalance?.$numberDecimal ? parseFloat(user.zambiaCoinBalance.$numberDecimal) : user.zambiaCoinBalance || 0,
       trustScore: user.trustScore?.$numberDecimal ? parseFloat(user.trustScore.$numberDecimal) : user.trustScore || 0,
       transactions: user.transactions?.map(tx => ({
@@ -368,7 +393,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), async (req, res, next) =>
       pendingWithdrawals: convertedUser.pendingWithdrawals,
     });
   } catch (error) {
-    console.error('[USER] Error:', error.message);
+    console.error('[GetUserByPhone] Error:', error.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -390,10 +415,10 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
       role: user.role,
       lastViewedTimestamp: user.lastViewedTimestamp || 0,
       pendingDeposits: user.pendingDeposits,
-      pendingWithdrawals: user.pendingWithdrawals
+      pendingWithdrawals: user.pendingWithdrawals,
     });
   } catch (error) {
-    console.error('[USER] Error:', error.message);
+    console.error('[GetUserByPhoneAlt] Error:', error.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -416,7 +441,7 @@ router.put('/user/update-notification', authenticateToken(), async (req, res) =>
     if (!user) return res.status(404).json({ error: 'User not found' });
     res.json({ message: 'Notification timestamp updated' });
   } catch (error) {
-    console.error('[USER] Update Notification Error:', error.message);
+    console.error('[UpdateNotification] Error:', error.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -432,6 +457,7 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
   }
   try {
     const qrId = crypto.randomBytes(16).toString('hex');
+    const hashedPin = await bcrypt.hash(pin, 10);
     const session = await mongoose.startSession();
     session.startTransaction({ writeConcern: { w: 'majority' } });
     try {
@@ -453,19 +479,29 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
       if (!user) {
         await session.abortTransaction();
         session.endSession();
-        console.error('QR Pin Store: User not found or inactive', { username: req.user.username });
+        console.error('[StoreQRPin] User not found or inactive', { username: req.user.username });
         return res.status(404).json({ error: 'User not found or inactive' });
       }
       if (username !== user.username) {
         await session.abortTransaction();
         session.endSession();
-        console.error('QR Pin Store: Unauthorized', { requested: username, actual: user.username });
+        console.error('[StoreQRPin] Unauthorized', { requested: username, actual: user.username });
         return res.status(403).json({ error: 'Unauthorized' });
       }
-      await new QRPin({ username, qrId, pin }).save({ session });
+      // Delete existing QRPin for this user
+      await QRPin.deleteOne({ username, type: 'user' }, { session });
+      // Create new QRPin with explicit createdAt and persistent: false
+      await new QRPin({
+        type: 'user',
+        username,
+        qrId,
+        pin: hashedPin,
+        createdAt: new Date(),
+        persistent: false,
+      }).save({ session });
       await session.commitTransaction();
       session.endSession();
-      console.log('QR Pin Store: Success', { username, qrId });
+      console.log('[StoreQRPin] Success', { username, qrId });
       res.json({ qrId });
     } catch (error) {
       await session.abortTransaction();
@@ -473,13 +509,13 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
       throw error;
     }
   } catch (error) {
-    console.error('QR Pin Store Error:', {
+    console.error('[StoreQRPin] Error:', {
       message: error.message,
       stack: error.stack,
       username,
       pinLength: pin?.length,
     });
-    res.status(500).json({ error: 'Server error storing QR pin' });
+    res.status(500).json({ error: 'Server error storing QR PIN' });
   }
 });
 
@@ -502,10 +538,22 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       return res.status(403).json({ error: 'Unauthorized sender' });
     }
     const qrPin = await QRPin.findOne({ qrId }).session(session);
-    if (!qrPin || qrPin.pin !== pin) {
+    if (!qrPin) {
       await session.abortTransaction();
       session.endSession();
-      return res.status(404).json({ error: 'Invalid QR code or PIN' });
+      return res.status(404).json({ error: 'Invalid QR code' });
+    }
+    const isPinValid = await bcrypt.compare(pin, qrPin.pin);
+    if (!isPinValid) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(401).json({ error: 'Invalid PIN' });
+    }
+    // Check if QR pin is expired for non-persistent pins
+    if (!qrPin.persistent && qrPin.createdAt < new Date(Date.now() - 15 * 60 * 1000)) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ error: 'QR code expired' });
     }
     let receiver, receiverIdentifier;
     if (qrPin.type === 'user') {
@@ -520,15 +568,15 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       session.endSession();
       return res.status(404).json({ error: 'Receiver not found or inactive' });
     }
-    const sendingFee = amount <= 50 ? 0.50 : 
-                      amount <= 100 ? 1.00 : 
+    const sendingFee = amount <= 50 ? 0.50 :
+                      amount <= 100 ? 1.00 :
                       amount <= 500 ? 2.00 :
-                      amount <= 1000 ? 2.50 : 
+                      amount <= 1000 ? 2.50 :
                       amount <= 5000 ? 3.50 : 5.00;
-    const receivingFee = amount <= 50 ? 0.50 : 
-                        amount <= 100 ? 1.00 : 
+    const receivingFee = amount <= 50 ? 0.50 :
+                        amount <= 100 ? 1.00 :
                         amount <= 500 ? 1.50 :
-                        amount <= 1000 ? 2.00 : 
+                        amount <= 1000 ? 2.00 :
                         amount <= 5000 ? 3.00 : 5.00;
     if (sender.balance < amount + sendingFee) {
       await session.abortTransaction();
@@ -610,9 +658,9 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       ], { session });
     }
 
-    // Delete QRPin only for users
+    // Delete QRPin only for non-persistent (user) pins
     const updates = [
-      qrPin.type === 'user' ? QRPin.deleteOne({ qrId }, { session }) : Promise.resolve(),
+      !qrPin.persistent ? QRPin.deleteOne({ qrId }, { session }) : Promise.resolve(),
       AdminLedger.updateOne(
         {},
         {
@@ -641,7 +689,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
 
     await session.commitTransaction();
     session.endSession();
-    console.log('[PAY-QR] Transaction:', {
+    console.log('[PayQR] Transaction:', {
       amount,
       sendingFee,
       receivingFee,
@@ -654,7 +702,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
-    console.error('[PAY-QR] Error:', {
+    console.error('[PayQR] Error:', {
       message: error.message,
       stack: error.stack,
       qrId,
@@ -668,7 +716,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
 // Manual Deposit
 router.post('/deposit/manual', authenticateToken(), async (req, res) => {
   const { amount, transactionId } = req.body;
-  console.log('Manual Deposit Request:', { amount, transactionId });
+  console.log('[DepositManual] Request:', { amount, transactionId });
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user || !user.isActive) {
@@ -689,7 +737,7 @@ router.post('/deposit/manual', authenticateToken(), async (req, res) => {
     }
     res.json({ message: 'Deposit submitted for verification' });
   } catch (error) {
-    console.error('Manual Deposit Error:', error.message, error.stack);
+    console.error('[DepositManual] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to submit deposit' });
   }
 });
@@ -697,7 +745,7 @@ router.post('/deposit/manual', authenticateToken(), async (req, res) => {
 // Withdraw Request
 router.post('/withdraw/request', authenticateToken(), async (req, res) => {
   const { amount } = req.body;
-  console.log('Withdraw Request:', { amount });
+  console.log('[WithdrawRequest] Request:', { amount });
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user || !user.isActive) {
@@ -715,7 +763,7 @@ router.post('/withdraw/request', authenticateToken(), async (req, res) => {
     }
     res.json({ message: 'Withdrawal requested. Awaiting approval.' });
   } catch (error) {
-    console.error('Withdraw Error:', error.message, error.stack);
+    console.error('[WithdrawRequest] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to request withdrawal' });
   }
 });
@@ -723,76 +771,54 @@ router.post('/withdraw/request', authenticateToken(), async (req, res) => {
 // Withdraw (Direct)
 router.post('/api/withdraw', authenticateToken(), async (req, res) => {
   const { amount } = req.body;
-  console.log('Withdraw Request Received:', { amount });
+  console.log('[WithdrawDirect] Request:', { amount });
   try {
-    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+    const user = await User.findOne({ username: req.user.username });
     if (!user || !user.isActive) {
-      console.log('User check failed:', { phoneNumber: req.user.phoneNumber });
       return res.status(403).json({ error: 'User not found or inactive' });
     }
-    if (!amount || amount <= 0) {
-      console.log('Invalid amount:', amount);
-      return res.status(400).json({ error: 'Invalid amount' });
+    if (!amount || amount <= 0 || amount > user.balance) {
+      return res.status(400).json({ error: 'Invalid amount or insufficient balance' });
     }
-    let phoneNumber = req.user.phoneNumber;
-    console.log('Raw Phone Number:', phoneNumber);
-    if (!phoneNumber.startsWith('+260')) {
-      if (phoneNumber.startsWith('0')) phoneNumber = '+26' + phoneNumber;
-      else if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
-    }
-    console.log('Normalized Phone Number:', phoneNumber);
-    const mtnPrefixes = ['96', '76'];
-    const airtelPrefixes = ['97', '77'];
-    const prefix = phoneNumber.slice(4, 6);
-    console.log('Extracted Prefix:', prefix);
-    let paymentMethod;
-    if (mtnPrefixes.includes(prefix)) {
-      paymentMethod = 'mobile-money-mtn';
-      console.log('Payment Method Set: mobile-money-mtn');
-    } else if (airtelPrefixes.includes(prefix)) {
-      paymentMethod = 'mobile-money-airtel';
-      console.log('Payment Method Set: mobile-money-airtel');
-    } else {
-      console.log('Phone number not supported');
-      return res.status(400).json({ error: 'Phone number not supported for withdrawals' });
-    }
-    const withdrawFee = Math.max(amount * 0.01, 2);
-    const totalDeduction = amount + withdrawFee;
+    const fee = amount <= 50 ? 0.50 :
+                amount <= 100 ? 1.00 :
+                amount <= 500 ? 1.50 :
+                amount <= 1000 ? 2.00 :
+                amount <= 5000 ? 3.00 : 5.00;
+    const totalDeduction = amount + fee;
     if (user.balance < totalDeduction) {
-      console.log('Insufficient balance:', { balance: user.balance, totalDeduction });
-      return res.status(400).json({ error: 'Insufficient balance' });
-    }
-    const paymentData = {
-      reference: `zangena-withdraw-${Date.now()}`,
-      amount,
-      currency: 'ZMW',
-      account_bank: 'mobilemoneyzambia',
-      account_number: phoneNumber,
-      narration: 'Zangena Withdrawal',
-    };
-    console.log('Payment Data:', paymentData);
-    const transferResponse = await flw.Transfer.initiate(paymentData);
-    console.log('Flutterwave Raw Response:', transferResponse);
-    if (transferResponse.status !== 'success') {
-      console.log('Flutterwave failed:', transferResponse);
-      throw new Error(`Withdrawal failed: ${transferResponse.message}`);
+      return res.status(400).json({ error: 'Insufficient balance including fee' });
     }
     user.balance -= totalDeduction;
-    user.transactions = user.transactions || [];
     user.transactions.push({
-      _id: crypto.randomBytes(16).toString('hex'),
-      type: 'withdrawn',
+      type: 'withdrawal',
       amount,
-      toFrom: `${phoneNumber} (${paymentMethod})`,
-      fee: withdrawFee,
+      fee,
+      toFrom: 'System',
       date: new Date(),
     });
     await user.save();
-    console.log('User updated:', { balance: user.balance });
-    res.json({ message: `Withdrew ${amount.toFixed(2)} ZMW (fee: ${withdrawFee.toFixed(2)} ZMW)`, balance: user.balance });
+    await AdminLedger.updateOne(
+      {},
+      {
+        $inc: { totalBalance: fee },
+        $set: { lastUpdated: new Date() },
+        $push: {
+          transactions: {
+            type: 'fee-collected',
+            amount: fee,
+            sender: user.username,
+            receiver: 'System',
+            date: new Date(),
+          },
+        },
+      },
+      { upsert: true }
+    );
+    res.json({ message: 'Withdrawal successful', amount, fee });
   } catch (error) {
-    console.error('Withdraw Error:', error.message, error.stack);
-    res.status(500).json({ error: error.message || 'Withdrawal failed' });
+    console.error('[WithdrawDirect] Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to process withdrawal' });
   }
 });
 
@@ -807,7 +833,7 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
     await user.save();
     res.status(200).json({ message: 'Push token saved for user' });
   } catch (error) {
-    console.error('Save Push Token Error:', error.message);
+    console.error('[SavePushToken] Error:', error.message);
     res.status(500).json({ error: 'Failed to save push token' });
   }
 });
@@ -820,12 +846,12 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
 
     if (email) {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        console.log('[USER] Invalid email format:', email);
+        console.log('[UpdateProfile] Invalid email format:', email);
         return res.status(400).json({ error: 'Invalid email format' });
       }
       const existingUser = await User.findOne({ email });
       if (existingUser && existingUser.phoneNumber !== req.user.phoneNumber) {
-        console.log('[USER] Email already exists:', email);
+        console.log('[UpdateProfile] Email already exists:', email);
         return res.status(409).json({ error: 'Email already exists' });
       }
       updates.email = email;
@@ -833,7 +859,7 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
 
     if (password) {
       if (password.length < 6) {
-        console.log('[USER] Password too short:', password.length);
+        console.log('[UpdateProfile] Password too short:', password.length);
         return res.status(400).json({ error: 'Password must be at least 6 characters' });
       }
       updates.password = await bcrypt.hash(password, 10);
@@ -841,18 +867,18 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
 
     if (pin) {
       if (pin.length !== 4 || !/^\d{4}$/.test(pin)) {
-        console.log('[USER] Invalid PIN:', pin);
+        console.log('[UpdateProfile] Invalid PIN:', pin);
         return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
       }
-      updates.pin = pin;
+      updates.pin = await bcrypt.hash(pin, 10);
     }
 
     if (!Object.keys(updates).length) {
-      console.log('[USER] No fields to update');
+      console.log('[UpdateProfile] No fields to update');
       return res.status(400).json({ error: 'No fields to update' });
     }
 
-    console.log('[USER] Updating user:', { phoneNumber: req.user.phoneNumber, updates });
+    console.log('[UpdateProfile] Updating user:', { phoneNumber: req.user.phoneNumber, updates });
     const user = await User.findOneAndUpdate(
       { phoneNumber: req.user.phoneNumber },
       { $set: updates },
@@ -860,20 +886,20 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
     ).select('-password -pin');
 
     if (!user) {
-      console.error('[USER] User not found:', req.user.phoneNumber);
+      console.error('[UpdateProfile] User not found:', req.user.phoneNumber);
       return res.status(404).json({ error: 'User not found' });
     }
 
     const token = jwt.sign(
-      { _id: user._id, phoneNumber: user.phoneNumber, role: user.role || 'user' },
-      process.env.JWT_SECRET || 'Zangena123$@2025',
-      { expiresIn: '1h' }
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '24h' }
     );
 
-    console.log('[USER] Profile updated:', { phoneNumber: user.phoneNumber, updatedFields: Object.keys(updates) });
+    console.log('[UpdateProfile] Profile updated:', { phoneNumber: user.phoneNumber, updatedFields: Object.keys(updates) });
     res.json({ message: 'Profile updated', user, token });
   } catch (error) {
-    console.error('[USER] Update Error:', {
+    console.error('[UpdateProfile] Error:', {
       message: error.message,
       code: error.code,
       name: error.name,
@@ -894,14 +920,14 @@ router.delete('/user/delete', authenticateToken(['user']), async (req, res) => {
   try {
     const user = await User.findOneAndDelete({ phoneNumber: req.user.phoneNumber });
     if (!user) {
-      console.error('[USER] User not found:', req.user.phoneNumber);
+      console.error('[DeleteUser] User not found:', req.user.phoneNumber);
       return res.status(404).json({ error: 'User not found' });
     }
-    await QRPin.deleteMany({ phoneNumber: user.phoneNumber });
-    console.log('[USER] Account deleted:', req.user.phoneNumber);
+    await QRPin.deleteMany({ username: user.username });
+    console.log('[DeleteUser] Account deleted:', req.user.phoneNumber);
     res.json({ message: 'Account deleted' });
   } catch (error) {
-    console.error('[USER] Delete Error:', {
+    console.error('[DeleteUser] Error:', {
       message: error.message,
       stack: error.stack,
     });
@@ -913,39 +939,39 @@ router.delete('/user/delete', authenticateToken(['user']), async (req, res) => {
 router.post('/refresh-token', async (req, res) => {
   const { refreshToken } = req.body;
   if (!refreshToken) {
-    console.log('[USER] Refresh token missing');
+    console.log('[RefreshToken] Refresh token missing');
     return res.status(400).json({ error: 'Refresh token is required', code: 'MISSING_REFRESH_TOKEN' });
   }
   try {
     const user = await User.findOne({ refreshToken });
     if (!user) {
-      console.log('[USER] Invalid refresh token');
+      console.log('[RefreshToken] Invalid refresh token');
       return res.status(403).json({ error: 'Invalid refresh token', code: 'INVALID_REFRESH_TOKEN' });
     }
     try {
-      jwt.verify(refreshToken, process.env.JWT_SECRET || 'Zangena123$@2025');
+      jwt.verify(refreshToken, JWT_SECRET);
     } catch (error) {
-      console.log('[USER] Invalid or expired refresh token');
+      console.log('[RefreshToken] Invalid or expired refresh token');
       return res.status(403).json({ error: 'Invalid or expired refresh token', code: 'INVALID_REFRESH_TOKEN' });
     }
     const accessToken = jwt.sign(
-      { phoneNumber: user.phoneNumber, role: user.role || 'user' },
-      process.env.JWT_SECRET || 'Zangena123$@2025',
-      { expiresIn: '1h' }
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '24h' }
     );
     const newRefreshToken = jwt.sign(
-      { phoneNumber: user.phoneNumber, role: user.role || 'user' },
-      process.env.JWT_SECRET || 'Zangena123$@2025',
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
+      JWT_SECRET,
       { expiresIn: '7d' }
     );
     await User.updateOne({ _id: user._id }, { $set: { refreshToken: newRefreshToken } });
-    console.log('[USER] Refresh Token Success:', { phoneNumber: user.phoneNumber });
+    console.log('[RefreshToken] Success:', { phoneNumber: user.phoneNumber });
     res.json({
       accessToken,
       refreshToken: newRefreshToken,
     });
   } catch (error) {
-    console.error('[USER] Refresh Token Error:', {
+    console.error('[RefreshToken] Error:', {
       message: error.message,
       stack: error.stack,
       refreshToken: refreshToken ? 'provided' : 'missing',
@@ -955,7 +981,7 @@ router.post('/refresh-token', async (req, res) => {
 });
 
 // Update Timestamp
-router.patch('/update-timestamp', authenticateToken(), async (req, res, next) => {
+router.patch('/update-timestamp', authenticateToken(), async (req, res) => {
   try {
     const { phoneNumber, lastViewedTimestamp } = req.body;
     if (!phoneNumber || !lastViewedTimestamp) {
@@ -994,11 +1020,12 @@ router.patch('/update-timestamp', authenticateToken(), async (req, res, next) =>
       },
     });
   } catch (error) {
-    console.error('[USER] Error:', error.message);
+    console.error('[UpdateTimestamp] Error:', error.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+// Toggle Active Status
 router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { username } = req.body;
   if (!username) {
@@ -1013,11 +1040,12 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
     await user.save();
     res.json({ message: `User ${username} is now ${user.isActive ? 'active' : 'inactive'}` });
   } catch (error) {
-    console.error('Toggle Active Error:', error.message, error.stack);
+    console.error('[ToggleActive] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to toggle user status' });
   }
 });
 
+// Get Transactions
 router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { username } = req.params;
   const { startDate, endDate, limit = 50, skip = 0 } = req.query;
@@ -1050,7 +1078,7 @@ router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin
       }));
     res.json({ transactions, total: user.transactions.length });
   } catch (error) {
-    console.error('Fetch Transactions Error:', error.message, error.stack);
+    console.error('[GetTransactions] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to fetch transactions' });
   }
 });
