@@ -689,4 +689,73 @@ router.post('/reset-pin', async (req, res) => {
   }
 });
 
+
+// Store QR PIN
+router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) => {
+  const { businessId, pin } = req.body;
+  if (!businessId || !pin) {
+    return res.status(400).json({ error: 'Business ID and PIN are required' });
+  }
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
+  try {
+    const qrId = crypto.randomBytes(16).toString('hex');
+    const session = await mongoose.startSession();
+    session.startTransaction({ writeConcern: { w: 'majority' } });
+    try {
+      const business = await Business.findOne({ businessId, isActive: true }).session(session);
+      if (!business) {
+        await session.abortTransaction();
+        session.endSession();
+        console.error('[StoreQRPin] Business not found or inactive', { businessId });
+        return res.status(404).json({ error: 'Business not found or inactive' });
+      }
+      if (businessId !== req.user.businessId) {
+        await session.abortTransaction();
+        session.endSession();
+        console.error('[StoreQRPin] Unauthorized', { requested: businessId, actual: req.user.businessId });
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+      // Delete existing QRPin for this business
+      await QRPin.deleteOne({ businessId, type: 'business' }, { session });
+      // Create new QRPin
+      await new QRPin({ type: 'business', businessId, qrId, pin }).save({ session });
+      // Add pending-pin transaction
+      await Business.updateOne(
+        { businessId },
+        {
+          $push: {
+            transactions: {
+              _id: new mongoose.Types.ObjectId().toString(),
+              type: 'pending-pin',
+              amount: 0,
+              toFrom: 'Self',
+              date: new Date(),
+              qrId,
+            },
+          },
+        },
+        { session }
+      );
+      await session.commitTransaction();
+      session.endSession();
+      console.log('[StoreQRPin] Success', { businessId, qrId });
+      res.json({ qrId });
+    } catch (error) {
+      await session.abortTransaction();
+      session.endSession();
+      throw error;
+    }
+  } catch (error) {
+    console.error('[StoreQRPin] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId,
+      pinLength: pin?.length,
+    });
+    res.status(500).json({ error: 'Server error storing QR PIN' });
+  }
+});
+
 module.exports = router;

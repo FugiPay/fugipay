@@ -507,7 +507,14 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       session.endSession();
       return res.status(404).json({ error: 'Invalid QR code or PIN' });
     }
-    const receiver = await User.findOne({ username: qrPin.username, isActive: true }).session(session);
+    let receiver, receiverIdentifier;
+    if (qrPin.type === 'user') {
+      receiver = await User.findOne({ username: qrPin.username, isActive: true }).session(session);
+      receiverIdentifier = receiver?.username;
+    } else if (qrPin.type === 'business') {
+      receiver = await Business.findOne({ businessId: qrPin.businessId, isActive: true }).session(session);
+      receiverIdentifier = receiver?.businessId;
+    }
     if (!receiver) {
       await session.abortTransaction();
       session.endSession();
@@ -532,7 +539,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
     const receivedTxId = new mongoose.Types.ObjectId().toString();
     const transactionDate = new Date();
 
-    // Batch User updates
+    // Update sender (User)
     await User.bulkWrite([
       {
         updateOne: {
@@ -544,27 +551,8 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
                 _id: sentTxId,
                 type: 'sent',
                 amount,
-                toFrom: receiver.username,
+                toFrom: receiverIdentifier,
                 fee: sendingFee,
-                date: transactionDate,
-                qrId,
-              },
-            },
-          },
-        },
-      },
-      {
-        updateOne: {
-          filter: { _id: receiver._id },
-          update: {
-            $inc: { balance: amount - receivingFee },
-            $push: {
-              transactions: {
-                _id: receivedTxId,
-                type: 'received',
-                amount,
-                toFrom: sender.username,
-                fee: receivingFee,
                 date: transactionDate,
                 qrId,
               },
@@ -574,9 +562,57 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       },
     ], { session });
 
-    // Delete QRPin and update AdminLedger
-    const updates = Promise.all([
-      QRPin.deleteOne({ qrId }, { session }),
+    // Update receiver (User or Business)
+    if (qrPin.type === 'user') {
+      await User.bulkWrite([
+        {
+          updateOne: {
+            filter: { _id: receiver._id },
+            update: {
+              $inc: { balance: amount - receivingFee },
+              $push: {
+                transactions: {
+                  _id: receivedTxId,
+                  type: 'received',
+                  amount,
+                  toFrom: sender.username,
+                  fee: receivingFee,
+                  date: transactionDate,
+                  qrId,
+                },
+              },
+            },
+          },
+        },
+      ], { session });
+    } else if (qrPin.type === 'business') {
+      await Business.bulkWrite([
+        {
+          updateOne: {
+            filter: { _id: receiver._id },
+            update: {
+              $inc: { 'balances.ZMW': amount - receivingFee },
+              $push: {
+                transactions: {
+                  _id: receivedTxId,
+                  type: 'received',
+                  amount,
+                  currency: 'ZMW',
+                  toFrom: sender.username,
+                  fee: receivingFee,
+                  date: transactionDate,
+                  qrId,
+                },
+              },
+            },
+          },
+        },
+      ], { session });
+    }
+
+    // Delete QRPin only for users
+    const updates = [
+      qrPin.type === 'user' ? QRPin.deleteOne({ qrId }, { session }) : Promise.resolve(),
       AdminLedger.updateOne(
         {},
         {
@@ -587,7 +623,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
               type: 'fee-collected',
               amount: sendingFee + receivingFee,
               sender: sender.username,
-              receiver: receiver.username,
+              receiver: receiverIdentifier,
               userTransactionIds: [sentTxId, receivedTxId],
               date: transactionDate,
               qrId,
@@ -596,12 +632,12 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
         },
         { upsert: true, session }
       ),
-    ]);
+    ];
 
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => reject(new Error('Transaction update timeout')), 15000);
     });
-    await Promise.race([updates, timeoutPromise]);
+    await Promise.race([Promise.all(updates), timeoutPromise]);
 
     await session.commitTransaction();
     session.endSession();
@@ -610,7 +646,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       sendingFee,
       receivingFee,
       sender: sender.username,
-      receiver: receiver.username,
+      receiver: receiverIdentifier,
       qrId,
       transactionDate,
     });

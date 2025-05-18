@@ -1,29 +1,39 @@
-// models/QRPin.js
 const mongoose = require('mongoose');
 
 const qrPinSchema = new mongoose.Schema({
-  username: { 
-    type: String, 
-    required: true, 
-    ref: 'User', // Reference to User model
-    index: true 
+  type: {
+    type: String,
+    required: true,
+    enum: ['user', 'business'],
   },
-  qrId: { 
-    type: String, 
-    required: true, 
-    unique: true, 
-    index: true 
+  username: {
+    type: String,
+    required: function() { return this.type === 'user'; },
+    ref: 'User',
+    index: true,
   },
-  pin: { 
-    type: String, 
-    required: true, 
-    minlength: 4, 
-    maxlength: 4 
+  businessId: {
+    type: String,
+    required: function() { return this.type === 'business'; },
+    ref: 'Business',
+    index: true,
   },
-  createdAt: { 
-    type: Date, 
-    default: Date.now, 
-    expires: 15 * 60 // Auto-delete after 15 minutes
+  qrId: {
+    type: String,
+    required: true,
+    unique: true,
+    index: true,
+  },
+  pin: {
+    type: String,
+    required: true,
+    minlength: 4,
+    maxlength: 4,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+    expires: function() { return this.type === 'user' ? 15 * 60 : null; }, // 15 minutes for users, persistent for businesses
   },
 });
 
