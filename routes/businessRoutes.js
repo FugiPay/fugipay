@@ -711,6 +711,7 @@ router.post('/reset-pin', async (req, res) => {
 });
 
 // Store QR PIN
+// Store QR PIN
 router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) => {
   const { businessId, pin } = req.body;
   if (!businessId || !pin) {
@@ -720,7 +721,19 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
     return res.status(400).json({ error: 'PIN must be a 4-digit number' });
   }
   try {
-    const qrId = crypto.randomBytes(16).toString('hex');
+    // Generate qrId with fallback
+    let qrId;
+    try {
+      const crypto = require('crypto');
+      qrId = crypto.randomBytes(16).toString('hex');
+      console.log('[StoreQRPin] Generated qrId with crypto:', qrId);
+    } catch (cryptoError) {
+      console.warn('[StoreQRPin] Crypto failed, using uuid fallback:', cryptoError.message);
+      const { v4: uuidv4 } = require('uuid');
+      qrId = uuidv4().replace(/-/g, ''); // 32-char hex
+    }
+
+    const hashedPin = await bcrypt.hash(pin, 10);
     const session = await mongoose.startSession();
     session.startTransaction({ writeConcern: { w: 'majority' } });
     try {
@@ -744,7 +757,7 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
         type: 'business',
         businessId,
         qrId,
-        pin,
+        pin: hashedPin,
         createdAt: new Date(),
         persistent: true,
       }).save({ session });
@@ -756,9 +769,11 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
             transactions: {
               _id: new mongoose.Types.ObjectId().toString(),
               type: 'pending-pin',
-              amount: 0,
+              amount: mongoose.Types.Decimal128.fromString('0'),
+              currency: 'ZMW',
               toFrom: 'Self',
               date: new Date(),
+              status: 'completed',
               qrId,
             },
           },

@@ -5,9 +5,9 @@ const crypto = require('crypto');
 // Audit Log Schema (embedded)
 const auditLogSchema = new mongoose.Schema({
   action: { type: String, required: true, enum: ['create', 'update', 'delete', 'kyc_update', 'balance_change', 'login', 'pin_reset'] },
-  performedBy: { type: String, required: true }, // Username or 'system'
+  performedBy: { type: String, required: true },
   timestamp: { type: Date, default: Date.now, index: true },
-  details: { type: mongoose.Schema.Types.Mixed }, // Flexible for action-specific data
+  details: { type: mongoose.Schema.Types.Mixed },
 });
 
 // Transaction Schema (embedded in Business)
@@ -18,7 +18,7 @@ const transactionSchema = new mongoose.Schema({
     required: true,
     enum: [
       'received', 'deposited', 'withdrawn', 'refunded', 'settled', 'fee-collected',
-      'zmc-received', 'zmc-sent', 'currency-converted',
+      'zmc-received', 'zmc-sent', 'currency-converted', 'pending-pin', // Add pending-pin
     ],
   },
   amount: { type: mongoose.Schema.Types.Decimal128, required: true },
@@ -27,7 +27,7 @@ const transactionSchema = new mongoose.Schema({
   fee: { type: mongoose.Schema.Types.Decimal128, default: 0 },
   originalAmount: { type: mongoose.Schema.Types.Decimal128 },
   originalCurrency: { type: String, enum: ['ZMW', 'ZMC', 'USD'] },
-  exchangeRate: { type: Number }, // For currency conversion
+  exchangeRate: { type: Number },
   reason: { type: String, maxlength: 200 },
   trustRating: { type: Number, min: 1, max: 5 },
   date: { type: Date, default: Date.now, index: true },
@@ -57,7 +57,7 @@ const pendingWithdrawalSchema = new mongoose.Schema({
     type: { type: String, enum: ['bank', 'mobile_money', 'zambia_coin'], required: true },
     bankName: { type: String },
     accountNumber: { type: String },
-    swiftCode: { type: String }, // For international transfers
+    swiftCode: { type: String },
   },
 });
 
@@ -101,15 +101,15 @@ const businessSchema = new mongoose.Schema({
     ZMC: { type: mongoose.Schema.Types.Decimal128, default: 0 },
     USD: { type: mongoose.Schema.Types.Decimal128, default: 0 },
   },
-  qrCode: { type: String }, // URL for QR code
+  qrCode: { type: String },
   bankDetails: {
     bankName: { type: String },
     accountNumber: { type: String },
     accountType: { type: String, enum: ['bank', 'mobile_money', 'zambia_coin'] },
     swiftCode: { type: String },
   },
-  tpinCertificate: { type: String }, // S3 URL
-  pacraCertificate: { type: String }, // S3 URL
+  tpinCertificate: { type: String },
+  pacraCertificate: { type: String },
   kycStatus: { type: String, enum: ['pending', 'verified', 'rejected', 'flagged'], default: 'pending' },
   kycDetails: {
     incorporationDate: { type: Date },
@@ -127,9 +127,9 @@ const businessSchema = new mongoose.Schema({
     default: 'basic',
   },
   transactionLimits: {
-    daily: { type: Number, default: 100000 }, // ZMW
-    monthly: { type: Number, default: 1000000 }, // ZMW
-    maxPerTransaction: { type: Number, default: 50000 }, // ZMW
+    daily: { type: Number, default: 100000 },
+    monthly: { type: Number, default: 1000000 },
+    maxPerTransaction: { type: Number, default: 50000 },
   },
   role: { type: String, enum: ['business', 'admin'], default: 'business' },
   trustScore: { type: Number, default: 0, min: 0, max: 100 },
@@ -193,7 +193,6 @@ businessSchema.pre('save', async function (next) {
       if (amount > this.transactionLimits.maxPerTransaction) {
         return next(new Error(`Transaction amount exceeds max limit of ${this.transactionLimits.maxPerTransaction} ZMW`));
       }
-      // Check daily limit
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
       const dailyTotal = this.transactions
