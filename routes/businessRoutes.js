@@ -621,35 +621,35 @@ router.post('/update-tier', authenticateToken(['admin']), async (req, res) => {
   }
 });
 
+
 // Get Business Details
-router.get('/:businessId', authenticateToken(['business', 'admin']), async (req, res) => {
+router.get('/:businessId', async (req, res) => {
+  const { businessId } = req.params;
   try {
-    const business = await Business.findOne({ businessId: req.params.businessId }).lean();
+    console.log('[GetBusiness] Fetching business:', businessId);
+    const business = await Business.findOne({ businessId });
     if (!business) {
+      console.log('[GetBusiness] Business not found:', businessId);
       return res.status(404).json({ error: 'Business not found' });
     }
-    if (req.user.role !== 'admin' && req.user.businessId !== business.businessId) {
-      return res.status(403).json({ error: 'Unauthorized access' });
-    }
-    res.json({
+    const response = {
       businessId: business.businessId,
       name: business.name,
       ownerUsername: business.ownerUsername,
-      phoneNumber: business.phoneNumber,
-      email: business.email,
-      balances: {
-        ZMW: convertDecimal128(business.balances.ZMW),
-        ZMC: convertDecimal128(business.balances.ZMC),
-        USD: convertDecimal128(business.balances.USD),
-      },
+      qrId: business.qrCode,
       isActive: business.isActive,
       kycStatus: business.kycStatus,
       accountTier: business.accountTier,
-      transactionLimits: business.transactionLimits,
-    });
+    };
+    console.log('[GetBusiness] Sending response:', response);
+    res.json(response);
   } catch (error) {
-    console.error('[GetBusiness] Error:', error.message);
-    res.status(500).json({ error: 'Failed to fetch business details', details: error.message });
+    console.error('[GetBusiness] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId,
+    });
+    res.status(500).json({ error: 'Failed to fetch business', details: error.message });
   }
 });
 
