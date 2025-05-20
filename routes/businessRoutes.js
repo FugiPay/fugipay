@@ -205,6 +205,7 @@ router.post('/login', async (req, res) => {
       business: {
         businessId: business.businessId,
         name: business.name,
+        ownerUsername: business.ownerUsername, // Add ownerUsername
         balances: {
           ZMW: convertDecimal128(business.balances.ZMW),
           ZMC: convertDecimal128(business.balances.ZMC),
