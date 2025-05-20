@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 
 const qrPinSchema = new mongoose.Schema({
   type: {
@@ -24,8 +25,6 @@ const qrPinSchema = new mongoose.Schema({
   pin: {
     type: String,
     required: true,
-    minlength: 4,
-    maxlength: 4,
   },
   createdAt: {
     type: Date,
@@ -33,7 +32,7 @@ const qrPinSchema = new mongoose.Schema({
   },
   persistent: {
     type: Boolean,
-    default: function() { return this.type === 'business'; }, // Business QR pins are persistent
+    default: function() { return this.type === 'business'; },
   },
 });
 
@@ -43,12 +42,23 @@ qrPinSchema.index({ businessId: 1 });
 qrPinSchema.index({ qrId: 1 }, { unique: true });
 qrPinSchema.index({ createdAt: 1 }, { name: 'createdAt_1', expireAfterSeconds: 900, background: true });
 
-// Pre-save hook to ensure persistent business QR pins aren't affected by TTL
-qrPinSchema.pre('save', function(next) {
+// Pre-save hook to hash PIN and ensure persistent business QR pins
+qrPinSchema.pre('save', async function(next) {
+  if (this.isModified('pin') && !this.pin.startsWith('$2')) {
+    if (!/^\d{4}$/.test(this.pin)) {
+      return next(new Error('PIN must be a 4-digit number'));
+    }
+    this.pin = await bcrypt.hash(this.pin, 10);
+  }
   if (this.type === 'business') {
     this.persistent = true;
   }
   next();
 });
+
+// Method to compare PIN
+qrPinSchema.methods.comparePin = async function(candidatePin) {
+  return await bcrypt.compare(candidatePin, this.pin);
+};
 
 module.exports = mongoose.model('QRPin', qrPinSchema);
