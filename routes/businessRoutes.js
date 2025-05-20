@@ -155,15 +155,16 @@ router.post('/register', upload.fields([
 
 // Login
 router.post('/login', async (req, res) => {
-  const { businessId, pin } = req.body;
+  const { businessId, phoneNumber, pin } = req.body;
   try {
-    console.log('[Login] Attempting login for businessId:', businessId);
-    if (!businessId || !pin) {
-      return res.status(400).json({ error: 'Business ID and PIN are required' });
+    console.log('[Login] Attempting login with:', { businessId, phoneNumber });
+    if (!pin || (!businessId && !phoneNumber)) {
+      return res.status(400).json({ error: 'Business ID or phone number and PIN are required' });
     }
-    const business = await Business.findOne({ businessId });
+    const query = businessId ? { businessId } : { phoneNumber };
+    const business = await Business.findOne(query);
     if (!business) {
-      console.log('[Login] Business not found for ID:', businessId);
+      console.log('[Login] Business not found for:', { businessId, phoneNumber });
       return res.status(404).json({ error: 'Business not found' });
     }
     console.log('[Login] Business found:', business.businessId, 'isActive:', business.isActive, 'kycStatus:', business.kycStatus);
@@ -171,7 +172,7 @@ router.post('/login', async (req, res) => {
       return res.status(403).json({ error: 'Business account is not active' });
     }
     if (!business.hashedPin) {
-      console.error('[Login] Missing hashedPin for business:', businessId);
+      console.error('[Login] Missing hashedPin for business:', business.businessId);
       return res.status(500).json({ error: 'Invalid business account configuration' });
     }
     const isPinValid = await bcrypt.compare(pin, business.hashedPin);
@@ -193,11 +194,11 @@ router.post('/login', async (req, res) => {
     business.auditLogs.push({
       action: 'login',
       performedBy: business.ownerUsername,
-      details: { success: true, ip: req.ip },
+      details: { success: true, ip: req.ip, loginMethod: businessId ? 'businessId' : 'phoneNumber' },
     });
     await business.save();
     if (business.pushToken) {
-      await sendPushNotification(business.pushToken, 'Login Successful', `Welcome back, ${business.name}!`, { businessId });
+      await sendPushNotification(business.pushToken, 'Login Successful', `Welcome back, ${business.name}!`, { businessId: business.businessId });
     }
     const response = {
       token,
@@ -221,6 +222,7 @@ router.post('/login', async (req, res) => {
       message: error.message,
       stack: error.stack,
       businessId,
+      phoneNumber,
     });
     res.status(500).json({ error: 'Failed to login', details: error.message });
   }
