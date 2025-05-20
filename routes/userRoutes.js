@@ -53,7 +53,7 @@ const ensureIndexes = async () => {
       code: error.code,
       codeName: error.codeName,
     });
-    if (error.code !== 85) throw error; // Ignore IndexOptionsConflict, rethrow others
+    if (error.code !== 85) throw error;
   }
 };
 ensureIndexes();
@@ -225,6 +225,7 @@ router.post('/login', async (req, res) => {
     res.status(200).json({
       token,
       username: user.username,
+      name: user.name,
       phoneNumber: user.phoneNumber,
       role: user.role || 'user',
       kycStatus: user.kycStatus || 'pending',
@@ -251,7 +252,7 @@ router.post('/forgot-password', async (req, res) => {
       return res.status(500).json({ error: 'Invalid user email configuration' });
     }
     const resetToken = crypto.randomBytes(20).toString('hex');
-    const resetTokenExpiry = Date.now() + 3600000; // 1 hour
+    const resetTokenExpiry = Date.now() + 3600000;
     user.resetToken = resetToken;
     user.resetTokenExpiry = resetTokenExpiry;
     await user.save();
@@ -305,15 +306,13 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
   }, 25000);
   try {
     await mongoose.connection.db.admin().ping();
-    const user = await User.findOne(
-      { username: req.params.username },
-      { username: 1, name: 1, phoneNumber: 1, email: 1, balance: 1, zambiaCoinBalance: 1, trustScore: 1, transactions: { $slice: -10 }, kycStatus: 1, isActive: 1, pendingDeposits: 1, pendingWithdrawals: 1 }
-    ).lean().exec();
+    const user = await User.findOne({ username: req.params.username });
     if (!user) {
       console.log(`[GET /user/${req.params.username}] User not found`);
       clearTimeout(timeout);
       return res.status(404).json({ error: 'User not found' });
     }
+    const qrPin = await QRPin.findOne({ username: req.params.username, type: 'user' });
     if (req.user.username !== req.params.username && !['admin', 'business'].includes(req.user.role)) {
       console.log(`[GET /user/${req.params.username}] Unauthorized access by ${req.user.username}`);
       clearTimeout(timeout);
@@ -327,11 +326,12 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
       balance: user.balance,
       zambiaCoinBalance: user.zambiaCoinBalance,
       trustScore: user.trustScore,
-      transactions: user.transactions,
+      transactions: user.transactions.slice(-10),
       kycStatus: user.kycStatus,
       isActive: user.isActive,
       pendingDeposits: user.pendingDeposits,
       pendingWithdrawals: user.pendingWithdrawals,
+      qrId: qrPin ? qrPin.qrId : null,
     };
     console.log(`[GET /user/${req.params.username}] Total time: ${Date.now() - start}ms`);
     clearTimeout(timeout);
@@ -357,7 +357,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), async (req, res) => {
       .lean()
       .exec();
     if (!user) return res.status(404).json({ error: 'User not found' });
-    // Convert Decimal128 fields
+    const qrPin = await QRPin.findOne({ username: user.username, type: 'user' });
     const convertedUser = {
       ...user,
       balance: user.balance?.$numberDecimal ? parseFloat(user.balance.$numberDecimal) : user.balance || 0,
@@ -391,6 +391,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), async (req, res) => {
       lastViewedTimestamp: convertedUser.lastViewedTimestamp || 0,
       pendingDeposits: convertedUser.pendingDeposits,
       pendingWithdrawals: convertedUser.pendingWithdrawals,
+      qrId: qrPin ? qrPin.qrId : null,
     });
   } catch (error) {
     console.error('[GetUserByPhone] Error:', error.message);
@@ -403,6 +404,7 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
   try {
     const user = await User.findOne({ phoneNumber: req.params.phoneNumber });
     if (!user) return res.status(404).json({ error: 'User not found' });
+    const qrPin = await QRPin.findOne({ username: user.username, type: 'user' });
     if (user.phoneNumber !== req.user.phoneNumber) return res.status(403).json({ error: 'Unauthorized' });
     res.json({
       phoneNumber: user.phoneNumber,
@@ -416,6 +418,7 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
       lastViewedTimestamp: user.lastViewedTimestamp || 0,
       pendingDeposits: user.pendingDeposits,
       pendingWithdrawals: user.pendingWithdrawals,
+      qrId: qrPin ? qrPin.qrId : null,
     });
   } catch (error) {
     console.error('[GetUserByPhoneAlt] Error:', error.message);
@@ -457,7 +460,6 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
   }
   try {
     const qrId = crypto.randomBytes(16).toString('hex');
-    const hashedPin = await bcrypt.hash(pin, 10);
     const session = await mongoose.startSession();
     session.startTransaction({ writeConcern: { w: 'majority' } });
     try {
@@ -488,14 +490,12 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
         console.error('[StoreQRPin] Unauthorized', { requested: username, actual: user.username });
         return res.status(403).json({ error: 'Unauthorized' });
       }
-      // Delete existing QRPin for this user
       await QRPin.deleteOne({ username, type: 'user' }, { session });
-      // Create new QRPin with explicit createdAt and persistent: false
       await new QRPin({
         type: 'user',
         username,
         qrId,
-        pin: hashedPin,
+        pin: await bcrypt.hash(pin, 10),
         createdAt: new Date(),
         persistent: false,
       }).save({ session });
@@ -523,7 +523,10 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
 router.post('/pay-qr', authenticateToken(), async (req, res) => {
   const { qrId, amount, pin, senderUsername } = req.body;
   if (!qrId || !amount || !pin || !senderUsername) {
-    return res.status(400).json({ error: 'QR ID, amount, PIN, and sender username required' });
+    return res.status(400).json({ error: 'QR ID, amount, PIN, and sender username are required' });
+  }
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
   }
   if (amount <= 0 || amount > 10000) {
     return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
@@ -535,24 +538,28 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
     if (!sender || sender.username !== req.user.username) {
       await session.abortTransaction();
       session.endSession();
+      console.error('[PayQR] Unauthorized sender', { senderUsername, user: req.user.username });
       return res.status(403).json({ error: 'Unauthorized sender' });
     }
     const qrPin = await QRPin.findOne({ qrId }).session(session);
     if (!qrPin) {
       await session.abortTransaction();
       session.endSession();
+      console.error('[PayQR] Invalid QR code', { qrId });
       return res.status(404).json({ error: 'Invalid QR code' });
     }
-    const isPinValid = await bcrypt.compare(pin, qrPin.pin);
+    const isPinValid = await qrPin.comparePin(pin);
     if (!isPinValid) {
       await session.abortTransaction();
       session.endSession();
+      console.error('[PayQR] Invalid PIN', { qrId, senderUsername });
       return res.status(401).json({ error: 'Invalid PIN' });
     }
-    // Check if QR pin is expired for non-persistent pins
     if (!qrPin.persistent && qrPin.createdAt < new Date(Date.now() - 15 * 60 * 1000)) {
-      await session.abortTransaction();
+      await QRPin.deleteOne({ qrId }, { session });
+      await session.commitTransaction();
       session.endSession();
+      console.error('[PayQR] QR code expired', { qrId, createdAt: qrPin.createdAt });
       return res.status(400).json({ error: 'QR code expired' });
     }
     let receiver, receiverIdentifier;
@@ -566,6 +573,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
     if (!receiver) {
       await session.abortTransaction();
       session.endSession();
+      console.error('[PayQR] Receiver not found or inactive', { qrId, type: qrPin.type });
       return res.status(404).json({ error: 'Receiver not found or inactive' });
     }
     const sendingFee = amount <= 50 ? 0.50 :
@@ -581,13 +589,13 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
     if (sender.balance < amount + sendingFee) {
       await session.abortTransaction();
       session.endSession();
+      console.error('[PayQR] Insufficient balance', { senderUsername, balance: sender.balance, required: amount + sendingFee });
       return res.status(400).json({ error: 'Insufficient balance' });
     }
     const sentTxId = new mongoose.Types.ObjectId().toString();
     const receivedTxId = new mongoose.Types.ObjectId().toString();
     const transactionDate = new Date();
 
-    // Update sender (User)
     await User.bulkWrite([
       {
         updateOne: {
@@ -610,7 +618,6 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       },
     ], { session });
 
-    // Update receiver (User or Business)
     if (qrPin.type === 'user') {
       await User.bulkWrite([
         {
@@ -658,9 +665,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       ], { session });
     }
 
-    // Delete QRPin only for non-persistent (user) pins
     const updates = [
-      !qrPin.persistent ? QRPin.deleteOne({ qrId }, { session }) : Promise.resolve(),
       AdminLedger.updateOne(
         {},
         {
@@ -682,6 +687,11 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       ),
     ];
 
+    // Delete non-persistent QRPin after successful payment
+    if (!qrPin.persistent) {
+      updates.push(QRPin.deleteOne({ qrId }, { session }));
+    }
+
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => reject(new Error('Transaction update timeout')), 15000);
     });
@@ -689,7 +699,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
 
     await session.commitTransaction();
     session.endSession();
-    console.log('[PayQR] Transaction:', {
+    console.log('[PayQR] Transaction success', {
       amount,
       sendingFee,
       receivingFee,
@@ -698,7 +708,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       qrId,
       transactionDate,
     });
-    res.json({ sendingFee, receivingFee, amount });
+    res.json({ message: 'Payment successful', sendingFee, receivingFee, amount });
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
@@ -708,6 +718,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       qrId,
       senderUsername,
       amount,
+      pinLength: pin?.length,
     });
     res.status(500).json({ error: error.message === 'Transaction update timeout' ? 'Transaction timed out' : 'Server error processing payment' });
   }
