@@ -230,6 +230,7 @@ router.post('/login', async (req, res) => {
       role: user.role || 'user',
       kycStatus: user.kycStatus || 'pending',
       isFirstLogin,
+      isActive: user.isActive, // Add isActive from User model
     });
   } catch (error) {
     console.error('[Login] Error:', error.message, error.stack);
