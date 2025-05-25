@@ -1,3 +1,4 @@
+// routes/adminRoutes.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -30,9 +31,12 @@ const requireAdmin = async (req, res, next) => {
     if (!user || user.role !== 'admin') {
       return res.status(403).json({ error: 'Admin access required' });
     }
+    if (!user.isActive || user.kycStatus !== 'verified') {
+      return res.status(403).json({ error: 'Admin account inactive or not verified' });
+    }
     next();
   } catch (error) {
-    console.error('[ADMIN] Error:', error.message);
+    console.error('[ADMIN] RequireAdmin Error:', error.message, error.stack);
     res.status(500).json({ error: 'Server error' });
   }
 };
@@ -664,25 +668,49 @@ router.get('/stats', authenticateToken(['admin']), requireAdmin, async (req, res
       Business.find().lean(),
       AdminLedger.findOne().lean(),
     ]);
+
+    // Safely handle numerical calculations
     const stats = {
       totalUsers: users.length,
-      totalUserBalance: users.reduce((sum, u) => sum + Number(u.balance || 0), 0),
-      pendingUserDepositsCount: users.flatMap(u => u.pendingDeposits || []).filter(d => d.status === 'pending').length,
-      pendingUserWithdrawalsCount: users.flatMap(u => u.pendingWithdrawals || []).filter(w => w.status === 'pending').length,
+      totalUserBalance: users.reduce((sum, u) => {
+        const balance = Number(u.balance || 0);
+        return sum + (isNaN(balance) ? 0 : balance);
+      }, 0),
+      pendingUserDepositsCount: users
+        .flatMap(u => u.pendingDeposits || [])
+        .filter(d => d.status === 'pending').length,
+      pendingUserWithdrawalsCount: users
+        .flatMap(u => u.pendingWithdrawals || [])
+        .filter(w => w.status === 'pending').length,
       totalBusinesses: businesses.length,
-      totalBusinessBalance: businesses.reduce((sum, b) => sum + Number(b.balances?.ZMW || 0), 0),
-      pendingBusinessDepositsCount: businesses.flatMap(b => b.pendingDeposits || []).filter(d => d.status === 'pending').length,
-      pendingBusinessWithdrawalsCount: businesses.flatMap(b => b.pendingWithdrawals || []).filter(w => w.status === 'pending').length,
+      totalBusinessBalance: businesses.reduce((sum, b) => {
+        const balance = Number(b.balances?.ZMW || 0);
+        return sum + (isNaN(balance) ? 0 : balance);
+      }, 0),
+      pendingBusinessDepositsCount: businesses
+        .flatMap(b => b.pendingDeposits || [])
+        .filter(d => d.status === 'pending').length,
+      pendingBusinessWithdrawalsCount: businesses
+        .flatMap(b => b.pendingWithdrawals || [])
+        .filter(w => w.status === 'pending').length,
       totalBalance: Number(ledger?.totalBalance || 0),
       recentTxCount: users
         .flatMap(u => u.transactions || [])
         .concat(businesses.flatMap(b => b.transactions || []))
-        .filter(tx => new Date(tx.date) > new Date(Date.now() - 24 * 60 * 60 * 1000)).length,
+        .filter(tx => {
+          try {
+            return new Date(tx.date) > new Date(Date.now() - 24 * 60 * 60 * 1000);
+          } catch (e) {
+            console.warn('[Stats] Invalid transaction date:', tx);
+            return false;
+          }
+        }).length,
     };
+
     res.json(stats);
   } catch (error) {
     console.error('[Stats] Error:', error.message, error.stack);
-    res.status(500).json({ error: 'Failed to fetch stats' });
+    res.status(500).json({ error: 'Failed to fetch stats', details: error.message });
   }
 });
 
