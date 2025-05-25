@@ -3,7 +3,7 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const User = require('../models/User');
-const { Business } = require('../models/Business'); // Fix: Destructure Business
+const { Business } = require('../models/Business');
 const AdminLedger = require('../models/AdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
 const bcrypt = require('bcryptjs');
@@ -210,13 +210,19 @@ router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin
 // Get all businesses with pagination and filters
 router.get('/businesses', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   try {
-    const { page = 1, limit = 10, kycStatus, isActive } = req.query;
+    const { page = 1, limit = 10, kycStatus, isActive, search = '' } = req.query;
     const query = {};
     if (kycStatus) query.kycStatus = kycStatus;
     if (isActive !== undefined) query.isActive = isActive === 'true';
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { phoneNumber: { $regex: search, $options: 'i' } },
+      ];
+    }
     
     const businesses = await Business.find(query)
-      .select('businessId name kycStatus isActive accountTier createdAt')
+      .select('businessId name phoneNumber kycStatus isActive accountTier createdAt')
       .limit(Number(limit))
       .skip((Number(page) - 1) * Number(limit))
       .lean();
@@ -230,7 +236,7 @@ router.get('/businesses', authenticateToken(['admin']), requireAdmin, async (req
       pages: Math.ceil(total / Number(limit)),
     });
   } catch (error) {
-    console.error('[ADMIN] Fetch Businesses Error:', error.message, error.stack);
+    console.error('[ADMIN] Fetch businesses error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to fetch businesses' });
   }
 });
@@ -265,7 +271,7 @@ router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (re
         `KYC ${approved ? 'Approved' : 'Rejected'}`,
         `<h2>KYC ${approved ? 'Approved' : 'Rejected'}</h2>
          <p>Your KYC verification has been ${approved ? 'approved' : 'rejected'}${rejectionReason ? ': ' + rejectionReason : '.'}</p>
-         <p>Best regards,<br>Zangena Team</p>`
+         <p>Best regards</p>`
       );
     }
     if (business.pushToken) {
@@ -275,9 +281,9 @@ router.post('/verify-kyc', authenticateToken(['admin']), requireAdmin, async (re
         `Your KYC verification was ${approved ? 'approved' : 'rejected'}${rejectionReason ? ': ' + rejectionReason : '.'}`
       );
     }
-    res.json({ message: `KYC ${approved ? 'approved' : 'rejected'}` });
+    res.json({ message: `Business ${approved ? 'approved' : 'rejected'}` });
   } catch (error) {
-    console.error('[ADMIN] Verify KYC Error:', error.message, error.stack);
+    console.error('[ADMIN] Verify KYC error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to verify KYC' });
   }
 });
@@ -303,7 +309,7 @@ router.post('/set-business-active', authenticateToken(['admin']), requireAdmin, 
         `Business Account ${isActive ? 'Activated' : 'Deactivated'}`,
         `<h2>Business Account ${isActive ? 'Activated' : 'Deactivated'}</h2>
          <p>Your business account has been ${isActive ? 'activated' : 'deactivated'}.</p>
-         <p>Best regards,<br>Zangena Team</p>`
+         <p>Best regards</p>`
       );
     }
     if (business.pushToken) {
@@ -315,7 +321,7 @@ router.post('/set-business-active', authenticateToken(['admin']), requireAdmin, 
     }
     res.json({ message: `Business ${isActive ? 'activated' : 'deactivated'}` });
   } catch (error) {
-    console.error('[ADMIN] Set Business Active Error:', error.message, error.stack);
+    console.error('[ADMIN] Set business active error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to set business active status' });
   }
 });
@@ -350,7 +356,7 @@ router.post('/update-tier', authenticateToken(['admin']), requireAdmin, async (r
         'Account Tier Updated',
         `<h2>Account Tier Updated</h2>
          <p>Your account tier is now ${tier}.</p>
-         <p>Best regards,<br>Zangena Team</p>`
+         <p>Best regards</p>`
       );
     }
     if (business.pushToken) {
@@ -418,21 +424,20 @@ router.post('/verify-withdrawal', authenticateToken(['admin']), requireAdmin, as
       await sendEmail(
         user.email,
         `Withdrawal ${approved ? 'Approved' : 'Rejected'}`,
-        `<h2>Withdrawal ${approved ? 'Approved' : 'Rejected'}</h2>
-         <p>Your withdrawal request for ${withdrawal.amount.toFixed(2)} ZMW has been ${approved ? 'approved' : 'rejected'}.</p>
-         <p>Best regards,<br>Zangena Team</p>`
+        `<h2>Withdrawal ${withdrawal.amount ? 'Approved' : 'Rejected'}</h2>
+         <p>Your withdrawal request for ${withdrawal.amount.toFixed(2)} ZMW has been ${approved ? 'approved' : 'rejected'}. </p>`
       );
     }
     if (user.pushToken) {
       await sendPushNotification(
         user.pushToken,
         `Withdrawal ${approved ? 'Approved' : 'Rejected'}`,
-        `Your withdrawal of ${withdrawal.amount.toFixed(2)} ZMW was ${approved ? 'approved' : 'rejected'}.`
+        `Your withdrawal of ${withdrawal.amount.toFixed(2)} ZMW was ${approved ? 'approved' : 'rejected'}`
       );
     }
     res.json({ message: `Withdrawal ${approved ? 'completed' : 'rejected'}` });
   } catch (error) {
-    console.error('[VerifyWithdrawal] Error:', error.message, error.stack);
+    console.error('[VerifyWithdrawal] Error:', error.message || error.stack);
     res.status(500).json({ error: 'Failed to verify withdrawal' });
   }
 });
@@ -481,8 +486,7 @@ router.post('/verify-deposit', authenticateToken(['admin']), requireAdmin, async
         user.email,
         `Deposit ${approved ? 'Approved' : 'Rejected'}`,
         `<h2>Deposit ${approved ? 'Approved' : 'Rejected'}</h2>
-         <p>Your deposit request for ${deposit.amount.toFixed(2)} ZMW has been ${approved ? 'approved' : 'rejected'}.</p>
-         <p>Best regards,<br>Zangena Team</p>`
+         <p>Your deposit request for ${deposit.amount.toFixed(2)} ZMW has been ${approved ? 'approved' : 'rejected'}.</p>`
       );
     }
     if (user.pushToken) {
@@ -494,7 +498,7 @@ router.post('/verify-deposit', authenticateToken(['admin']), requireAdmin, async
     }
     res.json({ message: `Deposit ${approved ? 'approved' : 'rejected'}` });
   } catch (error) {
-    console.error('[VerifyDeposit] Error:', error.message, error.stack);
+    console.error('[VerifyDeposit] Error:', error.message || error.stack);
     res.status(500).json({ error: 'Failed to verify deposit' });
   }
 });
@@ -542,8 +546,7 @@ router.post('/verify-business-deposit', authenticateToken(['admin']), requireAdm
         business.email,
         `Deposit ${approved ? 'Approved' : 'Rejected'}`,
         `<h2>Deposit ${approved ? 'Approved' : 'Rejected'}</h2>
-         <p>Your deposit request for ${Number(deposit.amount).toFixed(2)} ZMW has been ${approved ? 'approved' : 'rejected'}.</p>
-         <p>Best regards,<br>Zangena Team</p>`
+         <p>Your deposit request for ${Number(deposit.amount).toFixed(2)} ZMW has been ${approved ? 'approved' : 'rejected'}.</p>`
       );
     }
     if (business.pushToken) {
@@ -555,7 +558,7 @@ router.post('/verify-business-deposit', authenticateToken(['admin']), requireAdm
     }
     res.json({ message: `Business deposit ${approved ? 'approved' : 'rejected'}` });
   } catch (error) {
-    console.error('[VerifyBusinessDeposit] Error:', error.message, error.stack);
+    console.error('[VerifyBusinessDeposit] Error:', error.message || error.stack);
     res.status(500).json({ error: 'Failed to verify business deposit' });
   }
 });
@@ -608,8 +611,7 @@ router.post('/verify-business-withdrawal', authenticateToken(['admin']), require
         business.email,
         `Withdrawal ${approved ? 'Approved' : 'Rejected'}`,
         `<h2>Withdrawal ${approved ? 'Approved' : 'Rejected'}</h2>
-         <p>Your withdrawal request for ${Number(withdrawal.amount).toFixed(2)} ZMW has been ${approved ? 'approved' : 'rejected'}.</p>
-         <p>Best regards,<br>Zangena Team</p>`
+         <p>Your withdrawal request for ${Number(withdrawal.amount).toFixed(2)} ZMW has been ${approved ? 'approved' : 'rejected'}.</p>`
       );
     }
     if (business.pushToken) {
@@ -621,7 +623,7 @@ router.post('/verify-business-withdrawal', authenticateToken(['admin']), require
     }
     res.json({ message: `Business withdrawal ${approved ? 'approved' : 'rejected'}` });
   } catch (error) {
-    console.error('[VerifyBusinessWithdrawal] Error:', error.message, error.stack);
+    console.error('[VerifyBusinessWithdrawal] Error:', error.message || error.stack);
     res.status(500).json({ error: 'Failed to verify business withdrawal' });
   }
 });
@@ -654,7 +656,7 @@ router.get('/ledger', authenticateToken(['admin']), requireAdmin, async (req, re
       }));
     res.json(ledger);
   } catch (error) {
-    console.error('[LedgerFetch] Error:', error.message, error.stack);
+    console.error('[LedgerFetch] Error:', error.message || error.stack);
     res.status(500).json({ error: 'Failed to fetch ledger' });
   }
 });
@@ -745,13 +747,12 @@ router.post('/credit', authenticateToken(['admin']), requireAdmin, async (req, r
         user.email,
         'Balance Credited',
         `<h2>Balance Credited</h2>
-         <p>Your account was credited ${Number(amount).toFixed(2)} ZMW by admin.</p>
-         <p>Best regards,<br>Zangena Team</p>`
+         <p>Your account was credited ${Number(amount).toFixed(2)} ZMW by admin.</p>`
       );
     }
     res.json({ message: `Credited ${Number(amount).toFixed(2)} ZMW to ${toUsername}` });
   } catch (error) {
-    console.error('[Credit] Error:', error.message, error.stack);
+    console.error('[Credit] Error:', error.message || error.stack);
     res.status(500).json({ error: 'Failed to credit user' });
   }
 });
