@@ -1,10 +1,9 @@
-// routes/adminRoutes.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const User = require('../models/User');
-const Business = require('../models/Business');
+const { Business } = require('../models/Business'); // Fix: Destructure Business
 const AdminLedger = require('../models/AdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
 const bcrypt = require('bcryptjs');
