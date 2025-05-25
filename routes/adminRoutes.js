@@ -757,4 +757,8 @@ router.post('/credit', authenticateToken(['admin']), requireAdmin, async (req, r
   }
 });
 
+router.get('/check', authenticateToken(['admin']), requireAdmin, (req, res) => {
+  res.json({ message: 'Token valid', user: req.user });
+});
+
 module.exports = router;
