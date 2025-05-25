@@ -23,6 +23,7 @@ app.use((err, req, res, next) => {
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3002',
+  'http://localhost:5173', // Add this
   'http://localhost:19006',
   'https://nzubo.net',
   'https://nzubo-admin.web.app',
