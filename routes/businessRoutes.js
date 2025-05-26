@@ -12,6 +12,8 @@ const { Expo } = require('expo-server-sdk');
 const QRPin = require('../models/QRPin');
 const QRCode = require('qrcode');
 const { Business, BusinessTransaction } = require('../models/Business');
+const User = require('../models/User'); // Added User model
+const AdminLedger = require('../models/AdminLedger'); // Added AdminLedger model
 
 // Environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
@@ -60,14 +62,15 @@ const ensureIndexes = async () => {
   try {
     await Business.createIndexes({ businessId: 1, email: 1 });
     await QRPin.createIndexes({ qrId: 1, businessId: 1 });
-    console.log('[Indexes] Successfully ensured indexes for Business and QRPin');
+    await User.createIndexes({ username: 1 }); // Added index for User
+    console.log('[Indexes] Successfully ensured indexes for Business, QRPin, and User');
   } catch (error) {
     console.error('[Indexes] Error creating indexes:', {
       message: error.message,
       code: error.code,
       codeName: error.codeName,
     });
-    if (error.code !== 85) throw error; // Ignore IndexOptionsConflict, rethrow others
+    if (error.code !== 85) throw error; // Ignore IndexOptionsConflict
   }
 };
 ensureIndexes();
@@ -135,7 +138,7 @@ router.post('/register', upload.fields([
       ownerUsername,
       phoneNumber,
       email,
-      hashedPin: pin, // Will be hashed by middleware
+      hashedPin: pin,
       tpinCertificate: tpinCertificate ? tpinCertificate[0].location : null,
       pacraCertificate: pacraCertificate ? pacraCertificate[0].location : null,
       kycStatus: 'pending',
@@ -186,7 +189,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid PIN' });
     }
     const token = jwt.sign(
-      { businessId: business.businessId, role: business.role },
+      { businessId: business.businessId, role: 'business' }, // Explicitly set role
       JWT_SECRET,
       { expiresIn: '1d' }
     );
@@ -200,12 +203,12 @@ router.post('/login', async (req, res) => {
     if (business.pushToken) {
       await sendPushNotification(business.pushToken, 'Login Successful', `Welcome back, ${business.name}!`, { businessId: business.businessId });
     }
-    const response = {
+    res.json({
       token,
       business: {
         businessId: business.businessId,
         name: business.name,
-        ownerUsername: business.ownerUsername, // Add ownerUsername
+        ownerUsername: business.ownerUsername,
         balances: {
           ZMW: convertDecimal128(business.balances.ZMW),
           ZMC: convertDecimal128(business.balances.ZMC),
@@ -215,9 +218,7 @@ router.post('/login', async (req, res) => {
         kycStatus: business.kycStatus,
         accountTier: business.accountTier,
       },
-    };
-    console.log('[Login] Sending response:', response);
-    res.json(response);
+    });
   } catch (error) {
     console.error('[Login] Error:', {
       message: error.message,
@@ -248,14 +249,17 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       .lean();
     const totalRevenue = transactions.reduce((sum, t) => sum + convertDecimal128(t.amount), 0);
     const transactionCount = transactions.length;
-    business.auditLogs.push({
-      action: 'dashboard_view',
-      performedBy: business.ownerUsername,
-      details: { message: 'Dashboard accessed' },
-    });
     await Business.findOneAndUpdate(
       { businessId: req.user.businessId },
-      { $push: { auditLogs: business.auditLogs[business.auditLogs.length - 1] } }
+      {
+        $push: {
+          auditLogs: {
+            action: 'dashboard_view',
+            performedBy: business.ownerUsername,
+            details: { message: 'Dashboard accessed' },
+          },
+        },
+      }
     );
     res.json({
       totalRevenue,
@@ -424,7 +428,7 @@ router.post('/verify-kyc', authenticateToken(['admin']), async (req, res) => {
   }
 });
 
-// Generate QR Code (Updated for user-to-business payments)
+// Generate QR Code
 router.post('/qr/generate', authenticateToken(['business']), async (req, res) => {
   const { amount, description } = req.body;
   try {
@@ -452,7 +456,7 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
 });
 
 // Pay QR (Handles both user-to-user and user-to-business payments)
-router.post('/pay-qr', authenticateToken(), async (req, res) => {
+router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (req, res) => {
   const { qrId, amount, pin, senderUsername } = req.body;
   if (!qrId || !amount || !senderUsername || (!pin && req.body.recipientType !== 'business')) {
     return res.status(400).json({ error: 'QR ID, amount, sender username, and PIN (for user payments) are required' });
@@ -468,7 +472,12 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
   session.startTransaction({ writeConcern: { w: 'majority' } });
   try {
     const sender = await User.findOne({ username: senderUsername, isActive: true }).session(session);
-    if (!sender || sender.username !== req.user.username) {
+    if (!sender) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'Sender not found or inactive' });
+    }
+    if (sender.username !== req.user.username) {
       await session.abortTransaction();
       session.endSession();
       return res.status(403).json({ error: 'Unauthorized sender' });
@@ -516,7 +525,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
     if (sender.balance < paymentAmount + sendingFee) {
       await session.abortTransaction();
       session.endSession();
-      return res.status(400).json({ error: 'Insufficient balance' });
+      return res.status(403).json({ error: 'Insufficient balance' });
     }
     const sentTxId = new mongoose.Types.ObjectId().toString();
     const receivedTxId = new mongoose.Types.ObjectId().toString();
@@ -591,33 +600,30 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       ], { session });
     }
 
-    const updates = [
-      AdminLedger.updateOne(
-        {},
-        {
-          $inc: { totalBalance: sendingFee + receivingFee },
-          $set: { lastUpdated: new Date() },
-          $push: {
-            transactions: {
-              type: 'fee-collected',
-              amount: sendingFee + receivingFee,
-              sender: sender.username,
-              receiver: receiverIdentifier,
-              userTransactionIds: [sentTxId, receivedTxId],
-              date: transactionDate,
-              qrId,
-            },
+    await AdminLedger.updateOne(
+      {},
+      {
+        $inc: { totalBalance: sendingFee + receivingFee },
+        $set: { lastUpdated: new Date() },
+        $push: {
+          transactions: {
+            type: 'fee-collected',
+            amount: sendingFee + receivingFee,
+            sender: sender.username,
+            receiver: receiverIdentifier,
+            userTransactionIds: [sentTxId, receivedTxId],
+            date: transactionDate,
+            qrId,
           },
         },
-        { upsert: true, session }
-      ),
-    ];
+      },
+      { upsert: true, session }
+    );
 
     if (!qrPin.persistent) {
-      updates.push(QRPin.deleteOne({ qrId }, { session }));
+      await QRPin.deleteOne({ qrId }, { session });
     }
 
-    await Promise.all(updates);
     await session.commitTransaction();
     session.endSession();
     res.json({ message: 'Payment successful', sendingFee, receivingFee, amount: paymentAmount });
@@ -631,8 +637,18 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       senderUsername,
       amount,
       recipientType: qrPin?.type || 'unknown',
+      userRole: req.user?.role,
     });
-    res.status(500).json({ error: 'Server error processing payment', details: error.message });
+    const status = error.message === 'Sender not found or inactive' ||
+                   error.message === 'Invalid QR code' ||
+                   error.message === 'Receiver not found or inactive' ||
+                   error.message === 'QR code expired' ? 400 :
+                   error.message === 'Invalid PIN' || error.message === 'Unauthorized sender' ? 401 :
+                   error.message === 'Insufficient balance' ? 403 : 500;
+    res.status(status).json({
+      error: status === 500 ? 'Server error processing payment' : error.message,
+      details: error.message,
+    });
   }
 });
 
@@ -648,21 +664,35 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
   }
   const session = await mongoose.startSession();
   session.startTransaction({ writeConcern: { w: 'majority' } });
+  let user;
   try {
-    const user = await User.findOne({ username: senderUsername, isActive: true }).session(session);
+    user = await User.findOne({ username: senderUsername, isActive: true }).session(session);
     if (!user) {
-      throw new Error('User not found or inactive');
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'User not found or inactive' });
+    }
+    if (user.username !== req.user.username) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(403).json({ error: 'Unauthorized sender' });
     }
     const qrPin = await QRPin.findOne({ qrId, type: 'business' }).session(session);
     if (!qrPin) {
-      throw new Error('Invalid QR code');
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'Invalid or expired QR code' });
     }
     if (businessId && qrPin.businessId !== businessId) {
-      throw new Error('QR code does not match provided business ID');
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ error: 'QR code does not match provided business ID' });
     }
     const business = await Business.findOne({ businessId: qrPin.businessId, isActive: true }).session(session);
     if (!business) {
-      throw new Error('Business not found or inactive');
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'Business not found or inactive' });
     }
     const sendingFee = paymentAmount <= 50 ? 0.50 :
                       paymentAmount <= 100 ? 1.00 :
@@ -675,7 +705,9 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
                         paymentAmount <= 1000 ? 2.00 :
                         paymentAmount <= 5000 ? 3.00 : 5.00;
     if (user.balance < paymentAmount + sendingFee) {
-      throw new Error('Insufficient balance');
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(403).json({ error: 'Insufficient balance' });
     }
     const sentTxId = new mongoose.Types.ObjectId().toString();
     const receivedTxId = new mongoose.Types.ObjectId().toString();
@@ -764,12 +796,15 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
       senderUsername,
       amount: paymentAmount,
       businessId,
+      userDefined: !!user,
+      userRole: req.user?.role,
+      jwtUsername: req.user?.username,
     });
     const status = error.message === 'User not found or inactive' ||
-                   error.message === 'Invalid QR code' ||
+                   error.message === 'Invalid or expired QR code' ||
                    error.message === 'Business not found or inactive' ||
                    error.message === 'QR code does not match provided business ID' ? 400 :
-                   error.message === 'Insufficient balance' ? 403 : 500;
+                   error.message === 'Insufficient balance' || error.message === 'Unauthorized sender' ? 403 : 500;
     res.status(status).json({
       error: status === 500 ? 'Server error processing payment' : error.message,
       details: error.message,
@@ -792,11 +827,10 @@ router.post('/currency/convert', authenticateToken(['business']), async (req, re
     if (!conversionAmount || conversionAmount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
     }
-    // Mock exchange rates (replace with real API in production)
     const exchangeRates = {
-      'ZMW-USD': 0.038, // 1 ZMW = 0.038 USD
+      'ZMW-USD': 0.038,
       'USD-ZMW': 26.32,
-      'ZMW-ZMC': 1, // 1 ZMW = 1 ZMC
+      'ZMW-ZMC': 1,
       'ZMC-ZMW': 1,
       'USD-ZMC': 26.32,
       'ZMC-USD': 0.038,
@@ -892,7 +926,6 @@ router.post('/update-tier', authenticateToken(['admin']), async (req, res) => {
   }
 });
 
-
 // Get Business Details
 router.get('/:businessId', async (req, res) => {
   const { businessId } = req.params;
@@ -903,7 +936,7 @@ router.get('/:businessId', async (req, res) => {
       console.log('[GetBusiness] Business not found:', businessId);
       return res.status(404).json({ error: 'Business not found' });
     }
-    const response = {
+    res.json({
       businessId: business.businessId,
       name: business.name,
       ownerUsername: business.ownerUsername,
@@ -911,9 +944,7 @@ router.get('/:businessId', async (req, res) => {
       isActive: business.isActive,
       kycStatus: business.kycStatus,
       accountTier: business.accountTier,
-    };
-    console.log('[GetBusiness] Sending response:', response);
-    res.json(response);
+    });
   } catch (error) {
     console.error('[GetBusiness] Error:', {
       message: error.message,
@@ -934,7 +965,7 @@ router.post('/forgot-pin', async (req, res) => {
     }
     const resetToken = crypto.randomBytes(32).toString('hex');
     business.resetToken = resetToken;
-    business.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    business.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000);
     business.auditLogs.push({
       action: 'pin_reset_request',
       performedBy: business.ownerUsername,
@@ -965,7 +996,7 @@ router.post('/reset-pin', async (req, res) => {
     if (!business) {
       return res.status(400).json({ error: 'Invalid or expired reset token' });
     }
-    business.hashedPin = newPin; // Will be hashed by middleware
+    business.hashedPin = newPin;
     business.resetToken = null;
     business.resetTokenExpiry = null;
     business.auditLogs.push({
@@ -985,7 +1016,6 @@ router.post('/reset-pin', async (req, res) => {
 });
 
 // Store QR PIN
-// Store QR PIN
 router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) => {
   const { businessId, pin } = req.body;
   if (!businessId || !pin) {
@@ -995,16 +1025,14 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
     return res.status(400).json({ error: 'PIN must be a 4-digit number' });
   }
   try {
-    // Generate qrId with fallback
     let qrId;
     try {
-      const crypto = require('crypto');
       qrId = crypto.randomBytes(16).toString('hex');
       console.log('[StoreQRPin] Generated qrId with crypto:', qrId);
     } catch (cryptoError) {
       console.warn('[StoreQRPin] Crypto failed, using uuid fallback:', cryptoError.message);
       const { v4: uuidv4 } = require('uuid');
-      qrId = uuidv4().replace(/-/g, ''); // 32-char hex
+      qrId = uuidv4().replace(/-/g, '');
     }
 
     const hashedPin = await bcrypt.hash(pin, 10);
@@ -1015,18 +1043,14 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
       if (!business) {
         await session.abortTransaction();
         session.endSession();
-        console.error('[StoreQRPin] Business not found or inactive', { businessId });
         return res.status(404).json({ error: 'Business not found or inactive' });
       }
       if (businessId !== req.user.businessId) {
         await session.abortTransaction();
         session.endSession();
-        console.error('[StoreQRPin] Unauthorized', { requested: businessId, actual: req.user.businessId });
         return res.status(403).json({ error: 'Unauthorized' });
       }
-      // Delete existing QRPin for this business
       await QRPin.deleteOne({ businessId, type: 'business' }, { session });
-      // Create new QRPin with explicit createdAt and persistent: true
       await new QRPin({
         type: 'business',
         businessId,
@@ -1035,7 +1059,6 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
         createdAt: new Date(),
         persistent: true,
       }).save({ session });
-      // Add pending-pin transaction
       await Business.updateOne(
         { businessId },
         {
@@ -1056,7 +1079,6 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
       );
       await session.commitTransaction();
       session.endSession();
-      console.log('[StoreQRPin] Success', { businessId, qrId });
       res.json({ qrId });
     } catch (error) {
       await session.abortTransaction();
