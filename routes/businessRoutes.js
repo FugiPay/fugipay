@@ -230,7 +230,6 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// Dashboard
 router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
   try {
     const business = await Business.findOne({ businessId: req.user.businessId }).lean();
@@ -254,7 +253,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       {
         $push: {
           auditLogs: {
-            action: 'dashboard_view',
+            action: 'view_dashboard', // Changed from 'dashboard_view'
             performedBy: business.ownerUsername,
             details: { message: 'Dashboard accessed' },
           },
