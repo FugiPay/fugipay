@@ -156,7 +156,6 @@ router.post('/register', upload.fields([
   }
 });
 
-// Login
 router.post('/login', async (req, res) => {
   const { businessId, phoneNumber, pin } = req.body;
   try {
@@ -170,7 +169,14 @@ router.post('/login', async (req, res) => {
       console.log('[Login] Business not found for:', { businessId, phoneNumber });
       return res.status(404).json({ error: 'Business not found' });
     }
-    console.log('[Login] Business found:', business.businessId, 'isActive:', business.isActive, 'kycStatus:', business.kycStatus);
+    console.log('[Login] Business found:', {
+      businessId: business.businessId,
+      isActive: business.isActive,
+      kycStatus: business.kycStatus,
+      ownerUsername: business.ownerUsername,
+      auditLogsCount: business.auditLogs?.length || 0,
+      auditLogActions: business.auditLogs?.map(log => log.action) || []
+    });
     if (!business.isActive) {
       return res.status(403).json({ error: 'Business account is not active' });
     }
@@ -184,12 +190,13 @@ router.post('/login', async (req, res) => {
         action: 'login',
         performedBy: business.ownerUsername,
         details: { success: false, message: 'Invalid PIN' },
+        timestamp: new Date()
       });
       await business.save();
       return res.status(401).json({ error: 'Invalid PIN' });
     }
     const token = jwt.sign(
-      { businessId: business.businessId, role: 'business' }, // Explicitly set role
+      { businessId: business.businessId, role: 'business' },
       JWT_SECRET,
       { expiresIn: '1d' }
     );
@@ -198,8 +205,21 @@ router.post('/login', async (req, res) => {
       action: 'login',
       performedBy: business.ownerUsername,
       details: { success: true, ip: req.ip, loginMethod: businessId ? 'businessId' : 'phoneNumber' },
+      timestamp: new Date()
     });
-    await business.save();
+    try {
+      await business.save();
+    } catch (saveError) {
+      console.error('[Login] Save error:', {
+        message: saveError.message,
+        stack: saveError.stack,
+        auditLogs: business.auditLogs.slice(-10).map(log => ({
+          action: log.action,
+          timestamp: log.timestamp
+        }))
+      });
+      return res.status(500).json({ error: 'Failed to save business data', details: saveError.message });
+    }
     if (business.pushToken) {
       await sendPushNotification(business.pushToken, 'Login Successful', `Welcome back, ${business.name}!`, { businessId: business.businessId });
     }
@@ -226,9 +246,10 @@ router.post('/login', async (req, res) => {
       businessId,
       phoneNumber,
     });
-    res.status(500).json({ error: 'Failed to login', details: error.message });
+    return res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
+
 
 // Dashboard
 router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
@@ -249,17 +270,14 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       .lean();
     const totalRevenue = transactions.reduce((sum, t) => sum + convertDecimal128(t.amount), 0);
     const transactionCount = transactions.length;
+    business.auditLogs.push({
+      action: 'dashboard_view',
+      performedBy: business.ownerUsername,
+      details: { message: 'Dashboard accessed' },
+    });
     await Business.findOneAndUpdate(
       { businessId: req.user.businessId },
-      {
-        $push: {
-          auditLogs: {
-            action: 'dashboard_view',
-            performedBy: business.ownerUsername,
-            details: { message: 'Dashboard accessed' },
-          },
-        },
-      }
+      { $push: { auditLogs: business.auditLogs[business.auditLogs.length - 1] } }
     );
     res.json({
       totalRevenue,
@@ -277,6 +295,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
     res.status(500).json({ error: 'Failed to load dashboard', details: error.message });
   }
 });
+
 
 // Debug Dashboard
 router.get('/debug-dashboard', authenticateToken(['business', 'admin']), async (req, res) => {
