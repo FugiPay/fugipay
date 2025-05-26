@@ -156,7 +156,6 @@ router.post('/register', upload.fields([
   }
 });
 
-// Login
 router.post('/login', async (req, res) => {
   const { businessId, phoneNumber, pin } = req.body;
   try {
@@ -170,7 +169,12 @@ router.post('/login', async (req, res) => {
       console.log('[Login] Business not found for:', { businessId, phoneNumber });
       return res.status(404).json({ error: 'Business not found' });
     }
-    console.log('[Login] Business found:', business.businessId, 'isActive:', business.isActive, 'kycStatus:', business.kycStatus);
+    console.log('[Login] Business found:', {
+      businessId: business.businessId,
+      isActive: business.isActive,
+      kycStatus: business.kycStatus,
+      auditLogsCount: business.auditLogs?.length || 0
+    });
     if (!business.isActive) {
       return res.status(403).json({ error: 'Business account is not active' });
     }
@@ -189,7 +193,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid PIN' });
     }
     const token = jwt.sign(
-      { businessId: business.businessId, role: 'business' }, // Explicitly set role
+      { businessId: business.businessId, role: 'business' },
       JWT_SECRET,
       { expiresIn: '1d' }
     );
@@ -199,7 +203,16 @@ router.post('/login', async (req, res) => {
       performedBy: business.ownerUsername,
       details: { success: true, ip: req.ip, loginMethod: businessId ? 'businessId' : 'phoneNumber' },
     });
-    await business.save();
+    try {
+      await business.save();
+    } catch (saveError) {
+      console.error('[Login] Save error:', {
+        message: saveError.message,
+        stack: saveError.stack,
+        auditLogs: business.auditLogs.slice(-5) // Log last 5 entries
+      });
+      throw saveError;
+    }
     if (business.pushToken) {
       await sendPushNotification(business.pushToken, 'Login Successful', `Welcome back, ${business.name}!`, { businessId: business.businessId });
     }
