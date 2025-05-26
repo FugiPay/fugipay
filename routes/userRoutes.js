@@ -520,13 +520,13 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
   }
 });
 
-// Pay QR
+// Pay QR (Updated for user-to-business payments)
 router.post('/pay-qr', authenticateToken(), async (req, res) => {
   const { qrId, amount, pin, senderUsername } = req.body;
-  if (!qrId || !amount || !pin || !senderUsername) {
-    return res.status(400).json({ error: 'QR ID, amount, PIN, and sender username are required' });
+  if (!qrId || !amount || !senderUsername || (!pin && req.body.recipientType !== 'business')) {
+    return res.status(400).json({ error: 'QR ID, amount, sender username, and PIN (for user payments) are required' });
   }
-  if (!/^\d{4}$/.test(pin)) {
+  if (pin && !/^\d{4}$/.test(pin)) {
     return res.status(400).json({ error: 'PIN must be a 4-digit number' });
   }
   if (amount <= 0 || amount > 10000) {
@@ -539,28 +539,23 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
     if (!sender || sender.username !== req.user.username) {
       await session.abortTransaction();
       session.endSession();
-      console.error('[PayQR] Unauthorized sender', { senderUsername, user: req.user.username });
       return res.status(403).json({ error: 'Unauthorized sender' });
     }
     const qrPin = await QRPin.findOne({ qrId }).session(session);
     if (!qrPin) {
       await session.abortTransaction();
       session.endSession();
-      console.error('[PayQR] Invalid QR code', { qrId });
       return res.status(404).json({ error: 'Invalid QR code' });
     }
-    const isPinValid = await qrPin.comparePin(pin);
-    if (!isPinValid) {
+    if (qrPin.type === 'user' && !await qrPin.comparePin(pin)) {
       await session.abortTransaction();
       session.endSession();
-      console.error('[PayQR] Invalid PIN', { qrId, senderUsername });
       return res.status(401).json({ error: 'Invalid PIN' });
     }
     if (!qrPin.persistent && qrPin.createdAt < new Date(Date.now() - 15 * 60 * 1000)) {
       await QRPin.deleteOne({ qrId }, { session });
       await session.commitTransaction();
       session.endSession();
-      console.error('[PayQR] QR code expired', { qrId, createdAt: qrPin.createdAt });
       return res.status(400).json({ error: 'QR code expired' });
     }
     let receiver, receiverIdentifier;
@@ -574,7 +569,6 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
     if (!receiver) {
       await session.abortTransaction();
       session.endSession();
-      console.error('[PayQR] Receiver not found or inactive', { qrId, type: qrPin.type });
       return res.status(404).json({ error: 'Receiver not found or inactive' });
     }
     const sendingFee = amount <= 50 ? 0.50 :
@@ -590,7 +584,6 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
     if (sender.balance < amount + sendingFee) {
       await session.abortTransaction();
       session.endSession();
-      console.error('[PayQR] Insufficient balance', { senderUsername, balance: sender.balance, required: amount + sendingFee });
       return res.status(400).json({ error: 'Insufficient balance' });
     }
     const sentTxId = new mongoose.Types.ObjectId().toString();
@@ -688,40 +681,19 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
       ),
     ];
 
-    // Delete non-persistent QRPin after successful payment
     if (!qrPin.persistent) {
       updates.push(QRPin.deleteOne({ qrId }, { session }));
     }
 
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Transaction update timeout')), 15000);
-    });
-    await Promise.race([Promise.all(updates), timeoutPromise]);
-
+    await Promise.all(updates);
     await session.commitTransaction();
     session.endSession();
-    console.log('[PayQR] Transaction success', {
-      amount,
-      sendingFee,
-      receivingFee,
-      sender: sender.username,
-      receiver: receiverIdentifier,
-      qrId,
-      transactionDate,
-    });
     res.json({ message: 'Payment successful', sendingFee, receivingFee, amount });
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
-    console.error('[PayQR] Error:', {
-      message: error.message,
-      stack: error.stack,
-      qrId,
-      senderUsername,
-      amount,
-      pinLength: pin?.length,
-    });
-    res.status(500).json({ error: error.message === 'Transaction update timeout' ? 'Transaction timed out' : 'Server error processing payment' });
+    console.error('[PayQR] Error:', error.message);
+    res.status(500).json({ error: 'Server error processing payment' });
   }
 });
 

@@ -424,7 +424,7 @@ router.post('/verify-kyc', authenticateToken(['admin']), async (req, res) => {
   }
 });
 
-// Generate QR Code
+// Generate QR Code (Updated for user-to-business payments)
 router.post('/qr/generate', authenticateToken(['business']), async (req, res) => {
   const { amount, description } = req.body;
   try {
@@ -432,77 +432,147 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
     if (!business || !business.isActive) {
       return res.status(403).json({ error: 'Business not found or inactive' });
     }
-    const transactionId = crypto.randomBytes(16).toString('hex');
-    const qrCodeId = crypto.randomBytes(8).toString('hex');
-    const qrData = JSON.stringify({ transactionId, businessId: business.businessId, amount, qrCodeId });
-    const qrCodeUrl = await QRCode.toDataURL(qrData);
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-    const transaction = new BusinessTransaction({
-      transactionId,
+    const qrPin = await QRPin.findOne({ businessId: req.user.businessId, type: 'business' });
+    if (!qrPin) {
+      return res.status(400).json({ error: 'No QR PIN set for this business. Please set one first.' });
+    }
+    const qrData = JSON.stringify({
+      type: 'business_payment',
       businessId: business.businessId,
-      amount: mongoose.Types.Decimal128.fromString(parseFloat(amount).toString()),
-      currency: 'ZMW',
-      qrCodeId,
-      qrCodeUrl,
+      qrId: qrPin.qrId,
+      amount: amount ? parseFloat(amount) : undefined,
       description,
-      expiresAt,
     });
-    await transaction.save();
-    business.auditLogs.push({
-      action: 'qr_generate',
-      performedBy: business.ownerUsername,
-      details: { transactionId, amount },
-    });
-    await business.save();
-    res.json({ transactionId, qrCodeUrl, expiresAt });
+    const qrCodeUrl = await QRCode.toDataURL(qrData);
+    res.json({ qrId: qrPin.qrId, qrCodeUrl, amount, description });
   } catch (error) {
     console.error('[QRGenerate] Error:', error.message);
-    res.status(500).json({ error: 'Failed to generate QR code', details: error.message });
+    res.status(500).json({ error: 'Failed to generate QR code' });
   }
 });
 
-// Pay via QR Code
-router.post('/qr/pay', async (req, res) => {
-  const { transactionId, fromUsername } = req.body;
+// Pay via QR Code (Updated for user-to-business payments)
+router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
+  const { qrId, amount, senderUsername } = req.body;
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
-    const transaction = await BusinessTransaction.findOne({ transactionId, status: 'pending' });
-    if (!transaction) {
-      return res.status(404).json({ error: 'Transaction not found or expired' });
+    const user = await User.findOne({ username: senderUsername, isActive: true }).session(session);
+    if (!user) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'User not found or inactive' });
     }
-    if (transaction.expiresAt < new Date()) {
-      transaction.status = 'expired';
-      await transaction.save();
-      return res.status(400).json({ error: 'QR code expired' });
+    const qrPin = await QRPin.findOne({ qrId, type: 'business' }).session(session);
+    if (!qrPin) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'Invalid QR code' });
     }
-    const business = await Business.findOne({ businessId: transaction.businessId });
-    if (!business || !business.isActive) {
-      return res.status(403).json({ error: 'Business not found or inactive' });
+    const business = await Business.findOne({ businessId: qrPin.businessId, isActive: true }).session(session);
+    if (!business) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ error: 'Business not found or inactive' });
     }
-    business.balances.ZMW = mongoose.Types.Decimal128.fromString(
-      (convertDecimal128(business.balances.ZMW) + convertDecimal128(transaction.amount)).toString()
+    const paymentAmount = parseFloat(amount);
+    if (!paymentAmount || paymentAmount <= 0 || paymentAmount > 10000) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
+    }
+    const sendingFee = paymentAmount <= 50 ? 0.50 :
+                      paymentAmount <= 100 ? 1.00 :
+                      paymentAmount <= 500 ? 2.00 :
+                      paymentAmount <= 1000 ? 2.50 :
+                      paymentAmount <= 5000 ? 3.50 : 5.00;
+    const receivingFee = paymentAmount <= 50 ? 0.50 :
+                        paymentAmount <= 100 ? 1.00 :
+                        paymentAmount <= 500 ? 1.50 :
+                        paymentAmount <= 1000 ? 2.00 :
+                        paymentAmount <= 5000 ? 3.00 : 5.00;
+    if (user.balance < paymentAmount + sendingFee) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+    const sentTxId = new mongoose.Types.ObjectId().toString();
+    const receivedTxId = new mongoose.Types.ObjectId().toString();
+    const transactionDate = new Date();
+
+    await User.bulkWrite([
+      {
+        updateOne: {
+          filter: { _id: user._id },
+          update: {
+            $inc: { balance: -(paymentAmount + sendingFee) },
+            $push: {
+              transactions: {
+                _id: sentTxId,
+                type: 'sent',
+                amount: paymentAmount,
+                toFrom: business.businessId,
+                fee: sendingFee,
+                date: transactionDate,
+                qrId,
+              },
+            },
+          },
+        },
+      },
+    ], { session });
+
+    await Business.bulkWrite([
+      {
+        updateOne: {
+          filter: { _id: business._id },
+          update: {
+            $inc: { 'balances.ZMW': paymentAmount - receivingFee },
+            $push: {
+              transactions: {
+                _id: receivedTxId,
+                type: 'received',
+                amount: paymentAmount,
+                currency: 'ZMW',
+                toFrom: user.username,
+                fee: receivingFee,
+                date: transactionDate,
+                qrId,
+              },
+            },
+          },
+        },
+      },
+    ], { session });
+
+    await AdminLedger.updateOne(
+      {},
+      {
+        $inc: { totalBalance: sendingFee + receivingFee },
+        $set: { lastUpdated: new Date() },
+        $push: {
+          transactions: {
+            type: 'fee-collected',
+            amount: sendingFee + receivingFee,
+            sender: user.username,
+            receiver: business.businessId,
+            userTransactionIds: [sentTxId, receivedTxId],
+            date: transactionDate,
+            qrId,
+          },
+        },
+      },
+      { upsert: true, session }
     );
-    business.transactions.push({
-      type: 'received',
-      amount: transaction.amount,
-      currency: transaction.currency,
-      toFrom: fromUsername || 'Anonymous',
-      date: new Date(),
-    });
-    transaction.status = 'completed';
-    transaction.fromUsername = fromUsername;
-    business.auditLogs.push({
-      action: 'payment_received',
-      performedBy: business.ownerUsername,
-      details: { transactionId, amount: convertDecimal128(transaction.amount) },
-    });
-    await Promise.all([business.save(), transaction.save()]);
-    if (business.pushToken) {
-      await sendPushNotification(business.pushToken, 'Payment Received', `Received ${convertDecimal128(transaction.amount)} ${transaction.currency} from ${fromUsername || 'user'}`, { transactionId });
-    }
-    res.json({ message: 'Payment successful', transactionId });
+
+    await session.commitTransaction();
+    session.endSession();
+    res.json({ message: 'Payment successful', sendingFee, receivingFee, amount: paymentAmount });
   } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
     console.error('[QRPay] Error:', error.message);
-    res.status(500).json({ error: 'Failed to process payment', details: error.message });
+    res.status(500).json({ error: 'Failed to process payment' });
   }
 });
 
