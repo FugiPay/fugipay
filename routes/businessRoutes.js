@@ -173,7 +173,8 @@ router.post('/login', async (req, res) => {
       businessId: business.businessId,
       isActive: business.isActive,
       kycStatus: business.kycStatus,
-      auditLogsCount: business.auditLogs?.length || 0
+      auditLogsCount: business.auditLogs?.length || 0,
+      auditLogActions: business.auditLogs?.map(log => log.action) || []
     });
     if (!business.isActive) {
       return res.status(403).json({ error: 'Business account is not active' });
@@ -209,9 +210,9 @@ router.post('/login', async (req, res) => {
       console.error('[Login] Save error:', {
         message: saveError.message,
         stack: saveError.stack,
-        auditLogs: business.auditLogs.slice(-5) // Log last 5 entries
+        auditLogs: business.auditLogs.slice(-10) // Log last 10 entries
       });
-      throw saveError;
+      return res.status(500).json({ error: 'Failed to save business data', details: saveError.message });
     }
     if (business.pushToken) {
       await sendPushNotification(business.pushToken, 'Login Successful', `Welcome back, ${business.name}!`, { businessId: business.businessId });
@@ -266,7 +267,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       {
         $push: {
           auditLogs: {
-            action: 'view_dashboard', // Changed from 'dashboard_view'
+            action: 'view_dashboard',
             performedBy: business.ownerUsername,
             details: { message: 'Dashboard accessed' },
           },
@@ -285,7 +286,10 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error('[Dashboard] Error:', error.message);
+    console.error('[Dashboard] Error:', {
+      message: error.message,
+      stack: error.stack
+    });
     res.status(500).json({ error: 'Failed to load dashboard', details: error.message });
   }
 });
