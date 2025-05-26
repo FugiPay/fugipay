@@ -173,6 +173,7 @@ router.post('/login', async (req, res) => {
       businessId: business.businessId,
       isActive: business.isActive,
       kycStatus: business.kycStatus,
+      ownerUsername: business.ownerUsername,
       auditLogsCount: business.auditLogs?.length || 0,
       auditLogActions: business.auditLogs?.map(log => log.action) || []
     });
@@ -189,6 +190,7 @@ router.post('/login', async (req, res) => {
         action: 'login',
         performedBy: business.ownerUsername,
         details: { success: false, message: 'Invalid PIN' },
+        timestamp: new Date()
       });
       await business.save();
       return res.status(401).json({ error: 'Invalid PIN' });
@@ -203,6 +205,7 @@ router.post('/login', async (req, res) => {
       action: 'login',
       performedBy: business.ownerUsername,
       details: { success: true, ip: req.ip, loginMethod: businessId ? 'businessId' : 'phoneNumber' },
+      timestamp: new Date()
     });
     try {
       await business.save();
@@ -210,7 +213,10 @@ router.post('/login', async (req, res) => {
       console.error('[Login] Save error:', {
         message: saveError.message,
         stack: saveError.stack,
-        auditLogs: business.auditLogs.slice(-10) // Log last 10 entries
+        auditLogs: business.auditLogs.slice(-10).map(log => ({
+          action: log.action,
+          timestamp: log.timestamp
+        }))
       });
       return res.status(500).json({ error: 'Failed to save business data', details: saveError.message });
     }
@@ -240,7 +246,7 @@ router.post('/login', async (req, res) => {
       businessId,
       phoneNumber,
     });
-    res.status(500).json({ error: 'Failed to login', details: error.message });
+    return res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
 
@@ -270,6 +276,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
             action: 'view_dashboard',
             performedBy: business.ownerUsername,
             details: { message: 'Dashboard accessed' },
+            timestamp: new Date()
           },
         },
       }
@@ -290,7 +297,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       message: error.message,
       stack: error.stack
     });
-    res.status(500).json({ error: 'Failed to load dashboard', details: error.message });
+    return res.status(500).json({ error: 'Failed to load dashboard', details: error.message });
   }
 });
 
