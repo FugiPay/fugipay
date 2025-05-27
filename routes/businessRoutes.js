@@ -270,14 +270,18 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       .lean();
     const totalRevenue = transactions.reduce((sum, t) => sum + convertDecimal128(t.amount), 0);
     const transactionCount = transactions.length;
-    business.auditLogs.push({
-      action: 'dashboard_view',
-      performedBy: business.ownerUsername,
-      details: { message: 'Dashboard accessed' },
-    });
     await Business.findOneAndUpdate(
       { businessId: req.user.businessId },
-      { $push: { auditLogs: business.auditLogs[business.auditLogs.length - 1] } }
+      {
+        $push: {
+          auditLogs: {
+            action: 'view_dashboard',
+            performedBy: business.ownerUsername,
+            details: { message: 'Dashboard accessed' },
+            timestamp: new Date()
+          },
+        },
+      }
     );
     res.json({
       totalRevenue,
@@ -291,8 +295,11 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error('[Dashboard] Error:', error.message);
-    res.status(500).json({ error: 'Failed to load dashboard', details: error.message });
+    console.error('[Dashboard] Error:', {
+      message: error.message,
+      stack: error.stack
+    });
+    return res.status(500).json({ error: 'Failed to load dashboard', details: error.message });
   }
 });
 
