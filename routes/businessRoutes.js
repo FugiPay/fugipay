@@ -253,23 +253,32 @@ router.post('/login', async (req, res) => {
 
 // Dashboard
 router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
+  const { page = 1, currency = 'all', dateRange = '30d' } = req.query;
+  const limit = 10;
+  const skip = (page - 1) * limit;
+  const dateFilter = {
+    '30d': new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+    '7d': new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+    '1d': new Date(Date.now() - 24 * 60 * 60 * 1000),
+  };
   try {
     const business = await Business.findOne({ businessId: req.user.businessId }).lean();
     if (!business || !business.isActive) {
       return res.status(404).json({ error: 'Business not found or inactive' });
     }
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const transactions = await BusinessTransaction.find({
+    const query = {
       businessId: req.user.businessId,
-      createdAt: { $gte: thirtyDaysAgo },
       status: 'completed',
-    })
+      createdAt: { $gte: dateFilter[dateRange] || dateFilter['30d'] },
+    };
+    if (currency !== 'all') query.currency = currency;
+    const transactions = await BusinessTransaction.find(query)
       .sort({ createdAt: -1 })
-      .limit(5)
+      .skip(skip)
+      .limit(limit)
       .lean();
     const totalRevenue = transactions.reduce((sum, t) => sum + convertDecimal128(t.amount), 0);
-    const transactionCount = transactions.length;
+    const transactionCount = await BusinessTransaction.countDocuments(query);
     await Business.findOneAndUpdate(
       { businessId: req.user.businessId },
       {
@@ -278,7 +287,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
             action: 'view_dashboard',
             performedBy: business.ownerUsername,
             details: { message: 'Dashboard accessed' },
-            timestamp: new Date()
+            timestamp: new Date(),
           },
         },
       }
@@ -295,10 +304,7 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error('[Dashboard] Error:', {
-      message: error.message,
-      stack: error.stack
-    });
+    console.error('[Dashboard] Error:', error.message);
     return res.status(500).json({ error: 'Failed to load dashboard', details: error.message });
   }
 });
