@@ -132,13 +132,15 @@ router.post('/register', upload.fields([
     if (existing) {
       return res.status(400).json({ error: 'Business ID, username, phone, or email already exists' });
     }
+    // Hash the PIN before storing
+    const hashedPin = await bcrypt.hash(pin, 10);
     const business = new Business({
       businessId,
       name,
       ownerUsername,
       phoneNumber,
       email,
-      hashedPin: pin,
+      hashedPin, // Store hashed PIN
       tpinCertificate: tpinCertificate ? tpinCertificate[0].location : null,
       pacraCertificate: pacraCertificate ? pacraCertificate[0].location : null,
       kycStatus: 'pending',
@@ -184,8 +186,20 @@ router.post('/login', async (req, res) => {
       console.error('[Login] Missing hashedPin for business:', business.businessId);
       return res.status(500).json({ error: 'Invalid business account configuration' });
     }
-    const isPinValid = await bcrypt.compare(pin, business.hashedPin);
+    let isPinValid = false;
+    // Temporary compatibility for plain text PINs
+    if (business.hashedPin.length === 4 && /^\d{4}$/.test(business.hashedPin)) {
+      console.warn('[Login] Detected plain text PIN for business:', business.businessId);
+      isPinValid = pin === business.hashedPin;
+      if (isPinValid) {
+        // Hash the PIN for future logins
+        business.hashedPin = await bcrypt.hash(pin, 10);
+      }
+    } else {
+      isPinValid = await bcrypt.compare(pin, business.hashedPin);
+    }
     if (!isPinValid) {
+      console.log('[Login] Invalid PIN for business:', business.businessId);
       business.auditLogs.push({
         action: 'login',
         performedBy: business.ownerUsername,
@@ -213,10 +227,6 @@ router.post('/login', async (req, res) => {
       console.error('[Login] Save error:', {
         message: saveError.message,
         stack: saveError.stack,
-        auditLogs: business.auditLogs.slice(-10).map(log => ({
-          action: log.action,
-          timestamp: log.timestamp
-        }))
       });
       return res.status(500).json({ error: 'Failed to save business data', details: saveError.message });
     }
@@ -249,7 +259,6 @@ router.post('/login', async (req, res) => {
     return res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
-
 
 // Dashboard
 router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
@@ -1028,7 +1037,8 @@ router.post('/reset-pin', async (req, res) => {
     if (!business) {
       return res.status(400).json({ error: 'Invalid or expired reset token' });
     }
-    business.hashedPin = newPin;
+    // Hash the new PIN
+    business.hashedPin = await bcrypt.hash(newPin, 10);
     business.resetToken = null;
     business.resetTokenExpiry = null;
     business.auditLogs.push({
