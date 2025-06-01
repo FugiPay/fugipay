@@ -977,14 +977,28 @@ router.post('/update-tier', authenticateToken(['admin']), async (req, res) => {
 });
 
 // Get Business Details
-router.get('/:businessId', authenticateToken, async (req, res) => {
+router.get('/:businessId', authenticateToken(['business', 'admin']), async (req, res) => {
   try {
-    const business = await Business.findOne({ businessId: req.params.businessId });
-    if (!business) return res.status(404).json({ error: 'Business not found' });
-    if (req.user.role !== 'admin' && req.user.id !== business._id.toString()) {
+    console.log(`[BusinessFetch] Fetching business: ${req.params.businessId}`);
+    const startTime = Date.now();
+    const business = await Business.findOne(
+      { businessId: req.params.businessId },
+      { businessId: 1, name: 1, ownerUsername: 1, balances: 1, isActive: 1 } // Select only needed fields
+    ).lean();
+    const queryTime = Date.now() - startTime;
+    console.log(`[BusinessFetch] Query completed in ${queryTime}ms`);
+
+    if (!business) {
+      console.log(`[BusinessFetch] Business not found: ${req.params.businessId}`);
+      return res.status(404).json({ error: 'Business not found' });
+    }
+
+    if (req.user.role !== 'admin' && req.user.businessId !== business.businessId) {
+      console.log(`[BusinessFetch] Unauthorized access by ${req.user.businessId} for ${business.businessId}`);
       return res.status(403).json({ error: 'Unauthorized' });
     }
-    res.json({
+
+    const response = {
       businessId: business.businessId,
       name: business.name,
       ownerUsername: business.ownerUsername,
@@ -993,17 +1007,19 @@ router.get('/:businessId', authenticateToken, async (req, res) => {
         ZMC: parseFloat(business.balances.ZMC.toString()),
         USD: parseFloat(business.balances.USD.toString()),
       },
-      qrCode: business.qrCode,
-      role: business.role,
-      approvalStatus: business.approvalStatus,
-      transactions: business.transactions,
-      pendingWithdrawals: business.pendingWithdrawals,
-      pendingDeposits: business.pendingDeposits,
       isActive: business.isActive,
-    });
+    };
+
+    console.log(`[BusinessFetch] Success: ${business.businessId}, Response time: ${Date.now() - startTime}ms`);
+    res.json(response);
   } catch (error) {
-    console.error('Business Fetch Error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('[BusinessFetch] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId: req.params.businessId,
+      user: req.user,
+    });
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
 
