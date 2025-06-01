@@ -7,7 +7,10 @@ const auditLogSchema = new mongoose.Schema({
   action: {
     type: String,
     required: true,
-    enum: ['create', 'update', 'delete', 'kyc_update', 'balance_change', 'login', 'pin_reset', 'view_dashboard'], // Added view_dashboard
+    enum: [
+      'create', 'update', 'delete', 'kyc_update', 'balance_change', 'login',
+      'pin_reset', 'view_dashboard', 'update_notifications' // Added update_notifications
+    ],
   },
   performedBy: { type: String, required: true },
   timestamp: { type: Date, default: Date.now, index: true },
@@ -22,7 +25,7 @@ const transactionSchema = new mongoose.Schema({
     required: true,
     enum: [
       'received', 'deposited', 'withdrawn', 'refunded', 'settled', 'fee-collected',
-      'zmc-received', 'zmc-sent', 'currency-converted', 'pending-pin', // Add pending-pin
+      'zmc-received', 'zmc-sent', 'currency-converted', 'pending-pin',
     ],
   },
   amount: { type: mongoose.Schema.Types.Decimal128, required: true },
@@ -142,7 +145,8 @@ const businessSchema = new mongoose.Schema({
   pendingDeposits: [pendingDepositSchema],
   pendingWithdrawals: [pendingWithdrawalSchema],
   auditLogs: [auditLogSchema],
-  pushToken: { type: String },
+  pushToken: { type: String, default: null }, // Explicit default
+  pushNotificationsEnabled: { type: Boolean, default: true }, // Added for notifications
   isActive: { type: Boolean, default: false },
   lastLogin: { type: Date },
 }, { timestamps: true });
