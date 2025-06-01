@@ -977,31 +977,33 @@ router.post('/update-tier', authenticateToken(['admin']), async (req, res) => {
 });
 
 // Get Business Details
-router.get('/:businessId', async (req, res) => {
-  const { businessId } = req.params;
+router.get('/:businessId', authenticateToken, async (req, res) => {
   try {
-    console.log('[GetBusiness] Fetching business:', businessId);
-    const business = await Business.findOne({ businessId });
-    if (!business) {
-      console.log('[GetBusiness] Business not found:', businessId);
-      return res.status(404).json({ error: 'Business not found' });
+    const business = await Business.findOne({ businessId: req.params.businessId });
+    if (!business) return res.status(404).json({ error: 'Business not found' });
+    if (req.user.role !== 'admin' && req.user.id !== business._id.toString()) {
+      return res.status(403).json({ error: 'Unauthorized' });
     }
     res.json({
       businessId: business.businessId,
       name: business.name,
       ownerUsername: business.ownerUsername,
-      qrId: business.qrCode,
+      balances: {
+        ZMW: parseFloat(business.balances.ZMW.toString()),
+        ZMC: parseFloat(business.balances.ZMC.toString()),
+        USD: parseFloat(business.balances.USD.toString()),
+      },
+      qrCode: business.qrCode,
+      role: business.role,
+      approvalStatus: business.approvalStatus,
+      transactions: business.transactions,
+      pendingWithdrawals: business.pendingWithdrawals,
+      pendingDeposits: business.pendingDeposits,
       isActive: business.isActive,
-      kycStatus: business.kycStatus,
-      accountTier: business.accountTier,
     });
   } catch (error) {
-    console.error('[GetBusiness] Error:', {
-      message: error.message,
-      stack: error.stack,
-      businessId,
-    });
-    res.status(500).json({ error: 'Failed to fetch business', details: error.message });
+    console.error('Business Fetch Error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
