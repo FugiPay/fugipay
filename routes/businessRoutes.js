@@ -977,7 +977,7 @@ router.post('/update-tier', authenticateToken(['admin']), async (req, res) => {
 });
 
 // Get Business Details
-router.get('/:businessId', authenticateToken(['business', 'admin']), async (req, res) => {
+/* router.get('/:businessId', authenticateToken(['business', 'admin']), async (req, res) => {
   try {
     console.log(`[BusinessFetch] Fetching business: ${req.params.businessId}`);
     const startTime = Date.now();
@@ -1020,6 +1020,88 @@ router.get('/:businessId', authenticateToken(['business', 'admin']), async (req,
       user: req.user,
     });
     res.status(500).json({ error: 'Server error', details: error.message });
+  }
+}); */
+
+// Get Business Details
+router.get('/:businessId', authenticateToken(['business', 'admin']), async (req, res) => {
+  try {
+    console.log(`[BusinessFetch] Fetching business: ${req.params.businessId}`);
+    const startTime = Date.now();
+    const business = await Business.findOne(
+      { businessId: req.params.businessId },
+      { businessId: 1, name: 1, ownerUsername: 1, balances: 1, isActive: 1, kycStatus: 1 }
+    ).lean();
+    const queryTime = Date.now() - startTime;
+    console.log(`[BusinessFetch] Query completed in ${queryTime}ms, Data:`, business);
+
+    if (!business) {
+      console.log(`[BusinessFetch] Business not found: ${req.params.businessId}`);
+      return res.status(404).json({ error: 'Business not found' });
+    }
+
+    if (req.user.role !== 'admin' && req.user.businessId !== business.businessId) {
+      console.log(`[BusinessFetch] Unauthorized access by ${req.user.businessId} for ${business.businessId}`);
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    const response = {
+      businessId: business.businessId,
+      name: business.name,
+      ownerUsername: business.ownerUsername,
+      balances: {
+        ZMW: parseFloat(business.balances.ZMW.toString()),
+        ZMC: parseFloat(business.balances.ZMC.toString()),
+        USD: parseFloat(business.balances.USD.toString()),
+      },
+      isActive: business.isActive,
+      kycStatus: business.kycStatus || 'pending', // Default if unset
+    };
+
+    console.log(`[BusinessFetch] Success: ${business.businessId}, Response time: ${Date.now() - startTime}ms`);
+    res.json(response);
+  } catch (error) {
+    console.error('[BusinessFetch] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId: req.params.businessId,
+      user: req.user,
+    });
+    res.status(500).json({ error: 'Server error', details: error.message });
+  }
+});
+
+// Update Push Notifications
+router.patch('/:businessId/notifications', authenticateToken(['business']), async (req, res) => {
+  const { pushToken, enabled } = req.body;
+  try {
+    console.log(`[UpdateNotifications] Updating for ${req.params.businessId}:`, { pushToken, enabled });
+    const business = await Business.findOne({ businessId: req.params.businessId });
+    if (!business || !business.isActive) {
+      console.log(`[UpdateNotifications] Business not found or inactive: ${req.params.businessId}`);
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (req.user.businessId !== business.businessId) {
+      console.log(`[UpdateNotifications] Unauthorized: ${req.user.businessId}`);
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    business.pushToken = enabled ? pushToken : null;
+    business.pushNotificationsEnabled = enabled;
+    business.auditLogs.push({
+      action: 'update_notifications',
+      performedBy: business.ownerUsername,
+      details: { pushToken: enabled ? 'set' : 'cleared', enabled },
+    });
+    await business.save();
+    console.log(`[UpdateNotifications] Success: ${req.params.businessId}`);
+    res.json({ message: 'Notification settings updated' });
+  } catch (error) {
+    console.error('[UpdateNotifications] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId: req.params.businessId,
+    });
+    res.status(500).json({ error: 'Failed to update notifications', details: error.message });
   }
 });
 
@@ -1162,32 +1244,6 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
       pinLength: pin?.length,
     });
     res.status(500).json({ error: 'Server error storing QR PIN' });
-  }
-});
-
-// Update Push Notifications
-router.patch('/:businessId/notifications', authenticateToken(['business']), async (req, res) => {
-  const { pushToken, enabled } = req.body;
-  try {
-    const business = await Business.findOne({ businessId: req.params.businessId });
-    if (!business || !business.isActive) {
-      return res.status(404).json({ error: 'Business not found or inactive' });
-    }
-    if (req.user.businessId !== business.businessId) {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-    business.pushToken = enabled ? pushToken : null;
-    business.pushNotificationsEnabled = enabled;
-    business.auditLogs.push({
-      action: 'update_notifications',
-      performedBy: business.ownerUsername,
-      details: { pushToken: enabled ? 'set' : 'cleared', enabled },
-    });
-    await business.save();
-    res.json({ message: 'Notification settings updated' });
-  } catch (error) {
-    console.error('[UpdateNotifications] Error:', error.message);
-    res.status(500).json({ error: 'Failed to update notifications', details: error.message });
   }
 });
 
