@@ -9,7 +9,7 @@ const auditLogSchema = new mongoose.Schema({
     required: true,
     enum: [
       'create', 'update', 'delete', 'kyc_update', 'balance_change', 'login',
-      'pin_reset', 'view_dashboard', 'update_notifications' // Added update_notifications
+      'pin_reset', 'view_dashboard', 'update_notifications', 'withdrawal_request' // Added withdrawal_request
     ],
   },
   performedBy: { type: String, required: true },
@@ -145,8 +145,8 @@ const businessSchema = new mongoose.Schema({
   pendingDeposits: [pendingDepositSchema],
   pendingWithdrawals: [pendingWithdrawalSchema],
   auditLogs: [auditLogSchema],
-  pushToken: { type: String, default: null }, // Explicit default
-  pushNotificationsEnabled: { type: Boolean, default: true }, // Added for notifications
+  pushToken: { type: String, default: null },
+  pushNotificationsEnabled: { type: Boolean, default: true },
   isActive: { type: Boolean, default: false },
   lastLogin: { type: Date },
 }, { timestamps: true });
