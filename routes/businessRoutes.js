@@ -1165,4 +1165,30 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
   }
 });
 
+// Update Push Notifications
+router.patch('/:businessId/notifications', authenticateToken(['business']), async (req, res) => {
+  const { pushToken, enabled } = req.body;
+  try {
+    const business = await Business.findOne({ businessId: req.params.businessId });
+    if (!business || !business.isActive) {
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (req.user.businessId !== business.businessId) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    business.pushToken = enabled ? pushToken : null;
+    business.pushNotificationsEnabled = enabled;
+    business.auditLogs.push({
+      action: 'update_notifications',
+      performedBy: business.ownerUsername,
+      details: { pushToken: enabled ? 'set' : 'cleared', enabled },
+    });
+    await business.save();
+    res.json({ message: 'Notification settings updated' });
+  } catch (error) {
+    console.error('[UpdateNotifications] Error:', error.message);
+    res.status(500).json({ error: 'Failed to update notifications', details: error.message });
+  }
+});
+
 module.exports = router;
