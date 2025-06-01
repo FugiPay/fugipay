@@ -166,7 +166,7 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Business ID or phone number and PIN are required' });
     }
     const query = businessId ? { businessId } : { phoneNumber };
-    const business = await Business.findOne(query);
+    const business = await Business.findOne(query).select('+hashedPin'); // Ensure hashedPin is selected
     if (!business) {
       console.log('[Login] Business not found for:', { businessId, phoneNumber });
       return res.status(404).json({ error: 'Business not found' });
@@ -177,7 +177,7 @@ router.post('/login', async (req, res) => {
       kycStatus: business.kycStatus,
       ownerUsername: business.ownerUsername,
       auditLogsCount: business.auditLogs?.length || 0,
-      auditLogActions: business.auditLogs?.map(log => log.action) || []
+      auditLogActions: business.auditLogs?.map(log => log.action) || [],
     });
     if (!business.isActive) {
       return res.status(403).json({ error: 'Business account is not active' });
@@ -187,26 +187,31 @@ router.post('/login', async (req, res) => {
       return res.status(500).json({ error: 'Invalid business account configuration' });
     }
     let isPinValid = false;
-    // Temporary compatibility for plain text PINs
     if (business.hashedPin.length === 4 && /^\d{4}$/.test(business.hashedPin)) {
       console.warn('[Login] Detected plain text PIN for business:', business.businessId);
       isPinValid = pin === business.hashedPin;
       if (isPinValid) {
-        // Hash the PIN for future logins
         business.hashedPin = await bcrypt.hash(pin, 10);
+        await Business.updateOne({ _id: business._id }, { $set: { hashedPin: business.hashedPin } });
       }
     } else {
       isPinValid = await bcrypt.compare(pin, business.hashedPin);
     }
     if (!isPinValid) {
       console.log('[Login] Invalid PIN for business:', business.businessId);
-      business.auditLogs.push({
-        action: 'login',
-        performedBy: business.ownerUsername,
-        details: { success: false, message: 'Invalid PIN' },
-        timestamp: new Date()
-      });
-      await business.save();
+      await Business.updateOne(
+        { _id: business._id },
+        {
+          $push: {
+            auditLogs: {
+              action: 'login',
+              performedBy: business.ownerUsername,
+              details: { success: false, message: 'Invalid PIN' },
+              timestamp: new Date(),
+            },
+          },
+        }
+      );
       return res.status(401).json({ error: 'Invalid PIN' });
     }
     const token = jwt.sign(
@@ -214,24 +219,28 @@ router.post('/login', async (req, res) => {
       JWT_SECRET,
       { expiresIn: '1d' }
     );
-    business.lastLogin = new Date();
-    business.auditLogs.push({
-      action: 'login',
-      performedBy: business.ownerUsername,
-      details: { success: true, ip: req.ip, loginMethod: businessId ? 'businessId' : 'phoneNumber' },
-      timestamp: new Date()
-    });
-    try {
-      await business.save();
-    } catch (saveError) {
-      console.error('[Login] Save error:', {
-        message: saveError.message,
-        stack: saveError.stack,
-      });
-      return res.status(500).json({ error: 'Failed to save business data', details: saveError.message });
+    // Update lastLogin and auditLogs using updateOne to avoid full validation
+    const updateResult = await Business.updateOne(
+      { _id: business._id },
+      {
+        $set: { lastLogin: new Date() },
+        $push: {
+          auditLogs: {
+            action: 'login',
+            performedBy: business.ownerUsername,
+            details: { success: true, ip: req.ip, loginMethod: businessId ? 'businessId' : 'phoneNumber' },
+            timestamp: new Date(),
+          },
+        },
+      }
+    );
+    if (updateResult.modifiedCount === 0) {
+      console.warn('[Login] Failed to update business data for:', business.businessId);
     }
     if (business.pushToken) {
-      await sendPushNotification(business.pushToken, 'Login Successful', `Welcome back, ${business.name}!`, { businessId: business.businessId });
+      await sendPushNotification(business.pushToken, 'Login Successful', `Welcome back, ${business.name}!`, {
+        businessId: business.businessId,
+      });
     }
     res.json({
       token,

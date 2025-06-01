@@ -4,7 +4,11 @@ const crypto = require('crypto');
 
 // Audit Log Schema (embedded)
 const auditLogSchema = new mongoose.Schema({
-  action: { type: String, required: true, enum: ['create', 'update', 'delete', 'kyc_update', 'balance_change', 'login', 'pin_reset'] },
+  action: {
+    type: String,
+    required: true,
+    enum: ['create', 'update', 'delete', 'kyc_update', 'balance_change', 'login', 'pin_reset', 'view_dashboard'], // Added view_dashboard
+  },
   performedBy: { type: String, required: true },
   timestamp: { type: Date, default: Date.now, index: true },
   details: { type: mongoose.Schema.Types.Mixed },
