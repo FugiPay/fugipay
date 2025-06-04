@@ -392,6 +392,7 @@ router.post('/deposit/manual', authenticateToken(['business']), async (req, res)
 });
 
 // Withdrawal Request
+// Withdrawal Request
 router.post('/withdraw/request', authenticateToken(['business']), async (req, res) => {
   const { amount, destination } = req.body;
   try {
@@ -427,7 +428,18 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
       performedBy: business.ownerUsername,
       details: { amount: withdrawalAmount, fee: withdrawalFee, destination },
     });
-    await business.save();
+    try {
+      await business.save();
+    } catch (validationError) {
+      console.error('[WithdrawRequest] Validation Error:', {
+        message: validationError.message,
+        errors: validationError.errors,
+      });
+      return res.status(500).json({
+        error: 'Failed to save withdrawal request due to validation error',
+        details: validationError.message,
+      });
+    }
     if (business.email) {
       await sendEmail(business.email, 'Withdrawal Request Submitted', emailTemplates.withdrawal(business, withdrawal));
     }
@@ -436,7 +448,10 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     }
     res.json({ message: 'Withdrawal requested. Awaiting approval', withdrawalFee });
   } catch (error) {
-    console.error('[WithdrawRequest] Error:', error.message);
+    console.error('[WithdrawRequest] Error:', {
+      message: error.message,
+      stack: error.stack,
+    });
     res.status(500).json({ error: 'Failed to request withdrawal', details: error.message });
   }
 });
