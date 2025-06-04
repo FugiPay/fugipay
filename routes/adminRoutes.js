@@ -207,7 +207,7 @@ router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin
   }
 });
 
-// Get all businesses with pagination and filters
+// In adminRoutes.js, replace the /businesses endpoint
 router.get('/businesses', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   try {
     const { page = 1, limit = 10, kycStatus, isActive, search = '' } = req.query;
@@ -222,7 +222,7 @@ router.get('/businesses', authenticateToken(['admin']), requireAdmin, async (req
     }
     
     const businesses = await Business.find(query)
-      .select('businessId name phoneNumber kycStatus isActive accountTier createdAt')
+      .select('businessId name phoneNumber kycStatus isActive accountTier createdAt pendingWithdrawals pendingDeposits')
       .limit(Number(limit))
       .skip((Number(page) - 1) * Number(limit))
       .lean();
@@ -564,12 +564,16 @@ router.post('/verify-business-deposit', authenticateToken(['admin']), requireAdm
 });
 
 // Verify business withdrawal
+// In adminRoutes.js, update /verify-business-withdrawal
 router.post('/verify-business-withdrawal', authenticateToken(['admin']), requireAdmin, async (req, res) => {
   const { businessId, withdrawalIndex, approved } = req.body;
   try {
     const business = await Business.findOne({ businessId });
     if (!business) {
       return res.status(404).json({ error: 'Business not found' });
+    }
+    if (business.kycStatus !== 'verified') {
+      return res.status(400).json({ error: 'Business KYC not verified' });
     }
     const withdrawal = business.pendingWithdrawals[withdrawalIndex];
     if (!withdrawal || withdrawal.status !== 'pending') {
@@ -586,7 +590,7 @@ router.post('/verify-business-withdrawal', authenticateToken(['admin']), require
         _id: crypto.randomBytes(16).toString('hex'),
         type: 'withdrawn',
         amount: withdrawal.amount,
-        toFrom: withdrawal.destination?.accountDetails || 'manual-mobile-money',
+        toFrom: withdrawal.destination?.type || 'manual-mobile-money',
         fee: withdrawFee,
         date: new Date(),
       });
