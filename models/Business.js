@@ -9,7 +9,8 @@ const auditLogSchema = new mongoose.Schema({
     required: true,
     enum: [
       'create', 'update', 'delete', 'kyc_update', 'balance_change', 'login',
-      'pin_reset', 'view_dashboard', 'update_notifications', 'withdrawal_request' // Added withdrawal_request
+      'pin_reset', 'view_dashboard', 'update_notifications', 'withdrawal_request',
+      'transaction_received', 'qr_generate'
     ],
   },
   performedBy: { type: String, required: true },
@@ -39,6 +40,8 @@ const transactionSchema = new mongoose.Schema({
   trustRating: { type: Number, min: 1, max: 5 },
   date: { type: Date, default: Date.now, index: true },
   status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'completed' },
+  qrId: { type: String },
+  isRead: { type: Boolean, default: true }, // Added for notification badge
 });
 
 // Pending Deposit Schema (embedded in Business)

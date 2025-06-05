@@ -12,8 +12,8 @@ const { Expo } = require('expo-server-sdk');
 const QRPin = require('../models/QRPin');
 const QRCode = require('qrcode');
 const { Business, BusinessTransaction } = require('../models/Business');
-const User = require('../models/User'); // Added User model
-const AdminLedger = require('../models/AdminLedger'); // Added AdminLedger model
+const User = require('../models/User');
+const AdminLedger = require('../models/AdminLedger');
 
 // Environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
@@ -62,7 +62,7 @@ const ensureIndexes = async () => {
   try {
     await Business.createIndexes({ businessId: 1, email: 1 });
     await QRPin.createIndexes({ qrId: 1, businessId: 1 });
-    await User.createIndexes({ username: 1 }); // Added index for User
+    await User.createIndexes({ username: 1 });
     console.log('[Indexes] Successfully ensured indexes for Business, QRPin, and User');
   } catch (error) {
     console.error('[Indexes] Error creating indexes:', {
@@ -83,6 +83,8 @@ const emailTemplates = {
   welcome: (business) => `Welcome ${business.name}! Your account is pending KYC verification.`,
   withdrawal: (business, withdrawal) => `Withdrawal of ${withdrawal.amount} ZMW requested. Fee: ${withdrawal.fee} ZMW.`,
   kycApproved: (business) => `Your KYC for ${business.name} has been approved!`,
+  transaction: (business, transaction) => `New transaction: ${transaction.amount} ${transaction.currency} ${transaction.type} from ${transaction.toFrom}.`,
+  qrGenerated: (business) => `A new QR code has been generated for ${business.name}.`,
 };
 
 // Send email
@@ -132,7 +134,6 @@ router.post('/register', upload.fields([
     if (existing) {
       return res.status(400).json({ error: 'Business ID, username, phone, or email already exists' });
     }
-    // Hash the PIN before storing
     const hashedPin = await bcrypt.hash(pin, 10);
     const business = new Business({
       businessId,
@@ -140,7 +141,7 @@ router.post('/register', upload.fields([
       ownerUsername,
       phoneNumber,
       email,
-      hashedPin, // Store hashed PIN
+      hashedPin,
       tpinCertificate: tpinCertificate ? tpinCertificate[0].location : null,
       pacraCertificate: pacraCertificate ? pacraCertificate[0].location : null,
       kycStatus: 'pending',
@@ -158,6 +159,7 @@ router.post('/register', upload.fields([
   }
 });
 
+// Login
 router.post('/login', async (req, res) => {
   const { businessId, phoneNumber, pin } = req.body;
   try {
@@ -166,7 +168,7 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Business ID or phone number and PIN are required' });
     }
     const query = businessId ? { businessId } : { phoneNumber };
-    const business = await Business.findOne(query).select('+hashedPin'); // Ensure hashedPin is selected
+    const business = await Business.findOne(query).select('+hashedPin');
     if (!business) {
       console.log('[Login] Business not found for:', { businessId, phoneNumber });
       return res.status(404).json({ error: 'Business not found' });
@@ -219,7 +221,6 @@ router.post('/login', async (req, res) => {
       JWT_SECRET,
       { expiresIn: '1d' }
     );
-    // Update lastLogin and auditLogs using updateOne to avoid full validation
     const updateResult = await Business.updateOne(
       { _id: business._id },
       {
@@ -327,7 +328,6 @@ router.get('/dashboard', authenticateToken(['business']), async (req, res) => {
   }
 });
 
-
 // Debug Dashboard
 router.get('/debug-dashboard', authenticateToken(['business', 'admin']), async (req, res) => {
   try {
@@ -391,7 +391,6 @@ router.post('/deposit/manual', authenticateToken(['business']), async (req, res)
   }
 });
 
-// Withdrawal Request
 // Withdrawal Request
 router.post('/withdraw/request', authenticateToken(['business']), async (req, res) => {
   const { amount, destination } = req.body;
@@ -513,6 +512,18 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
       description,
     });
     const qrCodeUrl = await QRCode.toDataURL(qrData);
+    business.auditLogs.push({
+      action: 'qr_generate',
+      performedBy: business.ownerUsername,
+      details: { amount, description, qrId: qrPin.qrId },
+    });
+    await business.save();
+    if (business.email) {
+      await sendEmail(business.email, 'QR Code Generated', emailTemplates.qrGenerated(business));
+    }
+    if (business.pushToken) {
+      await sendPushNotification(business.pushToken, 'QR Code Generated', `A new QR code has been generated for ${business.name}.`, { businessId: business.businessId });
+    }
     res.json({ qrId: qrPin.qrId, qrCodeUrl, amount, description });
   } catch (error) {
     console.error('[QRGenerate] Error:', error.message);
@@ -578,15 +589,15 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
       return res.status(404).json({ error: `Receiver not found or inactive (type: ${qrPin.type})` });
     }
     const sendingFee = paymentAmount <= 50 ? 0.50 :
-                      paymentAmount <= 100 ? 1.00 :
-                      paymentAmount <= 500 ? 2.00 :
-                      paymentAmount <= 1000 ? 2.50 :
-                      paymentAmount <= 5000 ? 3.50 : 5.00;
+                       paymentAmount <= 100 ? 1.00 :
+                       paymentAmount <= 500 ? 2.00 :
+                       paymentAmount <= 1000 ? 2.50 :
+                       paymentAmount <= 5000 ? 3.50 : 5.00;
     const receivingFee = paymentAmount <= 50 ? 0.50 :
-                        paymentAmount <= 100 ? 1.00 :
-                        paymentAmount <= 500 ? 1.50 :
-                        paymentAmount <= 1000 ? 2.00 :
-                        paymentAmount <= 5000 ? 3.00 : 5.00;
+                         paymentAmount <= 100 ? 1.00 :
+                         paymentAmount <= 500 ? 1.50 :
+                         paymentAmount <= 1000 ? 2.00 :
+                         paymentAmount <= 5000 ? 3.00 : 5.00;
     if (sender.balance < paymentAmount + sendingFee) {
       await session.abortTransaction();
       session.endSession();
@@ -604,7 +615,7 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
             $inc: { balance: -(paymentAmount + sendingFee) },
             $push: {
               transactions: {
-                _id: sentTxId,
+                _id: sentTexId,
                 type: 'sent',
                 amount: paymentAmount,
                 toFrom: receiverIdentifier,
@@ -657,12 +668,44 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
                   fee: receivingFee,
                   date: transactionDate,
                   qrId,
+                  isRead: false, // Mark as unread for badge
                 },
+              },
+              auditLogs: {
+                action: 'transaction_received',
+                performedBy: sender.username,
+                details: { amount: paymentAmount, fee: receivingFee, qrId },
+                timestamp: new Date(),
               },
             },
           },
         },
       ], { session });
+
+      // Send notifications
+      if (receiver.email) {
+        await sendEmail(
+          receiver.email,
+          'New Transaction Received',
+          emailTemplates.transaction({
+            name: receiver.name,
+            transactions: {
+              amount: paymentAmount,
+              currency: 'ZMW',
+              type: 'received',
+              toFrom: sender.username,
+            },
+          })
+        );
+      }
+      if (receiver.pushToken) {
+        await sendPushNotification(
+          receiver.pushToken,
+          'New Transaction',
+          `Received ${paymentAmount} ZMW from ${sender.username}.`,
+          { businessId: receiver.businessId, transactionId: receivedTxId }
+        );
+      }
     }
 
     await AdminLedger.updateOne(
@@ -717,10 +760,10 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
   }
 });
 
-// Pay via QR Code (User-to-business payments)
+// Pay QR code (User-to-business payments)
 router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
   const { qrId, amount, senderUsername, businessId } = req.body;
-  if (!qrId || !amount || !senderUsername) {
+  if (!quantity || !amount || !senderUsername) {
     return res.status(400).json({ error: 'QR ID, amount, and sender username are required' });
   }
   const paymentAmount = parseFloat(amount);
@@ -760,15 +803,15 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
       return res.status(404).json({ error: 'Business not found or inactive' });
     }
     const sendingFee = paymentAmount <= 50 ? 0.50 :
-                      paymentAmount <= 100 ? 1.00 :
-                      paymentAmount <= 500 ? 2.00 :
-                      paymentAmount <= 1000 ? 2.50 :
-                      paymentAmount <= 5000 ? 3.50 : 5.00;
+                       paymentAmount <= 100 ? 1.00 :
+                       paymentAmount <= 500 ? 2.00 :
+                       paymentAmount <= 1000 ? 2.50 :
+                       paymentAmount <= 5000 ? 3.50 : 5.00;
     const receivingFee = paymentAmount <= 50 ? 0.50 :
-                        paymentAmount <= 100 ? 1.00 :
-                        paymentAmount <= 500 ? 1.50 :
-                        paymentAmount <= 1000 ? 2.00 :
-                        paymentAmount <= 5000 ? 3.00 : 5.00;
+                         paymentAmount <= 100 ? 1.00 :
+                         paymentAmount <= 500 ? 1.50 :
+                         paymentAmount <= 1000 ? 2.00 :
+                         paymentAmount <= 5000 ? 3.00 : 5.00;
     if (user.balance < paymentAmount + sendingFee) {
       await session.abortTransaction();
       session.endSession();
@@ -816,6 +859,13 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
                 fee: receivingFee,
                 date: transactionDate,
                 qrId,
+                isRead: false, // Mark as unread for badge
+              },
+              auditLogs: {
+                action: 'transaction_received',
+                performedBy: user.username,
+                details: { amount: paymentAmount, fee: receivingFee, qrId },
+                timestamp: new Date(),
               },
             },
           },
@@ -842,6 +892,31 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
       },
       { upsert: true, session }
     );
+
+    // Send notifications
+    if (business.email) {
+      await sendEmail(
+        business.email,
+        'New Transaction Received',
+        emailTemplates.transaction({
+          name: business.name,
+          transaction: {
+            amount: paymentAmount,
+            currency: 'ZMW',
+            type: 'received',
+            toFrom: user.username,
+          },
+        })
+      );
+    }
+    if (business.pushToken) {
+      await sendPushNotification(
+        business.pushToken,
+        'New Transaction',
+        `Received ${paymentAmount} ZMW from ${user.username}.`,
+        { businessId: business.businessId, transactionId: receivedTxId }
+      );
+    }
 
     await session.commitTransaction();
     session.endSession();
@@ -992,63 +1067,16 @@ router.post('/update-tier', authenticateToken(['admin']), async (req, res) => {
 });
 
 // Get Business Details
-/* router.get('/:businessId', authenticateToken(['business', 'admin']), async (req, res) => {
-  try {
-    console.log(`[BusinessFetch] Fetching business: ${req.params.businessId}`);
-    const startTime = Date.now();
-    const business = await Business.findOne(
-      { businessId: req.params.businessId },
-      { businessId: 1, name: 1, ownerUsername: 1, balances: 1, isActive: 1 } // Select only needed fields
-    ).lean();
-    const queryTime = Date.now() - startTime;
-    console.log(`[BusinessFetch] Query completed in ${queryTime}ms`);
-
-    if (!business) {
-      console.log(`[BusinessFetch] Business not found: ${req.params.businessId}`);
-      return res.status(404).json({ error: 'Business not found' });
-    }
-
-    if (req.user.role !== 'admin' && req.user.businessId !== business.businessId) {
-      console.log(`[BusinessFetch] Unauthorized access by ${req.user.businessId} for ${business.businessId}`);
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-
-    const response = {
-      businessId: business.businessId,
-      name: business.name,
-      ownerUsername: business.ownerUsername,
-      balances: {
-        ZMW: parseFloat(business.balances.ZMW.toString()),
-        ZMC: parseFloat(business.balances.ZMC.toString()),
-        USD: parseFloat(business.balances.USD.toString()),
-      },
-      isActive: business.isActive,
-    };
-
-    console.log(`[BusinessFetch] Success: ${business.businessId}, Response time: ${Date.now() - startTime}ms`);
-    res.json(response);
-  } catch (error) {
-    console.error('[BusinessFetch] Error:', {
-      message: error.message,
-      stack: error.stack,
-      businessId: req.params.businessId,
-      user: req.user,
-    });
-    res.status(500).json({ error: 'Server error', details: error.message });
-  }
-}); */
-
-// Get Business Details
 router.get('/:businessId', authenticateToken(['business', 'admin']), async (req, res) => {
   try {
     console.log(`[BusinessFetch] Fetching business: ${req.params.businessId}`);
     const startTime = Date.now();
     const business = await Business.findOne(
       { businessId: req.params.businessId },
-      { businessId: 1, name: 1, ownerUsername: 1, balances: 1, isActive: 1, kycStatus: 1 }
-    ).lean();
+      { businessId: 1, name: 1, ownerUsername: 1, balances: 1, transactions: 1, isActive: 1, kycStatus: 1 }
+    );
     const queryTime = Date.now() - startTime;
-    console.log(`[BusinessFetch] Query completed in ${queryTime}ms, Data:`, business);
+    console.log(`[BusinessFetch] Query completed in ${queryTime}ms`, { businessId: businessId, found: !!business });
 
     if (!business) {
       console.log(`[BusinessFetch] Business not found: ${req.params.businessId}`);
@@ -1069,8 +1097,20 @@ router.get('/:businessId', authenticateToken(['business', 'admin']), async (req,
         ZMC: parseFloat(business.balances.ZMC.toString()),
         USD: parseFloat(business.balances.USD.toString()),
       },
+      transactions: business.transactions.map(t => ({
+        _id: t._id,
+        type: t.types,
+        amount: parseFloat(t.amount.toString()),
+        currency: t.currency,
+        toFrom: t.toFrom,
+        date: t.date,
+        status: t.status,
+        reason: t.reason || '',
+        qrId: t.qrId || '',
+        isRead: t.isRead !== undefined ? t.isRead : true, // Default to true if not set
+      })),
       isActive: business.isActive,
-      kycStatus: business.kycStatus || 'pending', // Default if unset
+      kycStatus: business.kycStatus || 'pending',
     };
 
     console.log(`[BusinessFetch] Success: ${business.businessId}, Response time: ${Date.now() - startTime}ms`);
@@ -1161,7 +1201,6 @@ router.post('/reset-pin', async (req, res) => {
     if (!business) {
       return res.status(400).json({ error: 'Invalid or expired reset token' });
     }
-    // Hash the new PIN
     business.hashedPin = await bcrypt.hash(newPin, 10);
     business.resetToken = null;
     business.resetTokenExpiry = null;
@@ -1238,6 +1277,7 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
               date: new Date(),
               status: 'completed',
               qrId,
+              isRead: false, // Mark as unread for badge
             },
           },
         },
@@ -1259,6 +1299,45 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
       pinLength: pin?.length,
     });
     res.status(500).json({ error: 'Server error storing QR PIN' });
+  }
+});
+
+// Get Unread Notification Count
+router.get('/:businessId/notifications/unread', authenticateToken(['business']), async (req, res) => {
+  try {
+    const business = await Business.findOne({ businessId: req.params.businessId });
+    if (!business || !business.isActive) {
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (req.user.businessId !== business.businessId) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const unreadCount = business.transactions.filter(t => t.isRead === false).length;
+    res.json({ unreadCount });
+  } catch (error) {
+    console.error('[UnreadNotifications] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch unread notifications', details: error.message });
+  }
+});
+
+// Mark Transactions as Read
+router.post('/:businessId/notifications/mark-read', authenticateToken(['business']), async (req, res) => {
+  try {
+    const business = await Business.findOne({ businessId: req.params.businessId });
+    if (!business || !business.isActive) {
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (req.user.businessId !== business.businessId) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    await Business.updateOne(
+      { businessId: req.params.businessId },
+      { $set: { 'transactions.$[].isRead': true } }
+    );
+    res.json({ message: 'Notifications marked as read' });
+  } catch (error) {
+    console.error('[MarkRead] Error:', error.message);
+    res.status(500).json({ error: 'Failed to mark notifications as read', details: error.message });
   }
 });
 
