@@ -75,6 +75,15 @@ const ensureIndexes = async () => {
 };
 ensureIndexes();
 
+// Middleware: Validate businessId
+const validateBusinessId = (req, res, next) => {
+  const { businessId } = req.params;
+  if (!businessId) {
+    return res.status(400).json({ error: 'Business ID is required' });
+  }
+  next();
+};
+
 // Convert Decimal128 to float
 const convertDecimal128 = (value) => (value ? parseFloat(value.toString()) : 0);
 
@@ -1067,7 +1076,7 @@ router.post('/update-tier', authenticateToken(['admin']), async (req, res) => {
 });
 
 // Get Business Details
-router.get('/:businessId', authenticateToken(['business', 'admin']), async (req, res) => {
+router.get('/:businessId', validateBusinessId, authenticateToken(['business', 'admin']), async (req, res) => {
   try {
     console.log(`[BusinessFetch] Fetching business: ${req.params.businessId}`);
     const startTime = Date.now();
@@ -1076,7 +1085,7 @@ router.get('/:businessId', authenticateToken(['business', 'admin']), async (req,
       { businessId: 1, name: 1, ownerUsername: 1, balances: 1, transactions: 1, isActive: 1, kycStatus: 1 }
     );
     const queryTime = Date.now() - startTime;
-    console.log(`[BusinessFetch] Query completed in ${queryTime}ms`, { businessId: businessId, found: !!business });
+    console.log(`[BusinessFetch] Query completed in ${queryTime}ms`, { businessId: req.params.businessId, found: !!business });
 
     if (!business) {
       console.log(`[BusinessFetch] Business not found: ${req.params.businessId}`);
@@ -1099,7 +1108,7 @@ router.get('/:businessId', authenticateToken(['business', 'admin']), async (req,
       },
       transactions: business.transactions.map(t => ({
         _id: t._id,
-        type: t.types,
+        type: t.type,
         amount: parseFloat(t.amount.toString()),
         currency: t.currency,
         toFrom: t.toFrom,
@@ -1107,7 +1116,7 @@ router.get('/:businessId', authenticateToken(['business', 'admin']), async (req,
         status: t.status,
         reason: t.reason || '',
         qrId: t.qrId || '',
-        isRead: t.isRead !== undefined ? t.isRead : true, // Default to true if not set
+        isRead: t.isRead !== undefined ? t.isRead : true,
       })),
       isActive: business.isActive,
       kycStatus: business.kycStatus || 'pending',
@@ -1303,7 +1312,7 @@ router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) =
 });
 
 // Get Unread Notification Count
-router.get('/:businessId/notifications/unread', authenticateToken(['business']), async (req, res) => {
+router.get('/:businessId/notifications/unread', validateBusinessId, authenticateToken(['business']), async (req, res) => {
   try {
     const business = await Business.findOne({ businessId: req.params.businessId });
     if (!business || !business.isActive) {
@@ -1321,7 +1330,7 @@ router.get('/:businessId/notifications/unread', authenticateToken(['business']),
 });
 
 // Mark Transactions as Read
-router.post('/:businessId/notifications/mark-read', authenticateToken(['business']), async (req, res) => {
+router.post('/:businessId/notifications/mark-read', validateBusinessId, authenticateToken(['business']), async (req, res) => {
   try {
     const business = await Business.findOne({ businessId: req.params.businessId });
     if (!business || !business.isActive) {
