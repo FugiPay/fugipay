@@ -90,7 +90,28 @@ const convertDecimal128 = (value) => (value ? parseFloat(value.toString()) : 0);
 // Email templates
 const emailTemplates = {
   welcome: (business) => `Welcome ${business.name}! Your account is pending KYC verification.`,
-  withdrawal: (business, withdrawal) => `Withdrawal of ${withdrawal.amount} ZMW requested. Fee: ${withdrawal.fee} ZMW.`,
+  withdrawal: (business, withdrawal, transactionId) => `
+New Withdrawal Request
+Business ID: ${business.businessId}
+Business Name: ${business.name}
+Owner Username: ${business.ownerUsername}
+Email: ${business.email || 'N/A'}
+Phone Number: ${business.phoneNumber || 'N/A'}
+Amount: ${withdrawal.amount} ZMW
+Fee: ${withdrawal.fee} ZMW
+Destination: ${withdrawal.destination.type}
+${withdrawal.destination.type === 'bank' ?
+  `Bank Name: ${withdrawal.destination.bankName || 'N/A'}\n` +
+  `Account Number: ${withdrawal.destination.accountNumber || 'N/A'}\n` +
+  `Swift Code: ${withdrawal.destination.swiftCode || 'N/A'}`
+: withdrawal.destination.type === 'mobile_money' ?
+  `Mobile Number: ${withdrawal.destination.accountNumber || 'N/A'}`
+: ''}
+Request Date: ${withdrawal.date.toISOString()}
+Transaction ID: ${transactionId}
+KYC Status: ${business.kycStatus}
+Please review and approve/reject this request.
+  `,
   kycApproved: (business) => `Your KYC for ${business.name} has been approved!`,
   transaction: (business, transaction) => `New transaction: ${transaction.amount} ${transaction.currency} ${transaction.type} from ${transaction.toFrom}.`,
   qrGenerated: (business) => `A new QR code has been generated for ${business.name}.`,
@@ -402,7 +423,7 @@ router.post('/deposit/manual', authenticateToken(['business']), async (req, res)
 
 // Withdrawal Request
 router.post('/withdraw/request', authenticateToken(['business']), async (req, res) => {
-  const { amount, destination } = req.body;
+  const { amount, destination, currency } = req.body;
   try {
     const business = await Business.findOne({ businessId: req.user.businessId });
     if (!business || !business.isActive) {
@@ -412,30 +433,51 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     if (!withdrawalAmount || withdrawalAmount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
     }
-    if (withdrawalAmount > business.transactionLimits.maxPerTransaction) {
+    if (withdrawalAmount > withdrawal.business.transactionLimits.maxPerTransaction) {
       return res.status(400).json({ error: `Withdrawal exceeds max transaction limit of ${business.transactionLimits.maxPerTransaction} ZMW` });
     }
-    if (!destination || !['bank', 'mobile_money', 'zambia_coin'].includes(destination.type)) {
-      return res.status(400).json({ error: 'Valid destination required' });
+    if (!destination || !['bank', 'mobile_money'].includes(destination.type)) {
+      return res.status(400).json({ error: 'Valid destination required (bank or mobile_money)' });
     }
-    const withdrawalFee = Math.max(withdrawalAmount * 0.01, 2);
+    const withdrawalFee = Math.max(withdrawalAmount * 0.01, 3);
     const totalDeduction = withdrawalAmount + withdrawalFee;
     if (convertDecimal128(business.balances.ZMW) < totalDeduction) {
       return res.status(400).json({ error: 'Insufficient balance to cover amount and fee' });
     }
+
+    const transactionId = crypto.randomBytes(16).toString('hex');
     const withdrawal = {
       amount: mongoose.Types.Decimal128.fromString(withdrawalAmount.toString()),
       fee: mongoose.Types.Decimal128.fromString(withdrawalFee.toString()),
       currency: 'ZMW',
       date: new Date(),
-      destination,
+      destination: {
+        type: destination.type,
+        bankName: destination.bankName || '',
+        accountNumber: destination.accountNumber || '',
+        swiftCode: destination.swiftCode || '',
+      },
     };
+    const transaction = {
+      _id: transactionId,
+      type: 'withdrawn',
+      amount: mongoose.Types.Decimal128.fromString(withdrawalAmount.toString()),
+      currency: 'ZMW',
+      toFrom: destination.type === 'bank' ? destination.bankName : destination.accountNumber,
+      fee: mongoose.Types.Decimal128.fromString(withdrawalFee.toString()),
+      date: new Date(),
+      status: 'pending',
+      isRead: false,
+    };
+
     business.pendingWithdrawals.push(withdrawal);
+    business.transactions.push(transaction);
     business.auditLogs.push({
       action: 'withdrawal_request',
       performedBy: business.ownerUsername,
-      details: { amount: withdrawalAmount, fee: withdrawalFee, destination },
+      details: { amount: withdrawalAmount, fee: withdrawalFee, destination, transactionId },
     });
+
     try {
       await business.save();
     } catch (validationError) {
@@ -448,13 +490,32 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
         details: validationError.message,
       });
     }
+
+    // Send admin email
+    await sendEmail(
+      ADMIN_EMAIL,
+      `Withdrawal Request - ${business.businessId}`,
+      emailTemplates.withdrawal(business, withdrawal, transactionId)
+    );
+
+    // Notify business
     if (business.email) {
-      await sendEmail(business.email, 'Withdrawal Request Submitted', emailTemplates.withdrawal(business, withdrawal));
+      await sendEmail(
+        business.email,
+        'Withdrawal Request Submitted',
+        `Your withdrawal of ${withdrawalAmount} ZMW (Fee: ${withdrawalFee} ZMW) to ${destination.type} is pending approval. Transaction ID: ${transactionId}`
+      );
     }
     if (business.pushToken) {
-      await sendPushNotification(business.pushToken, 'Withdrawal Requested', `Your request for ${withdrawalAmount} ZMW is pending.`, { businessId: business.businessId });
+      await sendPushNotification(
+        business.pushToken,
+        'Withdrawal Requested',
+        `Your request for ${withdrawalAmount} ZMW to ${destination.type} is pending.`,
+        { businessId: business.businessId, transactionId }
+      );
     }
-    res.json({ message: 'Withdrawal requested. Awaiting approval', withdrawalFee });
+
+    res.json({ message: 'Withdrawal requested. Awaiting approval', withdrawalFee, transactionId });
   } catch (error) {
     console.error('[WithdrawRequest] Error:', {
       message: error.message,
