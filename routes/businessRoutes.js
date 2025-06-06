@@ -429,25 +429,26 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     if (!business || !business.isActive) {
       return res.status(403).json({ error: 'Business not found or inactive' });
     }
-    const withdrawalAmount = parseFloat(amount);
-    if (!withdrawalAmount || withdrawalAmount <= 0) {
+    const amountNum = parseFloat(amount);
+    if (!amountNum || amountNum <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
     }
-    if (withdrawalAmount > withdrawal.business.transactionLimits.maxPerTransaction) {
+    if (amountNum > business.transactionLimits.maxPerTransaction) {
       return res.status(400).json({ error: `Withdrawal exceeds max transaction limit of ${business.transactionLimits.maxPerTransaction} ZMW` });
     }
     if (!destination || !['bank', 'mobile_money'].includes(destination.type)) {
-      return res.status(400).json({ error: 'Valid destination required (bank or mobile_money)' });
+      return res.status(400).json({ error: 'Valid destination type required (bank or mobile_money)' });
     }
-    const withdrawalFee = Math.max(withdrawalAmount * 0.01, 3);
-    const totalDeduction = withdrawalAmount + withdrawalFee;
+    const withdrawalFee = Math.max(amountNum * 0.01, 3);
+    const totalDeduction = amountNum + withdrawalFee;
     if (convertDecimal128(business.balances.ZMW) < totalDeduction) {
       return res.status(400).json({ error: 'Insufficient balance to cover amount and fee' });
     }
 
     const transactionId = crypto.randomBytes(16).toString('hex');
     const withdrawal = {
-      amount: mongoose.Types.Decimal128.fromString(withdrawalAmount.toString()),
+      id: transactionId,
+      amount: mongoose.Types.Decimal128.fromString(amountNum.toString()),
       fee: mongoose.Types.Decimal128.fromString(withdrawalFee.toString()),
       currency: 'ZMW',
       date: new Date(),
@@ -460,8 +461,8 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     };
     const transaction = {
       _id: transactionId,
-      type: 'withdrawn',
-      amount: mongoose.Types.Decimal128.fromString(withdrawalAmount.toString()),
+      type: 'withdrawal',
+      amount: mongoose.Types.Decimal128.fromString(amountNum.toString()),
       currency: 'ZMW',
       toFrom: destination.type === 'bank' ? destination.bankName : destination.accountNumber,
       fee: mongoose.Types.Decimal128.fromString(withdrawalFee.toString()),
@@ -475,7 +476,7 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     business.auditLogs.push({
       action: 'withdrawal_request',
       performedBy: business.ownerUsername,
-      details: { amount: withdrawalAmount, fee: withdrawalFee, destination, transactionId },
+      details: { amount: amountNum, fee: withdrawalFee, destination, transactionId },
     });
 
     try {
@@ -503,14 +504,14 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
       await sendEmail(
         business.email,
         'Withdrawal Request Submitted',
-        `Your withdrawal of ${withdrawalAmount} ZMW (Fee: ${withdrawalFee} ZMW) to ${destination.type} is pending approval. Transaction ID: ${transactionId}`
+        `Your withdrawal of ${amountNum} ZMW (Fee: ${withdrawalFee} ZMW) to ${destination.type} is pending approval. Transaction ID: ${transactionId}`
       );
     }
     if (business.pushToken) {
       await sendPushNotification(
         business.pushToken,
         'Withdrawal Requested',
-        `Your request for ${withdrawalAmount} ZMW to ${destination.type} is pending.`,
+        `Your request for ${amountNum} ZMW to ${destination.type} is pending.`,
         { businessId: business.businessId, transactionId }
       );
     }
