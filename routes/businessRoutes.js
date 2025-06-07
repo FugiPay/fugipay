@@ -441,7 +441,7 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     if (!destination || !['bank', 'mobile_money'].includes(destination.type)) {
       return res.status(400).json({ error: 'Valid destination type required (bank or mobile_money)' });
     }
-    const withdrawalFee = Math.max(amountNum * 0.01, 3);
+    const withdrawalFee = Math.max(amountNum * 0.01,2);
     const totalDeduction = amountNum + withdrawalFee;
     if (convertDecimal128(business.balances.ZMW) < totalDeduction) {
       return res.status(400).json({ error: 'Insufficient balance to cover amount and fee' });
