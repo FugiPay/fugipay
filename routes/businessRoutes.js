@@ -22,6 +22,8 @@ const S3_BUCKET = process.env.S3_BUCKET || 'zangena-files';
 const EMAIL_USER = process.env.EMAIL_USER || 'your_email@example.com';
 const EMAIL_PASS = process.env.EMAIL_PASS || 'your_email_password';
 
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+
 // S3 setup
 const s3Client = new S3Client({ region: AWS_REGION });
 const upload = multer({
