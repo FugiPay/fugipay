@@ -463,7 +463,7 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     };
     const transaction = {
       _id: transactionId,
-      type: 'withdrawal',
+      type: 'withdrawn',
       amount: mongoose.Types.Decimal128.fromString(amountNum.toString()),
       currency: 'ZMW',
       toFrom: destination.type === 'bank' ? destination.bankName : destination.accountNumber,
