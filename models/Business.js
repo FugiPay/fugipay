@@ -10,7 +10,8 @@ const auditLogSchema = new mongoose.Schema({
     enum: [
       'create', 'update', 'delete', 'kyc_update', 'balance_change', 'login',
       'pin_reset', 'view_dashboard', 'update_notifications', 'withdrawal_request',
-      'transaction_received', 'qr_generate', 'withdrawal', 'deposit_verification', 'set_active', 'tier_update'
+      'transaction_received', 'qr_generate', 'withdrawal', 'deposit_verification',
+      'set_active', 'tier_update', 'delete-account' // Added delete-account
     ],
   },
   performedBy: { type: String, required: true },

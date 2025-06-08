@@ -1554,6 +1554,9 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
       businessId: req.user.businessId,
       operation: error.operation || 'unknown',
     });
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: 'Invalid data provided', details: error.message });
+    }
     res.status(500).json({ error: 'Failed to delete account', details: error.message });
   }
 });
