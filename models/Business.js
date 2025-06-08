@@ -10,7 +10,7 @@ const auditLogSchema = new mongoose.Schema({
     enum: [
       'create', 'update', 'delete', 'kyc_update', 'balance_change', 'login',
       'pin_reset', 'view_dashboard', 'update_notifications', 'withdrawal_request',
-      'transaction_received', 'qr_generate'
+      'transaction_received', 'qr_generate', 'withdrawal', 'deposit_verification', 'set_active', 'tier_update'
     ],
   },
   performedBy: { type: String, required: true },
@@ -41,7 +41,7 @@ const transactionSchema = new mongoose.Schema({
   date: { type: Date, default: Date.now, index: true },
   status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'completed' },
   qrId: { type: String },
-  isRead: { type: Boolean, default: true }, // Added for notification badge
+  isRead: { type: Boolean, default: true },
 });
 
 // Pending Deposit Schema (embedded in Business)
