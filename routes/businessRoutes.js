@@ -1414,4 +1414,99 @@ router.post('/:businessId/notifications/mark-read', validateBusinessId, authenti
   }
 });
 
+
+      // Delete Account
+      router.post('/delete-account', authenticateToken(['business']), async (req, res) => {
+        const { pin } = req.body;
+        try {
+          if (!pin || !/^\d{4}$/.test(pin)) {
+            return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+          }
+          const business = await Business.findOne({ businessId: req.user.businessId }).select('+hashedPin');
+          if (!business || !business.isActive) {
+            return res.status(404).json({ error: 'Business not found or already inactive' });
+          }
+          const isPinValid = await bcrypt.compare(pin, business.hashedPin);
+          if (!isPinValid) {
+            business.auditLogs.push({
+              action: 'delete-account',
+              performedBy: business.ownerUsername,
+              details: { success: false, message: 'Invalid PIN' },
+              timestamp: new Date(),
+            });
+            await business.save();
+            return res.status(401).json({ error: 'Invalid PIN' });
+          }
+          if (business.pendingDeposits.length > 0 || business.pendingWithdrawals.length > 0) {
+            return res.status(400).json({ error: 'Cannot delete account with pending deposits or withdrawals' });
+          }
+          const pendingTransactions = await BusinessTransaction.countDocuments({
+            businessId: req.user.businessId,
+            status: 'pending',
+          });
+          if (pendingTransactions > 0) {
+            return res.status(400).json({ error: 'Cannot delete account with pending transactions' });
+          }
+          const session = await mongoose.startSession();
+          session.startTransaction();
+          try {
+            business.isActive = false;
+            business.email = null;
+            business.phoneNumber = null;
+            business.hashedPin = null;
+            business.pushToken = null;
+            business.pushNotificationsEnabled = false;
+            business.tpinCertificate = null;
+            business.pacraCertificate = null;
+            business.balances = { ZMW: 0, ZMC: 0, USD: 0 };
+            business.resetToken = null;
+            business.resetTokenExpiry = null;
+            business.auditLogs.push({
+              action: 'delete-account',
+              performedBy: business.ownerUsername,
+              details: { message: 'Account deleted successfully' },
+              timestamp: new Date(),
+            });
+            await QRPin.deleteMany({ businessId: business.businessId }, { session });
+            await BusinessTransaction.deleteMany({ businessId: business.businessId }, { session });
+            await business.save({ session });
+            await session.commitTransaction();
+          } catch (error) {
+            await session.abortTransaction();
+            throw error;
+          } finally {
+            session.endSession();
+          }
+          if (business.email) {
+            await sendEmail(
+              business.email,
+              'Account Deactivated',
+              emailTemplates.accountDeleted(business)
+            );
+            await sendEmail(
+              ADMIN_EMAIL,
+              `Account Deletion Notice: ${business.businessId}`,
+              `Business ${business.name} (ID: ${business.businessId}) has deleted their account.`
+            );
+          }
+          if (business.pushToken) {
+            await sendPushNotification(
+              business.pushToken,
+              'Account Deactivated',
+              'Your Zangena account has been deleted.',
+              { businessId: business.businessId }
+            );
+          }
+          res.json({ message: 'Account deleted successfully' });
+        } catch (error) {
+          console.error('[DeleteAccount] Error:', {
+            message: error.message,
+            stack: error.stack,
+            businessId: req.user.businessId,
+          });
+          res.status(500).json({ error: 'Failed to delete account', details: error.message });
+        }
+      });
+
 module.exports = router;
+
