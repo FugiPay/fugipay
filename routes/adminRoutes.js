@@ -605,7 +605,7 @@ router.post('/verify-business-withdrawal', authenticateToken(['admin']), require
       withdrawal.status = 'rejected';
     }
     business.auditLogs.push({
-      action: 'withdrawal_verification',
+      action: 'withdrawal', // Changed from 'withdrawal_verification'
       performedBy: req.user.username,
       details: { withdrawalIndex, approved },
     });
@@ -627,7 +627,10 @@ router.post('/verify-business-withdrawal', authenticateToken(['admin']), require
     }
     res.json({ message: `Business withdrawal ${approved ? 'approved' : 'rejected'}` });
   } catch (error) {
-    console.error('[VerifyBusinessWithdrawal] Error:', error.message || error.stack);
+    console.error('[VerifyBusinessWithdrawal] Error:', error); // Enhanced logging
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: `Validation failed: ${error.message}` });
+    }
     res.status(500).json({ error: 'Failed to verify business withdrawal' });
   }
 });
