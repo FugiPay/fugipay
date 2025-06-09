@@ -24,6 +24,17 @@ const EMAIL_PASS = process.env.EMAIL_PASS || 'your_email_password';
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 
+const validator = require('validator');
+const rateLimit = require('express-rate-limit');
+
+// Rate limiter for /forgot-pin (5 requests per hour per identifier)
+const forgotPinLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  keyGenerator: (req) => req.body.identifier || req.ip,
+  message: { error: 'Too many PIN reset requests. Please try again later.' },
+});
+
 // S3 setup
 const s3Client = new S3Client({ region: AWS_REGION });
 const upload = multer({
@@ -1234,62 +1245,110 @@ router.patch('/:businessId/notifications', authenticateToken(['business']), asyn
 });
 
 // Forgot PIN
-router.post('/forgot-pin', async (req, res) => {
-  const { businessId, email } = req.body;
+router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
+  const { identifier } = req.body;
+  if (!identifier) {
+    return res.status(400).json({ error: 'Business ID or phone number is required' });
+  }
   try {
-    const business = await Business.findOne({ businessId, email });
-    if (!business) {
-      return res.status(404).json({ error: 'Business or email not found' });
+    // Validate identifier (10-digit TPIN or Zambian phone number)
+    const isTpin = /^\d{10}$/.test(identifier);
+    const isPhone = /^(?:\+260|0)[79]\d{8}$/.test(identifier);
+    if (!isTpin && !isPhone) {
+      return res.status(400).json({ error: 'Invalid Business ID or phone number' });
     }
-    const resetToken = crypto.randomBytes(32).toString('hex');
+    const phoneNumber = isPhone && identifier.startsWith('0') ? `+260${identifier.slice(1)}` : identifier;
+
+    const business = await Business.findOne({
+      $or: [{ businessId: identifier }, { phoneNumber }],
+    });
+    if (!business) {
+      return res.status(404).json({ error: 'No account found with that identifier' });
+    }
+    if (!validator.isEmail(business.email)) {
+      return res.status(500).json({ error: 'Invalid business email configuration' });
+    }
+
+    const resetToken = crypto.randomBytes(20).toString('hex'); // Matches user app
+    const resetTokenExpiry = Date.now() + 3600000; // 1 hour
     business.resetToken = resetToken;
-    business.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000);
+    business.resetTokenExpiry = resetTokenExpiry;
     business.auditLogs.push({
       action: 'pin_reset_request',
       performedBy: business.ownerUsername,
-      details: { email },
+      timestamp: new Date(),
+      ipAddress: req.ip,
+      details: { identifier },
     });
     await business.save();
-    const resetLink = `https://your-app.com/reset-pin?token=${resetToken}&businessId=${businessId}`;
-    await sendEmail(business.email, 'Reset Your PIN', `Click to reset: ${resetLink}`);
-    res.json({ message: 'PIN reset link sent to email' });
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: business.email,
+      subject: 'Zangena Business PIN Reset',
+      text: `Your PIN reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena Business app to reset your PIN.`,
+      html: `<h2>Zangena Business PIN Reset</h2><p>Your PIN reset token is: <strong>${resetToken}</strong></p><p>It expires in 1 hour. Enter it in the Zangena Business app to reset your PIN.</p>`,
+    };
+    try {
+      await transporter.sendMail(mailOptions);
+    } catch (emailError) {
+      console.error('[ForgotPin] Email delivery failed:', emailError.message);
+      return res.status(500).json({ error: 'Failed to send reset email. Please try again later.' });
+    }
+
+    res.json({ message: 'Reset instructions have been sent to your email.' });
   } catch (error) {
     console.error('[ForgotPin] Error:', error.message);
-    res.status(500).json({ error: 'Failed to request PIN reset', details: error.message });
+    res.status(500).json({ error: 'Server error during PIN reset request' });
   }
 });
 
-// Reset PIN
 router.post('/reset-pin', async (req, res) => {
-  const { businessId, resetToken, newPin } = req.body;
+  const { token, newPin } = req.body;
+  if (!token || !newPin) {
+    return res.status(400).json({ error: 'Token and new PIN are required' });
+  }
+  if (!/^\d{4}$/.test(newPin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
   try {
-    if (!/^\d{4}$/.test(newPin)) {
-      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-    }
     const business = await Business.findOne({
-      businessId,
-      resetToken,
-      resetTokenExpiry: { $gt: new Date() },
+      resetToken: token,
+      resetTokenExpiry: { $gt: Date.now() },
     });
     if (!business) {
       return res.status(400).json({ error: 'Invalid or expired reset token' });
     }
+
     business.hashedPin = await bcrypt.hash(newPin, 10);
-    business.resetToken = null;
-    business.resetTokenExpiry = null;
+    business.resetToken = undefined;
+    business.resetTokenExpiry = undefined;
     business.auditLogs.push({
       action: 'pin_reset',
       performedBy: business.ownerUsername,
+      timestamp: new Date(),
+      ipAddress: req.ip,
       details: { message: 'PIN reset successful' },
     });
     await business.save();
-    if (business.email) {
-      await sendEmail(business.email, 'PIN Reset Successful', 'Your PIN has been updated.');
+
+    try {
+      await transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: business.email,
+        subject: 'Zangena Business PIN Reset Successful',
+        text: 'Your PIN has been updated. Please sign in with your new PIN.',
+        html: '<h2>Zangena Business PIN Reset Successful</h2><p>Your PIN has been updated. Please sign in with your new PIN.</p>',
+      });
+    } catch (emailError) {
+      console.error('[ResetPin] Email delivery failed:', emailError.message);
+      // Log but don't fail response
     }
+
     res.json({ message: 'PIN reset successful' });
   } catch (error) {
     console.error('[ResetPin] Error:', error.message);
-    res.status(500).json({ error: 'Failed to reset PIN', details: error.message });
+    res.status(500).json({ error: 'Server error during PIN reset' });
   }
 });
 
@@ -1570,6 +1629,24 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
       return res.status(400).json({ error: 'Invalid data provided', details: error.message });
     }
     res.status(500).json({ error: 'Failed to deactivate account', details: error.message });
+  }
+});
+
+router.post('/request-kyc', async (req, res) => {
+  try {
+    const { businessId } = req.body;
+    const business = await Business.findOne({ businessId });
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    // Notify admin or update status
+    business.kycRequestStatus = 'pending';
+    await business.save();
+    // Optionally send email to admin
+    res.json({ message: 'KYC request submitted' });
+  } catch (error) {
+    console.error('[RequestKyc] Error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
