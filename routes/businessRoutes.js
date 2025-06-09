@@ -1446,7 +1446,7 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
       return res.status(401).json({ error: 'Invalid PIN' });
     }
 
-    // Store notification data before clearing
+    // Store notification data
     const { email, pushToken } = business;
 
     let lastError;
@@ -1461,30 +1461,20 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
         business.pendingDeposits.forEach(deposit => {
           if (deposit.status === 'pending') {
             deposit.status = 'rejected';
-            deposit.rejectionReason = 'Account deleted';
+            deposit.rejectionReason = 'Account deactivated';
             deposit.date = new Date();
           }
         });
         business.pendingWithdrawals.forEach(withdrawal => {
           if (withdrawal.status === 'pending') {
             withdrawal.status = 'rejected';
-            withdrawal.rejectionReason = 'Account deleted';
+            withdrawal.rejectionReason = 'Account deactivated';
             withdrawal.date = new Date();
           }
         });
 
-        // Deactivate account and clear sensitive fields
+        // Deactivate account
         business.isActive = false;
-        business.email = null;
-        business.phoneNumber = null;
-        business.hashedPin = null;
-        business.pushToken = null;
-        business.pushNotificationsEnabled = false;
-        business.tpinCertificate = null;
-        business.pacraCertificate = null;
-        business.balances = { ZMW: 0, ZMC: 0, USD: 0 };
-        business.resetToken = null;
-        business.resetTokenExpiry = null;
 
         // Update pending transactions to expired
         const updatedTransactions = await BusinessTransaction.updateMany(
@@ -1493,12 +1483,12 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
           { session }
         );
 
-        // Log deletion and updates
+        // Log deactivation and updates
         business.auditLogs.push({
           action: 'delete-account',
           performedBy: business.ownerUsername,
           details: {
-            message: 'Account deleted successfully',
+            message: 'Account deactivated successfully',
             updated: {
               deposits: updatedDeposits,
               withdrawals: updatedWithdrawals,
@@ -1510,7 +1500,7 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
 
         // Delete QRPin records
         await QRPin.deleteMany({ businessId: business.businessId }, { session });
-        await business.save({ session, validateBeforeSave: false });
+        await business.save({ session });
 
         await session.commitTransaction();
         session.endSession();
@@ -1520,7 +1510,7 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
         await session.abortTransaction();
         session.endSession();
         lastError = error;
-        console.warn(`[DeleteAccount] Retry ${attempt}/${maxRetries} failed:`, {
+        console.warn(`[DeactivateAccount] Retry ${attempt}/${maxRetries} failed:`, {
           message: error.message,
           stack: error.stack,
           businessId: req.user.businessId,
@@ -1542,13 +1532,13 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
         await Promise.allSettled([
           sendEmail(
             email,
-            'Account Deletion Confirmation',
-            emailTemplates.accountDeleted(business)
+            'Account Deactivation Confirmation',
+            emailTemplates.accountDeactivated(business)
           ),
           sendEmail(
             ADMIN_EMAIL,
-            `Account Deletion: ${business.businessId}`,
-            `Business ${business.name} (ID: ${business.businessId}) has deleted their account.`
+            `Account Deactivation: ${business.businessId}`,
+            `Business ${business.name} (ID: ${business.businessId}) has deactivated their account.`
           ),
         ]);
       }
@@ -1556,21 +1546,21 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
         await sendPushNotification(
           pushToken,
           'Account Deactivated',
-          'Your Zangena account has been permanently deleted.',
+          'Your Zangena account has been deactivated.',
           { businessId: business.businessId }
         );
       }
     } catch (notificationError) {
-      console.error('[DeleteAccount] Notification Error:', {
+      console.error('[DeactivateAccount] Notification Error:', {
         message: notificationError.message,
         stack: notificationError.stack,
         businessId: req.user.businessId,
       });
     }
 
-    res.json({ message: 'Account deleted successfully' });
+    res.json({ message: 'Account deactivated successfully' });
   } catch (error) {
-    console.error('[DeleteAccount] Error:', {
+    console.error('[DeactivateAccount] Error:', {
       message: error.message,
       stack: error.stack,
       businessId: req.user.businessId || 'unknown',
@@ -1579,7 +1569,7 @@ router.post('/delete-account', authenticateToken(['business']), async (req, res)
     if (error.name === 'ValidationError') {
       return res.status(400).json({ error: 'Invalid data provided', details: error.message });
     }
-    res.status(500).json({ error: 'Failed to delete account', details: error.message });
+    res.status(500).json({ error: 'Failed to deactivate account', details: error.message });
   }
 });
 
