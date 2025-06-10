@@ -1251,7 +1251,6 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Business ID or phone number is required' });
   }
   try {
-    // Validate identifier (10-digit TPIN or Zambian phone number)
     const isTpin = /^\d{10}$/.test(identifier);
     const isPhone = /^(?:\+260|0)[79]\d{8}$/.test(identifier);
     if (!isTpin && !isPhone) {
@@ -1265,12 +1264,12 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
     if (!business) {
       return res.status(404).json({ error: 'No account found with that identifier' });
     }
-    if (!validator.isEmail(business.email)) {
+    if (!business.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
       return res.status(500).json({ error: 'Invalid business email configuration' });
     }
 
-    const resetToken = crypto.randomBytes(20).toString('hex'); // Matches user app
-    const resetTokenExpiry = Date.now() + 3600000; // 1 hour
+    const resetToken = crypto.randomBytes(20).toString('hex');
+    const resetTokenExpiry = Date.now() + 3600000;
     business.resetToken = resetToken;
     business.resetTokenExpiry = resetTokenExpiry;
     business.auditLogs.push({
