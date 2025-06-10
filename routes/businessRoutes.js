@@ -1311,6 +1311,7 @@ router.post('/reset-pin', async (req, res) => {
     return res.status(400).json({ error: 'PIN must be a 4-digit number' });
   }
   try {
+    console.log('[ResetPin] Processing request with token:', token);
     const business = await Business.findOne({
       resetToken: token,
       resetTokenExpiry: { $gt: Date.now() },
@@ -1324,11 +1325,12 @@ router.post('/reset-pin', async (req, res) => {
     business.resetTokenExpiry = undefined;
     business.auditLogs.push({
       action: 'pin_reset',
-      performedBy: business.ownerUsername,
+      performedBy: business.ownerUsername || 'unknown', // Added fallback
       timestamp: new Date(),
       ipAddress: req.ip,
       details: { message: 'PIN reset successful' },
     });
+    console.log('[ResetPin] Saving business with new PIN');
     await business.save();
 
     try {
@@ -1339,14 +1341,18 @@ router.post('/reset-pin', async (req, res) => {
         text: 'Your PIN has been updated. Please sign in with your new PIN.',
         html: '<h2>Zangena Business PIN Reset Successful</h2><p>Your PIN has been updated. Please sign in with your new PIN.</p>',
       });
+      console.log('[ResetPin] Confirmation email sent to:', business.email);
     } catch (emailError) {
       console.error('[ResetPin] Email delivery failed:', emailError.message);
-      // Log but don't fail response
     }
 
     res.json({ message: 'PIN reset successful' });
   } catch (error) {
-    console.error('[ResetPin] Error:', error.message);
+    console.error('[ResetPin] Error:', {
+      message: error.message,
+      stack: error.stack,
+      token,
+    });
     res.status(500).json({ error: 'Server error during PIN reset' });
   }
 });
