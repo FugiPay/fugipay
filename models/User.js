@@ -61,7 +61,9 @@ const userSchema = new mongoose.Schema({
   pendingDeposits: [pendingDepositSchema],
   pendingWithdrawals: [pendingWithdrawalSchema],
   lastLogin: { type: Date, default: null },
-  lastViewedTimestamp: { type: Number, default: 0 }, // New field
+  lastViewedTimestamp: { type: Number, default: 0 },
+  twoFactorSecret: { type: String }, // 2FA secret for TOTP
+  twoFactorEnabled: { type: Boolean, default: false }, // 2FA status
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

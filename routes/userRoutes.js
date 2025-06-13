@@ -8,11 +8,14 @@ const fs = require('fs');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const mongoose = require('mongoose');
+const speakeasy = require('speakeasy');
+const QRCode = require('qrcode');
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const Business = require('../models/Business');
 const AdminLedger = require('../models/AdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
+const { generalRateLimiter, strictRateLimiter, validate, registerValidation, loginValidation, payQrValidation, updateProfileValidation } = require('../middleware/securityMiddleware');
 const axios = require('axios');
 
 // Environment variables
@@ -92,8 +95,74 @@ const requireAdmin = async (req, res, next) => {
   }
 };
 
+// Setup 2FA
+router.post('/setup-2fa', authenticateToken(), async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const secret = speakeasy.generateSecret({
+      name: `Zangena:${user.username}`,
+    });
+    user.twoFactorSecret = secret.base32;
+    user.twoFactorEnabled = false; // Enable after verification
+    await user.save();
+    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+    res.json({ qrCodeUrl, secret: secret.base32 });
+  } catch (error) {
+    console.error('[Setup2FA] Error:', error.message);
+    res.status(500).json({ error: 'Failed to setup 2FA' });
+  }
+});
+
+// Verify 2FA
+router.post('/verify-2fa', authenticateToken(), async (req, res) => {
+  const { totpCode } = req.body;
+  if (!totpCode || !/^\d{6}$/.test(totpCode)) {
+    return res.status(400).json({ error: 'Valid 6-digit TOTP code is required' });
+  }
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || !user.twoFactorSecret) {
+      return res.status(404).json({ error: '2FA not setup for this user' });
+    }
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: totpCode,
+    });
+    if (!verified) {
+      return res.status(400).json({ error: 'Invalid TOTP code' });
+    }
+    user.twoFactorEnabled = true;
+    await user.save();
+    res.json({ message: '2FA enabled successfully' });
+  } catch (error) {
+    console.error('[Verify2FA] Error:', error.message);
+    res.status(500).json({ error: 'Failed to verify 2FA' });
+  }
+});
+
+// Disable 2FA
+router.post('/disable-2fa', authenticateToken(), async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    user.twoFactorSecret = undefined;
+    user.twoFactorEnabled = false;
+    await user.save();
+    res.json({ message: '2FA disabled successfully' });
+  } catch (error) {
+    console.error('[Disable2FA] Error:', error.message);
+    res.status(500).json({ error: 'Failed to disable 2FA' });
+  }
+});
+
 // Get all users
-router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+router.get('/', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
   try {
     const { page = 1, limit = 10, search = '' } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
@@ -122,7 +191,7 @@ router.get('/', authenticateToken(['admin']), requireAdmin, async (req, res) => 
 });
 
 // Update KYC status
-router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
   const { id, kycStatus } = req.body;
   if (!id || !['pending', 'verified', 'rejected'].includes(kycStatus)) {
     return res.status(400).json({ error: 'Invalid user ID or KYC status' });
@@ -142,23 +211,11 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (re
 });
 
 // Register
-router.post('/register', upload.single('idImage'), async (req, res) => {
+router.post('/register', strictRateLimiter, upload.single('idImage'), validate(registerValidation), async (req, res) => {
   const { username, name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
-  if (!username || !name || !phoneNumber || !email || !password || !idImage || !pin) {
-    return res.status(400).json({ error: 'All fields, ID image, and PIN are required' });
-  }
-  if (!username.match(/^[a-zA-Z0-9_]{3,20}$/)) {
-    return res.status(400).json({ error: 'Username must be 3-20 characters, alphanumeric with underscores only' });
-  }
-  if (!phoneNumber.match(/^\+260(9[5678]|7[34679])\d{7}$/)) {
-    return res.status(400).json({ error: 'Invalid Zambian phone number (e.g., +260971234567)' });
-  }
-  if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
-    return res.status(400).json({ error: 'Invalid email format' });
-  }
-  if (!/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  if (!idImage) {
+    return res.status(400).json({ error: 'ID image is required' });
   }
   try {
     const existingUser = await User.findOne({ $or: [{ username }, { email }, { phoneNumber }] }).lean();
@@ -204,11 +261,8 @@ router.post('/register', upload.single('idImage'), async (req, res) => {
 });
 
 // Login
-router.post('/login', async (req, res) => {
-  const { identifier, password } = req.body;
-  if (!identifier || !password) {
-    return res.status(400).json({ error: 'Username or phone number and password are required' });
-  }
+router.post('/login', strictRateLimiter, validate(loginValidation), async (req, res) => {
+  const { identifier, password, totpCode } = req.body;
   try {
     const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
     if (!user) {
@@ -217,6 +271,19 @@ router.post('/login', async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(400).json({ error: 'Invalid credentials' });
+    }
+    if (user.twoFactorEnabled) {
+      if (!totpCode) {
+        return res.status(400).json({ error: 'TOTP code required for 2FA' });
+      }
+      const verified = speakeasy.totp.verify({
+        secret: user.twoFactorSecret,
+        encoding: 'base32',
+        token: totpCode,
+      });
+      if (!verified) {
+        return res.status(400).json({ error: 'Invalid TOTP code' });
+      }
     }
     const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
     const isFirstLogin = !user.lastLogin;
@@ -230,7 +297,8 @@ router.post('/login', async (req, res) => {
       role: user.role || 'user',
       kycStatus: user.kycStatus || 'pending',
       isFirstLogin,
-      isActive: user.isActive, // Add isActive from User model
+      isActive: user.isActive,
+      twoFactorEnabled: user.twoFactorEnabled,
     });
   } catch (error) {
     console.error('[Login] Error:', error.message, error.stack);
@@ -239,7 +307,7 @@ router.post('/login', async (req, res) => {
 });
 
 // Forgot Password
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', strictRateLimiter, async (req, res) => {
   const { identifier } = req.body;
   if (!identifier) {
     return res.status(400).json({ error: 'Username or phone number is required' });
@@ -273,7 +341,7 @@ router.post('/forgot-password', async (req, res) => {
 });
 
 // Reset Password
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', strictRateLimiter, async (req, res) => {
   const { token, newPassword } = req.body;
   if (!token || !newPassword) {
     return res.status(400).json({ error: 'Token and new password are required' });
@@ -298,7 +366,7 @@ router.post('/reset-password', async (req, res) => {
 });
 
 // Get User by Username
-router.get('/user/:username', authenticateToken(), async (req, res) => {
+router.get('/user/:username', authenticateToken(), generalRateLimiter, async (req, res) => {
   const start = Date.now();
   console.log(`[GET /user/${req.params.username}] Starting fetch`);
   const timeout = setTimeout(() => {
@@ -333,6 +401,7 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
       pendingDeposits: user.pendingDeposits,
       pendingWithdrawals: user.pendingWithdrawals,
       qrId: qrPin ? qrPin.qrId : null,
+      twoFactorEnabled: user.twoFactorEnabled,
     };
     console.log(`[GET /user/${req.params.username}] Total time: ${Date.now() - start}ms`);
     clearTimeout(timeout);
@@ -345,7 +414,7 @@ router.get('/user/:username', authenticateToken(), async (req, res) => {
 });
 
 // Get User by Phone Number
-router.get('/phone/:phoneNumber', authenticateToken(), async (req, res) => {
+router.get('/phone/:phoneNumber', authenticateToken(), generalRateLimiter, async (req, res) => {
   try {
     const { phoneNumber } = req.params;
     const { limit = 10, skip = 0 } = req.query;
@@ -375,7 +444,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), async (req, res) => {
       })) || [],
       pendingWithdrawals: user.pendingWithdrawals?.map(wd => ({
         ...wd,
-        amount: wd.amount?.$numberDecimal ? parseFloat(wd.amount.$numberDecimal) : wd.amount || 0,
+        amount: wd.amount?.$numberDecimal ? parseFloat(dep.amount.$numberDecimal) : wd.amount || 0,
       })) || [],
     };
     res.json({
@@ -393,6 +462,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), async (req, res) => {
       pendingDeposits: convertedUser.pendingDeposits,
       pendingWithdrawals: convertedUser.pendingWithdrawals,
       qrId: qrPin ? qrPin.qrId : null,
+      twoFactorEnabled: convertedUser.twoFactorEnabled,
     });
   } catch (error) {
     console.error('[GetUserByPhone] Error:', error.message);
@@ -401,7 +471,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), async (req, res) => {
 });
 
 // Get User by Phone Number (Alternative)
-router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => {
+router.get('/user/phone/:phoneNumber', authenticateToken(), generalRateLimiter, async (req, res) => {
   try {
     const user = await User.findOne({ phoneNumber: req.params.phoneNumber });
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -420,6 +490,7 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
       pendingDeposits: user.pendingDeposits,
       pendingWithdrawals: user.pendingWithdrawals,
       qrId: qrPin ? qrPin.qrId : null,
+      twoFactorEnabled: user.twoFactorEnabled,
     });
   } catch (error) {
     console.error('[GetUserByPhoneAlt] Error:', error.message);
@@ -428,7 +499,7 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
 });
 
 // Update Notification Timestamp
-router.put('/user/update-notification', authenticateToken(), async (req, res) => {
+router.put('/user/update-notification', authenticateToken(), generalRateLimiter, async (req, res) => {
   try {
     const { phoneNumber, lastViewedTimestamp } = req.body;
     if (!phoneNumber || typeof lastViewedTimestamp !== 'number') {
@@ -451,7 +522,7 @@ router.put('/user/update-notification', authenticateToken(), async (req, res) =>
 });
 
 // Store QR PIN
-router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
+router.post('/store-qr-pin', authenticateToken(), strictRateLimiter, async (req, res) => {
   const { username, pin } = req.body;
   if (!username || !pin) {
     return res.status(400).json({ error: 'Username and PIN are required' });
@@ -520,18 +591,9 @@ router.post('/store-qr-pin', authenticateToken(), async (req, res) => {
   }
 });
 
-// Pay QR (Updated for user-to-business payments)
-router.post('/pay-qr', authenticateToken(), async (req, res) => {
+// Pay QR
+router.post('/pay-qr', authenticateToken(), strictRateLimiter, validate(payQrValidation), async (req, res) => {
   const { qrId, amount, pin, senderUsername } = req.body;
-  if (!qrId || !amount || !senderUsername || (!pin && req.body.recipientType !== 'business')) {
-    return res.status(400).json({ error: 'QR ID, amount, sender username, and PIN (for user payments) are required' });
-  }
-  if (pin && !/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-  }
-  if (amount <= 0 || amount > 10000) {
-    return res.status(400).json({ error: 'Amount must be between 0 and 10,000 ZMW' });
-  }
   const session = await mongoose.startSession();
   session.startTransaction({ writeConcern: { w: 'majority' } });
   try {
@@ -698,7 +760,7 @@ router.post('/pay-qr', authenticateToken(), async (req, res) => {
 });
 
 // Manual Deposit
-router.post('/deposit/manual', authenticateToken(), async (req, res) => {
+router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (req, res) => {
   const { amount, transactionId } = req.body;
   console.log('[DepositManual] Request:', { amount, transactionId });
   try {
@@ -727,7 +789,7 @@ router.post('/deposit/manual', authenticateToken(), async (req, res) => {
 });
 
 // Withdraw Request
-router.post('/withdraw/request', authenticateToken(), async (req, res) => {
+router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async (req, res) => {
   const { amount } = req.body;
   console.log('[WithdrawRequest] Request:', { amount });
   try {
@@ -753,7 +815,7 @@ router.post('/withdraw/request', authenticateToken(), async (req, res) => {
 });
 
 // Withdraw (Direct)
-router.post('/api/withdraw', authenticateToken(), async (req, res) => {
+router.post('/api/withdraw', authenticateToken(), generalRateLimiter, async (req, res) => {
   const { amount } = req.body;
   console.log('[WithdrawDirect] Request:', { amount });
   try {
@@ -807,7 +869,7 @@ router.post('/api/withdraw', authenticateToken(), async (req, res) => {
 });
 
 // Save Push Token
-router.post('/save-push-token', authenticateToken(), async (req, res) => {
+router.post('/save-push-token', authenticateToken(), generalRateLimiter, async (req, res) => {
   const { pushToken } = req.body;
   if (!pushToken) return res.status(400).json({ error: 'Push token is required' });
   try {
@@ -823,37 +885,20 @@ router.post('/save-push-token', authenticateToken(), async (req, res) => {
 });
 
 // Update Profile
-router.put('/user/update', authenticateToken(['user']), async (req, res) => {
+router.put('/user/update', authenticateToken(['user']), generalRateLimiter, validate(updateProfileValidation), async (req, res) => {
   try {
     const { email, password, pin } = req.body;
     const updates = {};
 
     if (email) {
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        console.log('[UpdateProfile] Invalid email format:', email);
-        return res.status(400).json({ error: 'Invalid email format' });
-      }
-      const existingUser = await User.findOne({ email });
-      if (existingUser && existingUser.phoneNumber !== req.user.phoneNumber) {
-        console.log('[UpdateProfile] Email already exists:', email);
-        return res.status(409).json({ error: 'Email already exists' });
-      }
       updates.email = email;
     }
 
     if (password) {
-      if (password.length < 6) {
-        console.log('[UpdateProfile] Password too short:', password.length);
-        return res.status(400).json({ error: 'Password must be at least 6 characters' });
-      }
       updates.password = await bcrypt.hash(password, 10);
     }
 
     if (pin) {
-      if (pin.length !== 4 || !/^\d{4}$/.test(pin)) {
-        console.log('[UpdateProfile] Invalid PIN:', pin);
-        return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
-      }
       updates.pin = await bcrypt.hash(pin, 10);
     }
 
@@ -900,7 +945,7 @@ router.put('/user/update', authenticateToken(['user']), async (req, res) => {
 });
 
 // Delete User
-router.delete('/user/delete', authenticateToken(['user']), async (req, res) => {
+router.delete('/user/delete', authenticateToken(['user']), generalRateLimiter, async (req, res) => {
   try {
     const user = await User.findOneAndDelete({ phoneNumber: req.user.phoneNumber });
     if (!user) {
@@ -920,7 +965,7 @@ router.delete('/user/delete', authenticateToken(['user']), async (req, res) => {
 });
 
 // Refresh Token
-router.post('/refresh-token', async (req, res) => {
+router.post('/refresh-token', strictRateLimiter, async (req, res) => {
   const { refreshToken } = req.body;
   if (!refreshToken) {
     console.log('[RefreshToken] Refresh token missing');
@@ -965,7 +1010,7 @@ router.post('/refresh-token', async (req, res) => {
 });
 
 // Update Timestamp
-router.patch('/update-timestamp', authenticateToken(), async (req, res) => {
+router.patch('/update-timestamp', authenticateToken(), generalRateLimiter, async (req, res) => {
   try {
     const { phoneNumber, lastViewedTimestamp } = req.body;
     if (!phoneNumber || !lastViewedTimestamp) {
@@ -1010,7 +1055,7 @@ router.patch('/update-timestamp', authenticateToken(), async (req, res) => {
 });
 
 // Toggle Active Status
-router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
   const { username } = req.body;
   if (!username) {
     return res.status(400).json({ error: 'Username required' });
@@ -1030,7 +1075,7 @@ router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, async (
 });
 
 // Get Transactions
-router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin, async (req, res) => {
+router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
   const { username } = req.params;
   const { startDate, endDate, limit = 50, skip = 0 } = req.query;
   try {
