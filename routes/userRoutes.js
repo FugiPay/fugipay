@@ -299,7 +299,14 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), validate(r
         message: error.message,
         code: error.code,
         name: error.name,
+        errors: error.errors ? Object.keys(error.errors).map(key => ({
+          path: key,
+          message: error.errors[key].message,
+        })) : null,
       });
+      if (error.name === 'ValidationError') {
+        return res.status(400).json({ error: 'Invalid user data', details: error.message });
+      }
       throw new Error(`MongoDB save failed: ${error.message}`);
     }
 
