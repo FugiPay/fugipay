@@ -210,24 +210,66 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, generalRa
   }
 });
 
+
 // Register
 router.post('/register', strictRateLimiter, upload.single('idImage'), validate(registerValidation), async (req, res) => {
   const { username, name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
   if (!idImage) {
+    console.log('[Register] Missing idImage');
     return res.status(400).json({ error: 'ID image is required' });
   }
   try {
+    // Check for existing user
     const existingUser = await User.findOne({ $or: [{ username }, { email }, { phoneNumber }] }).lean();
     if (existingUser) {
-      return res.status(400).json({ error: 'Username, email, or phone number already exists' });
+      console.log('[Register] Conflict:', { username, email, phoneNumber });
+      return res.status(409).json({ error: 'Username, email, or phone number already exists' });
     }
+
+    // Validate S3 bucket
+    try {
+      await s3.headBucket({ Bucket: S3_BUCKET }).promise();
+      console.log('[Register] S3 bucket validated:', S3_BUCKET);
+    } catch (error) {
+      console.error('[Register] S3 bucket error:', {
+        message: error.message,
+        code: error.code,
+        bucket: S3_BUCKET,
+      });
+      throw new Error(`S3 bucket error: ${error.message}`);
+    }
+
+    // Upload to S3
     const fileStream = fs.createReadStream(idImage.path);
     const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
     const params = { Bucket: S3_BUCKET, Key: s3Key, Body: fileStream, ContentType: idImage.mimetype, ACL: 'private' };
-    const s3Response = await s3.upload(params).promise();
-    const idImageUrl = s3Response.Location;
-    fs.unlinkSync(idImage.path);
+    let s3Response;
+    try {
+      s3Response = await s3.upload(params).promise();
+      console.log('[Register] S3 upload successful:', s3Key);
+    } catch (error) {
+      console.error('[Register] S3 upload failed:', {
+        message: error.message,
+        code: error.code,
+        key: s3Key,
+      });
+      throw new Error(`S3 upload failed: ${error.message}`);
+    }
+
+    // Clean up temporary file
+    try {
+      fs.unlinkSync(idImage.path);
+      console.log('[Register] Temporary file deleted:', idImage.path);
+    } catch (error) {
+      console.error('[Register] File cleanup failed:', {
+        message: error.message,
+        code: error.code,
+        path: idImage.path,
+      });
+    }
+
+    // Create user
     const hashedPassword = await bcrypt.hash(password, 10);
     const hashedPin = await bcrypt.hash(pin, 10);
     const user = new User({
@@ -237,7 +279,7 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), validate(r
       email,
       password: hashedPassword,
       pin: hashedPin,
-      idImageUrl,
+      idImageUrl: s3Response.Location,
       role: 'user',
       balance: 0,
       zambiaCoinBalance: 0,
@@ -247,15 +289,42 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), validate(r
       kycStatus: 'pending',
       isActive: false,
     });
-    await user.save();
-    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
-    const admin = await User.findOne({ role: 'admin' });
-    if (admin && admin.pushToken) {
-      await sendPushNotification(admin.pushToken, 'New User Registration', `User ${username} needs KYC approval.`, { userId: user._id });
+
+    // Save user
+    try {
+      await user.save();
+      console.log('[Register] User saved:', { username, phoneNumber });
+    } catch (error) {
+      console.error('[Register] MongoDB save failed:', {
+        message: error.message,
+        code: error.code,
+        name: error.name,
+      });
+      throw new Error(`MongoDB save failed: ${error.message}`);
     }
+
+    // Generate JWT
+    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
+
+    // Send admin notification
+    try {
+      const admin = await User.findOne({ role: 'admin' });
+      if (admin && admin.pushToken) {
+        await sendPushNotification(admin.pushToken, 'New User Registration', `User ${username} needs KYC approval.`, { userId: user._id });
+      }
+    } catch (error) {
+      console.error('[Register] Push notification failed:', error.message);
+    }
+
     res.status(201).json({ token, username: user.username, role: user.role, kycStatus: user.kycStatus });
   } catch (error) {
-    console.error('[Register] Error:', error.message, error.stack);
+    console.error('[Register] Error:', {
+      message: error.message,
+      stack: error.stack,
+      username,
+      phoneNumber,
+      email,
+    });
     res.status(500).json({ error: 'Server error during registration', details: error.message });
   }
 });
@@ -841,11 +910,11 @@ router.post('/api/withdraw', authenticateToken(), generalRateLimiter, async (req
     if (!amount || amount <= 0 || amount > user.balance) {
       return res.status(400).json({ error: 'Invalid amount or insufficient balance' });
     }
-    const fee = amount <= 50 ? 0.50 :
-                amount <= 100 ? 1.00 :
-                amount <= 500 ? 1.50 :
-                amount <= 1000 ? 2.00 :
-                amount <= 5000 ? 3.00 : 5.00;
+    const fee = amount <= 50 ? 1.00 :
+                amount <= 100 ? 2.00 :
+                amount <= 500 ? 3.50 :
+                amount <= 1000 ? 5.00 :
+                amount <= 5000 ? 10.00 : 10.00;
     const totalDeduction = amount + fee;
     if (user.balance < totalDeduction) {
       return res.status(400).json({ error: 'Insufficient balance including fee' });
