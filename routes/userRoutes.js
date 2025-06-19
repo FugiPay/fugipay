@@ -790,22 +790,37 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
 
 // Withdraw Request
 router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async (req, res) => {
-  const { amount } = req.body;
-  console.log('[WithdrawRequest] Request:', { amount });
+  const { amount, destinationOfFunds, fee } = req.body;
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user || !user.isActive) {
       return res.status(403).json({ error: 'User not found or inactive' });
     }
-    if (!amount || amount <= 0 || amount > user.balance) {
+    if (!amount || amount <= 0 || amount + fee > user.balance) {
       return res.status(400).json({ error: 'Invalid amount or insufficient balance' });
     }
-    user.pendingWithdrawals = user.pendingWithdrawals || [];
-    user.pendingWithdrawals.push({ amount, date: new Date(), status: 'pending' });
+    if (!destinationOfFunds || !['MTN Mobile Money', 'Airtel Mobile Money', 'Bank Transfer'].includes(destinationOfFunds)) {
+      return res.status(400).json({ error: 'Invalid destination of funds' });
+    }
+    if (!fee || fee < Math.max(amount * 0.01, 2)) {
+      return res.status(400).json({ error: 'Invalid fee' });
+    }
+    user.pendingWithdrawals.push({
+      amount,
+      fee,
+      destinationOfFunds,
+      date: new Date(),
+      status: 'pending',
+    });
     await user.save();
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
-      await sendPushNotification(admin.pushToken, 'New Withdrawal Request', `Withdrawal of ${amount} ZMW from ${user.username} needs approval.`, { userId: user._id, withdrawalIndex: user.pendingWithdrawals.length - 1 });
+      await sendPushNotification(
+        admin.pushToken,
+        'New Withdrawal Request',
+        `Withdrawal of ${amount} ZMW to ${destinationOfFunds} from ${user.username} needs approval.`,
+        { userId: user._id, withdrawalIndex: user.pendingWithdrawals.length - 1 }
+      );
     }
     res.json({ message: 'Withdrawal requested. Awaiting approval.' });
   } catch (error) {
@@ -946,21 +961,62 @@ router.put('/user/update', authenticateToken(['user']), generalRateLimiter, vali
 
 // Delete User
 router.delete('/user/delete', authenticateToken(['user']), generalRateLimiter, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction({ writeConcern: { w: 'majority' } });
   try {
-    const user = await User.findOneAndDelete({ phoneNumber: req.user.phoneNumber });
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }).session(session);
     if (!user) {
+      await session.abortTransaction();
+      session.endSession();
       console.error('[DeleteUser] User not found:', req.user.phoneNumber);
       return res.status(404).json({ error: 'User not found' });
     }
-    await QRPin.deleteMany({ username: user.username });
-    console.log('[DeleteUser] Account deleted:', req.user.phoneNumber);
-    res.json({ message: 'Account deleted' });
+    if (user.isArchived) {
+      await session.abortTransaction();
+      session.endSession();
+      console.error('[DeleteUser] User already archived:', req.user.phoneNumber);
+      return res.status(400).json({ error: 'Account already archived' });
+    }
+
+    // Archive user
+    user.isActive = false;
+    user.isArchived = true;
+    user.archivedAt = new Date();
+    user.archivedReason = 'user-requested';
+    user.pushToken = null;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
+    user.twoFactorSecret = null;
+    user.twoFactorEnabled = false;
+    await user.save({ session });
+
+    // Archive associated QRPin records
+    const now = new Date();
+    await QRPin.updateMany(
+      { username: user.username },
+      {
+        $set: {
+          isActive: false,
+          archivedAt: now,
+          archivedReason: 'user-archived',
+          updatedAt: now,
+        },
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+    console.log('[DeleteUser] Account archived:', req.user.phoneNumber);
+    res.json({ message: 'Account archived successfully' });
   } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
     console.error('[DeleteUser] Error:', {
       message: error.message,
       stack: error.stack,
     });
-    res.status(500).json({ error: 'Server error deleting account' });
+    res.status(500).json({ error: 'Server error archiving account' });
   }
 });
 

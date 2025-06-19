@@ -1,25 +1,3 @@
-/* const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
-
-module.exports = (roles = []) => (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) return res.status(401).json({ error: 'No token provided' });
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Invalid or expired token' });
-
-    req.user = user;
-
-    if (roles.length && !roles.includes(user.role)) {
-      return res.status(403).json({ error: 'Insufficient permissions' });
-    }
-
-    next();
-  });
-}; */
-
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025'; // Fallback for development
 
@@ -37,12 +15,29 @@ module.exports = (roles = []) => (req, res, next) => {
     return res.status(401).json({ error: 'No token provided' });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, payload) => {
+  jwt.verify(token, JWT_SECRET, async (err, payload) => {
     if (err) {
       console.error('[AUTH] Token verification failed:', err.message);
       return res.status(403).json({
         error: err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token',
       });
+    }
+
+    // Check if user is archived
+    const User = require('../models/User'); // Import here to avoid circular dependency
+    try {
+      const user = await User.findOne({ phoneNumber: payload.phoneNumber }).lean();
+      if (!user) {
+        console.error('[AUTH] User not found:', payload.phoneNumber);
+        return res.status(404).json({ error: 'User not found' });
+      }
+      if (user.isArchived) {
+        console.error('[AUTH] Archived account access attempt:', payload.phoneNumber);
+        return res.status(403).json({ error: 'Account is archived' });
+      }
+    } catch (error) {
+      console.error('[AUTH] Error checking user status:', error.message);
+      return res.status(500).json({ error: 'Server error during authentication' });
     }
 
     // Attach payload to req.user for consistency across user, business, and admin routes

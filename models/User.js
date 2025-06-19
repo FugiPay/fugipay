@@ -29,6 +29,12 @@ const pendingDepositSchema = new mongoose.Schema({
 
 const pendingWithdrawalSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
+  fee: { type: Number, required: true },
+  destinationOfFunds: {
+    type: String,
+    required: true,
+    enum: ['MTN Mobile Money', 'Airtel Mobile Money', 'Bank Transfer'],
+  },
   date: { type: Date, default: Date.now },
   status: { type: String, enum: ['pending', 'completed', 'rejected'], default: 'pending' },
 });
@@ -55,6 +61,9 @@ const userSchema = new mongoose.Schema({
   transactions: [transactionSchema],
   kycStatus: { type: String, default: 'pending', enum: ['pending', 'verified', 'rejected'] },
   isActive: { type: Boolean, default: false },
+  isArchived: { type: Boolean, default: false, index: true }, // New: Marks account as archived
+  archivedAt: { type: Date }, // New: Timestamp of archival
+  archivedReason: { type: String }, // New: Reason for archival (e.g., 'user-requested', 'compliance')
   resetToken: { type: String },
   resetTokenExpiry: { type: Date },
   pushToken: { type: String, default: null },
@@ -64,6 +73,23 @@ const userSchema = new mongoose.Schema({
   lastViewedTimestamp: { type: Number, default: 0 },
   twoFactorSecret: { type: String }, // 2FA secret for TOTP
   twoFactorEnabled: { type: Boolean, default: false }, // 2FA status
-}, { timestamps: true });
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true },
+});
+
+// Virtual to check if account is effectively active (not archived and isActive)
+userSchema.virtual('isEffectivelyActive').get(function () {
+  return this.isActive && !this.isArchived;
+});
+
+// Index for efficient querying of active/archived users
+userSchema.index({ isActive: 1, isArchived: 1 });
+
+// Ensure unique constraints are enforced
+userSchema.index({ username: 1 }, { unique: true });
+userSchema.index({ phoneNumber: 1 }, { unique: true });
+userSchema.index({ email: 1 }, { unique: true });
 
 module.exports = mongoose.model('User', userSchema);
