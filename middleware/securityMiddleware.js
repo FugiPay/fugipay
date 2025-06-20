@@ -1,5 +1,5 @@
 const rateLimit = require('express-rate-limit');
-const { body, validationResult } = require('express-validator');
+const { body, validationResult, query } = require('express-validator');
 
 // General rate limiter (100 requests per 15 minutes per IP)
 const generalRateLimiter = rateLimit({
@@ -25,7 +25,12 @@ const validate = (validations) => {
     await Promise.all(validations.map(validation => validation.run(req)));
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      console.error('[Validation] Errors:', errors.array());
+      console.error('[Validation] Errors:', {
+        endpoint: req.originalUrl,
+        method: req.method,
+        errors: errors.array(),
+        body: req.body,
+      });
       return res.status(400).json({ error: 'Invalid input', details: errors.array() });
     }
     next();
@@ -115,6 +120,28 @@ const updateProfileValidation = [
     .withMessage('PIN must be a 4-digit number'),
 ];
 
+const mobileMoneyLinkValidation = [
+  body('code')
+    .trim()
+    .isAlphanumeric()
+    .isLength({ min: 1 })
+    .withMessage('Authorization code is required and must be alphanumeric'),
+  body('phoneNumber')
+    .trim()
+    .matches(/^\+260(9[5678]|7[34679])\d{7}$/)
+    .withMessage('Invalid Zambian phone number'),
+];
+
+const mobileMoneyWithdrawValidation = [
+  body('phoneNumber')
+    .trim()
+    .matches(/^\+260(9[5678]|7[34679])\d{7}$/)
+    .withMessage('Invalid Zambian phone number'),
+  body('amount')
+    .isFloat({ min: 0.01, max: 10000 })
+    .withMessage('Amount must be between 0.01 and 10,000 ZMW'),
+];
+
 module.exports = {
   generalRateLimiter,
   strictRateLimiter,
@@ -123,4 +150,6 @@ module.exports = {
   loginValidation,
   payQrValidation,
   updateProfileValidation,
+  mobileMoneyLinkValidation,
+  mobileMoneyWithdrawValidation,
 };
