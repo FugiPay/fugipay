@@ -235,10 +235,17 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, generalRa
 router.post('/register', strictRateLimiter, upload.single('idImage'), validate(registerValidation), async (req, res) => {
   const { username, name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
+
+  // Validate inputs
   if (!idImage) {
     console.log('[Register] Missing idImage');
     return res.status(400).json({ error: 'ID image is required' });
   }
+  if (!pin || !/^\d{4,}$/.test(pin)) {
+    console.log('[Register] Invalid or missing pin:', { pin: pin ? 'provided' : 'missing', length: pin ? pin.length : 0 });
+    return res.status(400).json({ error: 'A PIN of at least 4 digits is required' });
+  }
+
   try {
     // Check for existing user
     const existingUser = await User.findOne({ $or: [{ username }, { email }, { phoneNumber }] }).lean();
@@ -356,6 +363,7 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), validate(r
   }
 });
 
+
 // Login
 router.post('/login', strictRateLimiter, validate(loginValidation), async (req, res) => {
   const { identifier, password, totpCode } = req.body;
@@ -383,6 +391,15 @@ router.post('/login', strictRateLimiter, validate(loginValidation), async (req, 
     }
     const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
     const isFirstLogin = !user.lastLogin;
+
+    // Check for missing hashedPin
+    if (!user.hashedPin) {
+      console.warn('[Login] User missing hashedPin:', { username: user.username, phoneNumber: user.phoneNumber });
+      // Generate a temporary hashedPin to satisfy schema
+      const tempPin = crypto.randomBytes(4).toString('hex'); // Temporary 4-character PIN
+      user.hashedPin = await bcrypt.hash(tempPin, 10);
+    }
+
     user.lastLogin = new Date();
     await user.save();
     res.status(200).json({
@@ -397,7 +414,11 @@ router.post('/login', strictRateLimiter, validate(loginValidation), async (req, 
       twoFactorEnabled: user.twoFactorEnabled,
     });
   } catch (error) {
-    console.error('[Login] Error:', error.message, error.stack);
+    console.error('[Login] Error:', {
+      message: error.message,
+      stack: error.stack,
+      identifier,
+    });
     res.status(500).json({ error: 'Server error during login', details: error.message });
   }
 });
