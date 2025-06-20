@@ -15,7 +15,7 @@ const QRPin = require('../models/QRPin');
 const Business = require('../models/Business');
 const AdminLedger = require('../models/AdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
-const { generalRateLimiter, strictRateLimiter, validate, registerValidation, loginValidation, payQrValidation, updateProfileValidation, mobileMoneyLinkValidation, mobileMoneyWithdrawValidation } = require('../middleware/securityMiddleware');
+const { generalRateLimiter, strictRateLimiter, validate, registerValidation, loginValidation, payQrValidation, updateProfileValidation } = require('../middleware/securityMiddleware');
 const axios = require('axios');
 
 // Environment variables
@@ -24,10 +24,6 @@ const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
 const EMAIL_USER = process.env.EMAIL_USER || 'your_email@example.com';
 const EMAIL_PASS = process.env.EMAIL_PASS || 'your_email_password';
-const MTN_CLIENT_ID = process.env.MTN_CLIENT_ID || 'your_mtn_client_id';
-const MTN_CLIENT_SECRET = process.env.MTN_CLIENT_SECRET || 'your_mtn_client_secret';
-const MTN_API_URL = process.env.MTN_API_URL || 'https://api.mtn.zm/mobilemoney/v1';
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
 
 // Configure AWS S3
 const s3 = new AWS.S3({
@@ -47,23 +43,6 @@ const transporter = nodemailer.createTransport({
     pass: EMAIL_PASS,
   },
 });
-
-// Validate MTN phone number
-const isMtnNumber = (phoneNumber) => {
-  const isMtn = /^\+260(76|96)\d{7}$/.test(phoneNumber);
-  console.log('[MobileMoney] Phone number check:', { phoneNumber, isMtn });
-  return isMtn;
-};
-
-// Get provider name for error messaging
-const getProviderName = (phoneNumber) => {
-  if (!phoneNumber) return 'Unknown';
-  if (/^\+260(76|96)\d{7}$/.test(phoneNumber)) return 'MTN';
-  if (/^\+260(77|97)\d{7}$/.test(phoneNumber)) return 'Airtel';
-  if (/^\+260(75|95)\d{7}$/.test(phoneNumber)) return 'Zamtel';
-  if (/^\+260(78|98)\d{7}$/.test(phoneNumber)) return 'Zed Mobile';
-  return 'Unknown';
-};
 
 // Ensure indexes with error handling
 const ensureIndexes = async () => {
@@ -117,7 +96,7 @@ const requireAdmin = async (req, res, next) => {
 };
 
 // Setup 2FA
-router.post('/setup-2fa', authenticateToken, async (req, res) => {
+router.post('/setup-2fa', authenticateToken(), async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user) {
@@ -138,7 +117,7 @@ router.post('/setup-2fa', authenticateToken, async (req, res) => {
 });
 
 // Verify 2FA
-router.post('/verify-2fa', authenticateToken, async (req, res) => {
+router.post('/verify-2fa', authenticateToken(), async (req, res) => {
   const { totpCode } = req.body;
   if (!totpCode || !/^\d{6}$/.test(totpCode)) {
     return res.status(400).json({ error: 'Valid 6-digit TOTP code is required' });
@@ -166,7 +145,7 @@ router.post('/verify-2fa', authenticateToken, async (req, res) => {
 });
 
 // Disable 2FA
-router.post('/disable-2fa', authenticateToken, async (req, res) => {
+router.post('/disable-2fa', authenticateToken(), async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user) {
@@ -198,7 +177,7 @@ router.get('/', authenticateToken(['admin']), requireAdmin, generalRateLimiter, 
       : {};
     const [users, total] = await Promise.all([
       User.find(query)
-        .select('username phoneNumber balance kycStatus trustScore pendingDeposits pendingWithdrawals transactions mobileMoneyAccounts')
+        .select('username phoneNumber balance kycStatus trustScore pendingDeposits pendingWithdrawals transactions')
         .skip(skip)
         .limit(Number(limit))
         .lean(),
@@ -235,68 +214,20 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, generalRa
 router.post('/register', strictRateLimiter, upload.single('idImage'), validate(registerValidation), async (req, res) => {
   const { username, name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
-
-  // Validate inputs
   if (!idImage) {
-    console.log('[Register] Missing idImage');
     return res.status(400).json({ error: 'ID image is required' });
   }
-  if (!pin || !/^\d{4,}$/.test(pin)) {
-    console.log('[Register] Invalid or missing pin:', { pin: pin ? 'provided' : 'missing', length: pin ? pin.length : 0 });
-    return res.status(400).json({ error: 'A PIN of at least 4 digits is required' });
-  }
-
   try {
-    // Check for existing user
     const existingUser = await User.findOne({ $or: [{ username }, { email }, { phoneNumber }] }).lean();
     if (existingUser) {
-      console.log('[Register] Conflict:', { username, email, phoneNumber });
-      return res.status(409).json({ error: 'Username, email, or phone number already exists' });
+      return res.status(400).json({ error: 'Username, email, or phone number already exists' });
     }
-
-    // Validate S3 bucket
-    try {
-      await s3.headBucket({ Bucket: S3_BUCKET }).promise();
-      console.log('[Register] S3 bucket validated:', S3_BUCKET);
-    } catch (error) {
-      console.error('[Register] S3 bucket error:', {
-        message: error.message,
-        code: error.code,
-        bucket: S3_BUCKET,
-      });
-      throw new Error(`S3 bucket error: ${error.message}`);
-    }
-
-    // Upload to S3
     const fileStream = fs.createReadStream(idImage.path);
     const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
     const params = { Bucket: S3_BUCKET, Key: s3Key, Body: fileStream, ContentType: idImage.mimetype, ACL: 'private' };
-    let s3Response;
-    try {
-      s3Response = await s3.upload(params).promise();
-      console.log('[Register] S3 upload successful:', s3Key);
-    } catch (error) {
-      console.error('[Register] S3 upload failed:', {
-        message: error.message,
-        code: error.code,
-        key: s3Key,
-      });
-      throw new Error(`S3 upload failed: ${error.message}`);
-    }
-
-    // Clean up temporary file
-    try {
-      fs.unlinkSync(idImage.path);
-      console.log('[Register] Temporary file deleted:', idImage.path);
-    } catch (error) {
-      console.error('[Register] File cleanup failed:', {
-        message: error.message,
-        code: error.code,
-        path: idImage.path,
-      });
-    }
-
-    // Create user
+    const s3Response = await s3.upload(params).promise();
+    const idImageUrl = s3Response.Location;
+    fs.unlinkSync(idImage.path);
     const hashedPassword = await bcrypt.hash(password, 10);
     const hashedPin = await bcrypt.hash(pin, 10);
     const user = new User({
@@ -305,8 +236,8 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), validate(r
       phoneNumber,
       email,
       password: hashedPassword,
-      hashedPin,
-      idImageUrl: s3Response.Location,
+      pin: hashedPin,
+      idImageUrl,
       role: 'user',
       balance: 0,
       zambiaCoinBalance: 0,
@@ -316,59 +247,24 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), validate(r
       kycStatus: 'pending',
       isActive: false,
     });
-
-    // Save user
-    try {
-      await user.save();
-      console.log('[Register] User saved:', { username, phoneNumber });
-    } catch (error) {
-      console.error('[Register] MongoDB save failed:', {
-        message: error.message,
-        code: error.code,
-        name: error.name,
-        errors: error.errors ? Object.keys(error.errors).map(key => ({
-          path: key,
-          message: error.errors[key].message,
-        })) : null,
-      });
-      if (error.name === 'ValidationError') {
-        return res.status(400).json({ error: 'Invalid user data', details: error.message });
-      }
-      throw new Error(`MongoDB save failed: ${error.message}`);
-    }
-
-    // Generate JWT
+    await user.save();
     const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
-
-    // Send admin notification
-    try {
-      const admin = await User.findOne({ role: 'admin' });
-      if (admin && admin.pushToken) {
-        await sendPushNotification(admin.pushToken, 'New User Registration', `User ${username} needs KYC approval.`, { userId: user._id });
-      }
-    } catch (error) {
-      console.error('[Register] Push notification failed:', error.message);
+    const admin = await User.findOne({ role: 'admin' });
+    if (admin && admin.pushToken) {
+      await sendPushNotification(admin.pushToken, 'New User Registration', `User ${username} needs KYC approval.`, { userId: user._id });
     }
-
     res.status(201).json({ token, username: user.username, role: user.role, kycStatus: user.kycStatus });
   } catch (error) {
-    console.error('[Register] Error:', {
-      message: error.message,
-      stack: error.stack,
-      username,
-      phoneNumber,
-      email,
-    });
+    console.error('[Register] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Server error during registration', details: error.message });
   }
 });
-
 
 // Login
 router.post('/login', strictRateLimiter, validate(loginValidation), async (req, res) => {
   const { identifier, password, totpCode } = req.body;
   try {
-    const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier } ] });
+    const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
     if (!user) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
@@ -391,15 +287,6 @@ router.post('/login', strictRateLimiter, validate(loginValidation), async (req, 
     }
     const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
     const isFirstLogin = !user.lastLogin;
-
-    // Check for missing hashedPin
-    if (!user.hashedPin) {
-      console.warn('[Login] User missing hashedPin:', { username: user.username, phoneNumber: user.phoneNumber });
-      // Generate a temporary hashedPin to satisfy schema
-      const tempPin = crypto.randomBytes(4).toString('hex'); // Temporary 4-character PIN
-      user.hashedPin = await bcrypt.hash(tempPin, 10);
-    }
-
     user.lastLogin = new Date();
     await user.save();
     res.status(200).json({
@@ -414,11 +301,7 @@ router.post('/login', strictRateLimiter, validate(loginValidation), async (req, 
       twoFactorEnabled: user.twoFactorEnabled,
     });
   } catch (error) {
-    console.error('[Login] Error:', {
-      message: error.message,
-      stack: error.stack,
-      identifier,
-    });
+    console.error('[Login] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Server error during login', details: error.message });
   }
 });
@@ -483,7 +366,7 @@ router.post('/reset-password', strictRateLimiter, async (req, res) => {
 });
 
 // Get User by Username
-router.get('/user/:username', authenticateToken, generalRateLimiter, async (req, res) => {
+router.get('/user/:username', authenticateToken(), generalRateLimiter, async (req, res) => {
   const start = Date.now();
   console.log(`[GET /user/${req.params.username}] Starting fetch`);
   const timeout = setTimeout(() => {
@@ -512,26 +395,13 @@ router.get('/user/:username', authenticateToken, generalRateLimiter, async (req,
       balance: user.balance,
       zambiaCoinBalance: user.zambiaCoinBalance,
       trustScore: user.trustScore,
-      transactions: user.transactions.slice(-10).map(tx => ({
-        _id: tx._id,
-        type: tx.type,
-        amount: tx.amount,
-        toFrom: tx.toFrom,
-        fee: tx.fee,
-        date: tx.date,
-        mobileMoneyProvider: tx.mobileMoneyProvider,
-      })),
+      transactions: user.transactions.slice(-10),
       kycStatus: user.kycStatus,
       isActive: user.isActive,
       pendingDeposits: user.pendingDeposits,
       pendingWithdrawals: user.pendingWithdrawals,
       qrId: qrPin ? qrPin.qrId : null,
       twoFactorEnabled: user.twoFactorEnabled,
-      mobileMoneyAccounts: user.mobileMoneyAccounts.map(acc => ({
-        provider: acc.provider,
-        phoneNumber: acc.phoneNumber,
-        lastSynced: acc.lastSynced,
-      })),
     };
     console.log(`[GET /user/${req.params.username}] Total time: ${Date.now() - start}ms`);
     clearTimeout(timeout);
@@ -544,7 +414,7 @@ router.get('/user/:username', authenticateToken, generalRateLimiter, async (req,
 });
 
 // Get User by Phone Number
-router.get('/phone/:phoneNumber', authenticateToken, generalRateLimiter, async (req, res) => {
+router.get('/phone/:phoneNumber', authenticateToken(), generalRateLimiter, async (req, res) => {
   try {
     const { phoneNumber } = req.params;
     const { limit = 10, skip = 0 } = req.query;
@@ -552,7 +422,7 @@ router.get('/phone/:phoneNumber', authenticateToken, generalRateLimiter, async (
       return res.status(403).json({ error: 'Unauthorized' });
     }
     const user = await User.findOne({ phoneNumber })
-      .select('phoneNumber username email name balance zambiaCoinBalance trustScore kycStatus role lastViewedTimestamp pendingDeposits pendingWithdrawals transactions mobileMoneyAccounts')
+      .select('phoneNumber username email name balance zambiaCoinBalance trustScore kycStatus role lastViewedTimestamp pendingDeposits pendingWithdrawals transactions')
       .slice('transactions', [Number(skip), Number(limit)])
       .lean()
       .exec();
@@ -567,7 +437,6 @@ router.get('/phone/:phoneNumber', authenticateToken, generalRateLimiter, async (
         ...tx,
         amount: tx.amount?.$numberDecimal ? parseFloat(tx.amount.$numberDecimal) : tx.amount || 0,
         fee: tx.fee?.$numberDecimal ? parseFloat(tx.fee.$numberDecimal) : tx.fee || 0,
-        mobileMoneyProvider: tx.mobileMoneyProvider,
       })) || [],
       pendingDeposits: user.pendingDeposits?.map(dep => ({
         ...dep,
@@ -575,12 +444,7 @@ router.get('/phone/:phoneNumber', authenticateToken, generalRateLimiter, async (
       })) || [],
       pendingWithdrawals: user.pendingWithdrawals?.map(wd => ({
         ...wd,
-        amount: wd.amount?.$numberDecimal ? parseFloat(wd.amount.$numberDecimal) : wd.amount || 0,
-      })) || [],
-      mobileMoneyAccounts: user.mobileMoneyAccounts?.map(acc => ({
-        provider: acc.provider,
-        phoneNumber: acc.phoneNumber,
-        lastSynced: acc.lastSynced,
+        amount: wd.amount?.$numberDecimal ? parseFloat(dep.amount.$numberDecimal) : wd.amount || 0,
       })) || [],
     };
     res.json({
@@ -599,7 +463,6 @@ router.get('/phone/:phoneNumber', authenticateToken, generalRateLimiter, async (
       pendingWithdrawals: convertedUser.pendingWithdrawals,
       qrId: qrPin ? qrPin.qrId : null,
       twoFactorEnabled: convertedUser.twoFactorEnabled,
-      mobileMoneyAccounts: convertedUser.mobileMoneyAccounts,
     });
   } catch (error) {
     console.error('[GetUserByPhone] Error:', error.message);
@@ -608,7 +471,7 @@ router.get('/phone/:phoneNumber', authenticateToken, generalRateLimiter, async (
 });
 
 // Get User by Phone Number (Alternative)
-router.get('/user/phone/:phoneNumber', authenticateToken, generalRateLimiter, async (req, res) => {
+router.get('/user/phone/:phoneNumber', authenticateToken(), generalRateLimiter, async (req, res) => {
   try {
     const user = await User.findOne({ phoneNumber: req.params.phoneNumber });
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -620,15 +483,7 @@ router.get('/user/phone/:phoneNumber', authenticateToken, generalRateLimiter, as
       email: user.email,
       name: user.name,
       balance: user.balance || 0,
-      transactions: user.transactions.map(tx => ({
-        _id: tx._id,
-        type: tx.type,
-        amount: tx.amount,
-        toFrom: tx.toFrom,
-        fee: tx.fee,
-        date: tx.date,
-        mobileMoneyProvider: tx.mobileMoneyProvider,
-      })) || [],
+      transactions: user.transactions || [],
       kycStatus: user.kycStatus,
       role: user.role,
       lastViewedTimestamp: user.lastViewedTimestamp || 0,
@@ -636,11 +491,6 @@ router.get('/user/phone/:phoneNumber', authenticateToken, generalRateLimiter, as
       pendingWithdrawals: user.pendingWithdrawals,
       qrId: qrPin ? qrPin.qrId : null,
       twoFactorEnabled: user.twoFactorEnabled,
-      mobileMoneyAccounts: user.mobileMoneyAccounts.map(acc => ({
-        provider: acc.provider,
-        phoneNumber: acc.phoneNumber,
-        lastSynced: acc.lastSynced,
-      })),
     });
   } catch (error) {
     console.error('[GetUserByPhoneAlt] Error:', error.message);
@@ -649,7 +499,7 @@ router.get('/user/phone/:phoneNumber', authenticateToken, generalRateLimiter, as
 });
 
 // Update Notification Timestamp
-router.put('/user/update-notification', authenticateToken, generalRateLimiter, async (req, res) => {
+router.put('/user/update-notification', authenticateToken(), generalRateLimiter, async (req, res) => {
   try {
     const { phoneNumber, lastViewedTimestamp } = req.body;
     if (!phoneNumber || typeof lastViewedTimestamp !== 'number') {
@@ -672,7 +522,7 @@ router.put('/user/update-notification', authenticateToken, generalRateLimiter, a
 });
 
 // Store QR PIN
-router.post('/store-qr-pin', authenticateToken, strictRateLimiter, async (req, res) => {
+router.post('/store-qr-pin', authenticateToken(), strictRateLimiter, async (req, res) => {
   const { username, pin } = req.body;
   if (!username || !pin) {
     return res.status(400).json({ error: 'Username and PIN are required' });
@@ -717,7 +567,7 @@ router.post('/store-qr-pin', authenticateToken, strictRateLimiter, async (req, r
         type: 'user',
         username,
         qrId,
-        hashedPin: await bcrypt.hash(pin, 10),
+        pin: await bcrypt.hash(pin, 10),
         createdAt: new Date(),
         persistent: false,
       }).save({ session });
@@ -742,7 +592,7 @@ router.post('/store-qr-pin', authenticateToken, strictRateLimiter, async (req, r
 });
 
 // Pay QR
-router.post('/pay-qr', authenticateToken, strictRateLimiter, validate(payQrValidation), async (req, res) => {
+router.post('/pay-qr', authenticateToken(), strictRateLimiter, validate(payQrValidation), async (req, res) => {
   const { qrId, amount, pin, senderUsername } = req.body;
   const session = await mongoose.startSession();
   session.startTransaction({ writeConcern: { w: 'majority' } });
@@ -759,7 +609,7 @@ router.post('/pay-qr', authenticateToken, strictRateLimiter, validate(payQrValid
       session.endSession();
       return res.status(404).json({ error: 'Invalid QR code' });
     }
-    if (qrPin.type === 'user' && !(await bcrypt.compare(pin, qrPin.hashedPin))) {
+    if (qrPin.type === 'user' && !await qrPin.comparePin(pin)) {
       await session.abortTransaction();
       session.endSession();
       return res.status(401).json({ error: 'Invalid PIN' });
@@ -817,7 +667,6 @@ router.post('/pay-qr', authenticateToken, strictRateLimiter, validate(payQrValid
                 fee: sendingFee,
                 date: transactionDate,
                 qrId,
-                mobileMoneyProvider: null,
               },
             },
           },
@@ -841,7 +690,6 @@ router.post('/pay-qr', authenticateToken, strictRateLimiter, validate(payQrValid
                   fee: receivingFee,
                   date: transactionDate,
                   qrId,
-                  mobileMoneyProvider: null,
                 },
               },
             },
@@ -912,7 +760,7 @@ router.post('/pay-qr', authenticateToken, strictRateLimiter, validate(payQrValid
 });
 
 // Manual Deposit
-router.post('/deposit/manual', authenticateToken, generalRateLimiter, async (req, res) => {
+router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (req, res) => {
   const { amount, transactionId } = req.body;
   console.log('[DepositManual] Request:', { amount, transactionId });
   try {
@@ -941,38 +789,23 @@ router.post('/deposit/manual', authenticateToken, generalRateLimiter, async (req
 });
 
 // Withdraw Request
-router.post('/withdraw/request', authenticateToken, generalRateLimiter, async (req, res) => {
-  const { amount, destinationOfFunds, fee } = req.body;
+router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { amount } = req.body;
+  console.log('[WithdrawRequest] Request:', { amount });
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user || !user.isActive) {
       return res.status(403).json({ error: 'User not found or inactive' });
     }
-    if (!amount || amount <= 0 || amount + fee > user.balance) {
+    if (!amount || amount <= 0 || amount > user.balance) {
       return res.status(400).json({ error: 'Invalid amount or insufficient balance' });
     }
-    if (!destinationOfFunds || !['MTN Mobile Money', 'Airtel Mobile Money', 'Bank Transfer'].includes(destinationOfFunds)) {
-      return res.status(400).json({ error: 'Invalid destination of funds' });
-    }
-    if (!fee || fee < Math.max(amount * 0.01, 2)) {
-      return res.status(400).json({ error: 'Invalid fee' });
-    }
-    user.pendingWithdrawals.push({
-      amount,
-      fee,
-      destinationOfFunds,
-      date: new Date(),
-      status: 'pending',
-    });
+    user.pendingWithdrawals = user.pendingWithdrawals || [];
+    user.pendingWithdrawals.push({ amount, date: new Date(), status: 'pending' });
     await user.save();
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
-      await sendPushNotification(
-        admin.pushToken,
-        'New Withdrawal Request',
-        `Withdrawal of ${amount} ZMW to ${destinationOfFunds} from ${user.username} needs approval.`,
-        { userId: user._id, withdrawalIndex: user.pendingWithdrawals.length - 1 }
-      );
+      await sendPushNotification(admin.pushToken, 'New Withdrawal Request', `Withdrawal of ${amount} ZMW from ${user.username} needs approval.`, { userId: user._id, withdrawalIndex: user.pendingWithdrawals.length - 1 });
     }
     res.json({ message: 'Withdrawal requested. Awaiting approval.' });
   } catch (error) {
@@ -982,7 +815,7 @@ router.post('/withdraw/request', authenticateToken, generalRateLimiter, async (r
 });
 
 // Withdraw (Direct)
-router.post('/api/withdraw', authenticateToken, generalRateLimiter, async (req, res) => {
+router.post('/api/withdraw', authenticateToken(), generalRateLimiter, async (req, res) => {
   const { amount } = req.body;
   console.log('[WithdrawDirect] Request:', { amount });
   try {
@@ -993,11 +826,11 @@ router.post('/api/withdraw', authenticateToken, generalRateLimiter, async (req, 
     if (!amount || amount <= 0 || amount > user.balance) {
       return res.status(400).json({ error: 'Invalid amount or insufficient balance' });
     }
-    const fee = amount <= 50 ? 1.00 :
-                amount <= 100 ? 2.00 :
-                amount <= 500 ? 3.50 :
-                amount <= 1000 ? 5.00 :
-                amount <= 5000 ? 10.00 : 10.00;
+    const fee = amount <= 50 ? 0.50 :
+                amount <= 100 ? 1.00 :
+                amount <= 500 ? 1.50 :
+                amount <= 1000 ? 2.00 :
+                amount <= 5000 ? 3.00 : 5.00;
     const totalDeduction = amount + fee;
     if (user.balance < totalDeduction) {
       return res.status(400).json({ error: 'Insufficient balance including fee' });
@@ -1009,7 +842,6 @@ router.post('/api/withdraw', authenticateToken, generalRateLimiter, async (req, 
       fee,
       toFrom: 'System',
       date: new Date(),
-      mobileMoneyProvider: null,
     });
     await user.save();
     await AdminLedger.updateOne(
@@ -1037,7 +869,7 @@ router.post('/api/withdraw', authenticateToken, generalRateLimiter, async (req, 
 });
 
 // Save Push Token
-router.post('/save-push-token', authenticateToken, generalRateLimiter, async (req, res) => {
+router.post('/save-push-token', authenticateToken(), generalRateLimiter, async (req, res) => {
   const { pushToken } = req.body;
   if (!pushToken) return res.status(400).json({ error: 'Push token is required' });
   try {
@@ -1067,7 +899,7 @@ router.put('/user/update', authenticateToken(['user']), generalRateLimiter, vali
     }
 
     if (pin) {
-      updates.hashedPin = await bcrypt.hash(pin, 10);
+      updates.pin = await bcrypt.hash(pin, 10);
     }
 
     if (!Object.keys(updates).length) {
@@ -1080,7 +912,7 @@ router.put('/user/update', authenticateToken(['user']), generalRateLimiter, vali
       { phoneNumber: req.user.phoneNumber },
       { $set: updates },
       { new: true, runValidators: true }
-    ).select('-password -hashedPin');
+    ).select('-password -pin');
 
     if (!user) {
       console.error('[UpdateProfile] User not found:', req.user.phoneNumber);
@@ -1219,7 +1051,7 @@ router.post('/refresh-token', strictRateLimiter, async (req, res) => {
 });
 
 // Update Timestamp
-router.patch('/update-timestamp', authenticateToken, generalRateLimiter, async (req, res) => {
+router.patch('/update-timestamp', authenticateToken(), generalRateLimiter, async (req, res) => {
   try {
     const { phoneNumber, lastViewedTimestamp } = req.body;
     if (!phoneNumber || !lastViewedTimestamp) {
@@ -1246,7 +1078,6 @@ router.patch('/update-timestamp', authenticateToken, generalRateLimiter, async (
           ...tx,
           amount: tx.amount?.$numberDecimal ? parseFloat(tx.amount.$numberDecimal) : tx.amount || 0,
           fee: tx.fee?.$numberDecimal ? parseFloat(tx.fee.$numberDecimal) : tx.fee || 0,
-          mobileMoneyProvider: tx.mobileMoneyProvider,
         })) || [],
         pendingDeposits: user.pendingDeposits?.map(dep => ({
           ...dep,
@@ -1255,11 +1086,6 @@ router.patch('/update-timestamp', authenticateToken, generalRateLimiter, async (
         pendingWithdrawals: user.pendingWithdrawals?.map(wd => ({
           ...wd,
           amount: wd.amount?.$numberDecimal ? parseFloat(wd.amount.$numberDecimal) : wd.amount || 0,
-        })) || [],
-        mobileMoneyAccounts: user.mobileMoneyAccounts?.map(acc => ({
-          provider: acc.provider,
-          phoneNumber: acc.phoneNumber,
-          lastSynced: acc.lastSynced,
         })) || [],
       },
     });
@@ -1315,332 +1141,15 @@ router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin
       .map(tx => ({
         _id: tx._id,
         type: tx.type,
+        amount: tx.amount,
         toFrom: tx.toFrom,
         fee: tx.fee,
         date: tx.date,
-        mobileMoneyProvider: tx.mobileMoneyProvider,
       }));
     res.json({ transactions, total: user.transactions.length });
   } catch (error) {
     console.error('[GetTransactions] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to fetch transactions' });
-  }
-});
-
-// Link MTN Mobile Money account
-router.post('/mobilemoney/link-mtn', authenticateToken, strictRateLimiter, validate(mobileMoneyLinkValidation), async (req, res) => {
-  const { code, phoneNumber } = req.body;
-  try {
-    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    // Exchange code for access token
-    const tokenResponse = await axios.post(`${MTN_API_URL}/oauth/token`, {
-      grant_type: 'authorization_code',
-      code,
-      client_id: MTN_CLIENT_ID,
-      client_secret: MTN_CLIENT_SECRET,
-      redirect_uri: 'https://zangena-e33a7e55637a.herokuapp.com/api/users/mobilemoney/callback',
-    }, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    });
-
-    const { access_token, refresh_token, expires_in } = tokenResponse.data;
-    const tokenExpiry = new Date(Date.now() + expires_in * 1000);
-
-    // Check if account already linked
-    const existingAccount = user.mobileMoneyAccounts.find(acc => acc.phoneNumber === phoneNumber && acc.provider === 'MTN');
-    if (existingAccount) {
-      return res.status(409).json({ error: 'MTN account already linked' });
-    }
-
-    // Add MTN account
-    user.mobileMoneyAccounts.push({
-      provider: 'MTN',
-      phoneNumber,
-      accessToken: access_token,
-      refreshToken: refresh_token,
-      tokenExpiry,
-      lastSynced: null,
-    });
-
-    await user.save();
-    console.log('[MobileMoney:/api/users/mobilemoney/link-mtn] MTN account linked:', { user: user.username, phoneNumber });
-
-    res.status(200).json({ message: 'MTN Mobile Money account linked successfully' });
-  } catch (error) {
-    console.error('[MobileMoney:/api/users/mobilemoney/link-mtn] Link error:', {
-      message: error.message,
-      stack: error.stack,
-      phoneNumber,
-    });
-    res.status(500).json({ error: 'Failed to link MTN account', details: error.message });
-  }
-});
-
-// Fetch and sync MTN transactions
-router.get('/mobilemoney/transactions', authenticateToken, generalRateLimiter, async (req, res) => {
-  const retry = async (fn, retries, delay) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        return await fn();
-      } catch (error) {
-        if (error.response?.status === 503 && i < retries - 1) {
-          console.warn(`[MobileMoney] Retry attempt ${i + 1} for MTN API call`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-        throw error;
-      }
-    }
-    throw new Error('Max retries reached');
-  };
-
-  try {
-    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const provider = getProviderName(req.user.phoneNumber);
-    if (provider !== 'MTN') {
-      return res.status(400).json({
-        error: `${provider} numbers are not supported yet. Please use an MTN number (+26076 or +26096).`,
-      });
-    }
-
-    const mtnAccount = user.mobileMoneyAccounts.find(acc => acc.provider === 'MTN');
-    if (!mtnAccount) {
-      return res.status(400).json({
-        error: 'No MTN account linked. Please link an MTN number (+26076 or +26096).',
-      });
-    }
-
-    let accessToken = mtnAccount.accessToken;
-    if (new Date() > mtnAccount.tokenExpiry) {
-      try {
-        const refreshResponse = await retry(
-          () => axios.post(`${MTN_API_URL}/oauth/token`, {
-            grant_type: 'refresh_token',
-            refresh_token: mtnAccount.refreshToken,
-            client_id: MTN_CLIENT_ID,
-            client_secret: MTN_CLIENT_SECRET,
-          }, {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          }),
-          3,
-          1000
-        );
-        const { access_token, refresh_token, expires_in } = refreshResponse.data;
-        mtnAccount.accessToken = access_token;
-        mtnAccount.refreshToken = refresh_token;
-        mtnAccount.tokenExpiry = new Date(Date.now() + expires_in * 1000);
-        await user.save();
-        accessToken = access_token;
-        console.log('[MobileMoney] Token refreshed:', { user: user.username, phoneNumber: mtnAccount.phoneNumber });
-      } catch (refreshError) {
-        console.error('[MobileMoney] Token refresh error:', {
-          message: refreshError.message,
-          stack: refreshError.stack,
-        });
-        return res.status(401).json({ error: 'Failed to refresh MTN token. Please re-link your account.' });
-      }
-    }
-
-    let balance = null;
-    try {
-      const balanceResponse = await retry(
-        () => axios.get(`${MTN_API_URL}/accounts/${mtnAccount.phoneNumber}/balance`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        }),
-        3,
-        1000
-      );
-      balance = balanceResponse.data.balance || 0;
-      mtnAccount.balance = balance;
-      console.log('[MobileMoney] Balance fetched:', { user: user.username, phoneNumber: mtnAccount.phoneNumber, balance });
-    } catch (balanceError) {
-      console.error('[MobileMoney] Balance fetch error:', {
-        message: balanceError.message,
-        stack: balanceError.stack,
-      });
-    }
-
-    const transactionResponse = await retry(
-      () => axios.get(`${MTN_API_URL}/accounts/${mtnAccount.phoneNumber}/transactions`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        params: {
-          since: mtnAccount.lastSynced ? mtnAccount.lastSynced.toISOString() : new Date(0).toISOString(),
-        },
-      }),
-      3,
-      1000
-    );
-
-    const mtnTransactions = transactionResponse.data.transactions || [];
-    const newTransactions = [];
-
-    for (const tx of mtnTransactions) {
-      const existingTx = user.transactions.find(t => t._id === tx.transactionId);
-      if (!existingTx) {
-        newTransactions.push({
-          _id: tx.transactionId,
-          type: tx.type === 'credit' ? 'received' : 'sent',
-          amount: tx.amount,
-          toFrom: tx.counterparty || 'Unknown',
-          date: new Date(tx.date),
-          fee: tx.fee || 0,
-          mobileMoneyProvider: 'MTN',
-        });
-      }
-    }
-
-    if (newTransactions.length > 0 || balance !== null) {
-      user.transactions.push(...newTransactions);
-      mtnAccount.lastSynced = new Date();
-      if (balance !== null) mtnAccount.balance = balance;
-      await user.save();
-      console.log('[MobileMoney] Synced:', { user: user.username, transactions: newTransactions.length, balance });
-    }
-
-    res.status(200).json({
-      message: `Synced ${newTransactions.length} new transactions`,
-      transactions: newTransactions,
-      balance,
-      mobileMoneyAccounts: user.mobileMoneyAccounts.map(acc => ({
-        provider: acc.provider,
-        phoneNumber: acc.phoneNumber,
-        lastSynced: acc.lastSynced,
-        balance: acc.balance,
-      })),
-    });
-  } catch (error) {
-    console.error('[MobileMoney] Sync error:', {
-      message: error.message,
-      stack: error.stack,
-    });
-    res.status(500).json({ error: 'Failed to sync transactions', details: error.message });
-  }
-});
-
-// Withdraw to MTN Mobile Money
-router.post('/mobilemoney/withdraw', authenticateToken, strictRateLimiter, validate(mobileMoneyWithdrawValidation), async (req, res) => {
-  const { phoneNumber, amount } = req.body;
-  const session = await mongoose.startSession();
-  session.startTransaction({ writeConcern: { w: 'majority' } });
-  try {
-    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }).session(session);
-    if (!user) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const mtnAccount = user.mobileMoneyAccounts.find(acc => acc.provider === 'MTN' && acc.phoneNumber === phoneNumber);
-    if (!mtnAccount) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ error: 'MTN account not linked for this phone number' });
-    }
-
-    let accessToken = mtnAccount.accessToken;
-    if (new Date() > mtnAccount.tokenExpiry) {
-      const refreshResponse = await axios.post(`${MTN_API_URL}/oauth/token`, {
-        grant_type: 'refresh_token',
-        refresh_token: mtnAccount.refreshToken,
-        client_id: MTN_CLIENT_ID,
-        client_secret: MTN_CLIENT_SECRET,
-      }, {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      });
-
-      const { access_token, refresh_token, expires_in } = refreshResponse.data;
-      mtnAccount.accessToken = access_token;
-      mtnAccount.refreshToken = refresh_token;
-      mtnAccount.tokenExpiry = new Date(Date.now() + expires_in * 1000);
-      accessToken = access_token;
-      console.log('[MobileMoney:/api/users/mobilemoney/withdraw] Token refreshed:', { user: user.username, phoneNumber });
-    }
-
-    const fee = amount <= 50 ? 1.00 :
-                amount <= 100 ? 2.00 :
-                amount <= 500 ? 3.50 :
-                amount <= 1000 ? 5.00 :
-                amount <= 5000 ? 10.00 : 10.00;
-    const totalDeduction = amount + fee;
-
-    if (user.balance < totalDeduction) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ error: 'Insufficient balance including fee' });
-    }
-
-    const transactionId = new mongoose.Types.ObjectId().toString();
-    const transactionDate = new Date();
-
-    const withdrawalResponse = await axios.post(`${MTN_API_URL}/withdrawals`, {
-      amount,
-      phoneNumber,
-      referenceId: transactionId,
-      currency: 'ZMW',
-    }, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    if (withdrawalResponse.data.status !== 'SUCCESS') {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ error: 'Withdrawal failed', details: withdrawalResponse.data.message });
-    }
-
-    user.balance -= totalDeduction;
-    user.transactions.push({
-      _id: transactionId,
-      type: 'withdrawal',
-      amount,
-      fee,
-      toFrom: phoneNumber,
-      date: transactionDate,
-      mobileMoneyProvider: 'MTN',
-    });
-
-    await AdminLedger.updateOne({
-      $inc: { totalBalance: fee },
-      $set: { lastUpdated: new Date() },
-      $push: {
-        transactions: {
-          type: 'fee-collected',
-          amount: fee,
-          sender: user.username,
-          receiver: 'MobileMoney',
-          userTransactionId: transactionId,
-          date: transactionDate,
-        },
-      },
-    }, { upsert: true, session });
-
-    await user.save({ session });
-    await session.commitTransaction();
-    session.endSession();
-
-    console.log('[MobileMoney:/api/users/mobilemoney/withdraw] Withdrawal successful:', { user: user.username, phoneNumber, amount, transactionId });
-
-    res.status(200).json({ message: 'Withdrawal successful', transactionId, amount, fee });
-  } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
-    console.error('[MobileMoney:/api/users/mobilemoney/withdraw] Error:', {
-      message: error.message,
-      stack: error.stack,
-      phoneNumber,
-      amount,
-    });
-    res.status(500).json({ error: 'Failed to process withdrawal', details: error.message });
   }
 });
 
