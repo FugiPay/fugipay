@@ -1382,6 +1382,22 @@ router.post('/mobilemoney/link-mtn', authenticateToken, strictRateLimiter, valid
 
 // Fetch and sync MTN transactions
 router.get('/mobilemoney/transactions', authenticateToken, generalRateLimiter, async (req, res) => {
+  const retry = async (fn, retries, delay) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (error.response?.status === 503 && i < retries - 1) {
+          console.warn(`[MobileMoney] Retry attempt ${i + 1} for MTN API call`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('Max retries reached');
+  };
+
   try {
     const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
     if (!user) {
@@ -1405,15 +1421,18 @@ router.get('/mobilemoney/transactions', authenticateToken, generalRateLimiter, a
     let accessToken = mtnAccount.accessToken;
     if (new Date() > mtnAccount.tokenExpiry) {
       try {
-        const refreshResponse = await axios.post(`${MTN_API_URL}/oauth/token`, {
-          grant_type: 'refresh_token',
-          refresh_token: mtnAccount.refreshToken,
-          client_id: MTN_CLIENT_ID,
-          client_secret: MTN_CLIENT_SECRET,
-        }, {
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        });
-
+        const refreshResponse = await retry(
+          () => axios.post(`${MTN_API_URL}/oauth/token`, {
+            grant_type: 'refresh_token',
+            refresh_token: mtnAccount.refreshToken,
+            client_id: MTN_CLIENT_ID,
+            client_secret: MTN_CLIENT_SECRET,
+          }, {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          }),
+          3,
+          1000
+        );
         const { access_token, refresh_token, expires_in } = refreshResponse.data;
         mtnAccount.accessToken = access_token;
         mtnAccount.refreshToken = refresh_token;
@@ -1430,12 +1449,35 @@ router.get('/mobilemoney/transactions', authenticateToken, generalRateLimiter, a
       }
     }
 
-    const transactionResponse = await axios.get(`${MTN_API_URL}/accounts/${mtnAccount.phoneNumber}/transactions`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      params: {
-        since: mtnAccount.lastSynced ? mtnAccount.lastSynced.toISOString() : new Date(0).toISOString(),
-      },
-    });
+    let balance = null;
+    try {
+      const balanceResponse = await retry(
+        () => axios.get(`${MTN_API_URL}/accounts/${mtnAccount.phoneNumber}/balance`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+        3,
+        1000
+      );
+      balance = balanceResponse.data.balance || 0;
+      mtnAccount.balance = balance;
+      console.log('[MobileMoney] Balance fetched:', { user: user.username, phoneNumber: mtnAccount.phoneNumber, balance });
+    } catch (balanceError) {
+      console.error('[MobileMoney] Balance fetch error:', {
+        message: balanceError.message,
+        stack: balanceError.stack,
+      });
+    }
+
+    const transactionResponse = await retry(
+      () => axios.get(`${MTN_API_URL}/accounts/${mtnAccount.phoneNumber}/transactions`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params: {
+          since: mtnAccount.lastSynced ? mtnAccount.lastSynced.toISOString() : new Date(0).toISOString(),
+        },
+      }),
+      3,
+      1000
+    );
 
     const mtnTransactions = transactionResponse.data.transactions || [];
     const newTransactions = [];
@@ -1455,14 +1497,25 @@ router.get('/mobilemoney/transactions', authenticateToken, generalRateLimiter, a
       }
     }
 
-    if (newTransactions.length > 0) {
+    if (newTransactions.length > 0 || balance !== null) {
       user.transactions.push(...newTransactions);
       mtnAccount.lastSynced = new Date();
+      if (balance !== null) mtnAccount.balance = balance;
       await user.save();
-      console.log('[MobileMoney] Synced transactions:', { user: user.username, count: newTransactions.length });
+      console.log('[MobileMoney] Synced:', { user: user.username, transactions: newTransactions.length, balance });
     }
 
-    res.status(200).json({ message: `Synced ${newTransactions.length} new transactions`, transactions: newTransactions });
+    res.status(200).json({
+      message: `Synced ${newTransactions.length} new transactions`,
+      transactions: newTransactions,
+      balance,
+      mobileMoneyAccounts: user.mobileMoneyAccounts.map(acc => ({
+        provider: acc.provider,
+        phoneNumber: acc.phoneNumber,
+        lastSynced: acc.lastSynced,
+        balance: acc.balance,
+      })),
+    });
   } catch (error) {
     console.error('[MobileMoney] Sync error:', {
       message: error.message,
