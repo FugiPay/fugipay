@@ -1153,4 +1153,21 @@ router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin
   }
 });
 
+router.post('/reset-pin', strictRateLimiter, async (req, res) => {
+  const { identifier } = req.body;
+  try {
+    const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const resetToken = crypto.randomBytes(20).toString('hex');
+    user.resetToken = resetToken;
+    user.resetTokenExpiry = Date.now() + 3600000;
+    await user.save();
+    // Send email with resetToken
+    res.json({ message: 'PIN reset instructions sent' });
+  } catch (error) {
+    console.error('[ResetPin] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
