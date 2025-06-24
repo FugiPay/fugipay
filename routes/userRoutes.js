@@ -901,18 +901,24 @@ router.post('/save-push-token', authenticateToken(), generalRateLimiter, async (
 // Update Profile
 router.put('/user/update', authenticateToken(['user']), generalRateLimiter, validate(updateProfileValidation), async (req, res) => {
   try {
-    const { email, password, pin } = req.body;
-    const updates = {};
+    const { email, password, pin, phoneNumber } = req.body;
+    if (phoneNumber !== req.user.phoneNumber) {
+      console.error('[UpdateProfile] Unauthorized phoneNumber:', { requested: phoneNumber, user: req.user.phoneNumber });
+      return res.status(403).json({ error: 'Unauthorized phone number' });
+    }
 
+    const updates = {};
     if (email) {
       updates.email = email;
     }
-
     if (password) {
       updates.password = await bcrypt.hash(password, 10);
     }
-
     if (pin) {
+      if (!/^\d{4}$/.test(pin)) {
+        console.error('[UpdateProfile] Invalid PIN format:', { pin });
+        return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+      }
       updates.pin = await bcrypt.hash(pin, 10);
     }
 
@@ -926,7 +932,7 @@ router.put('/user/update', authenticateToken(['user']), generalRateLimiter, vali
       { phoneNumber: req.user.phoneNumber },
       { $set: updates },
       { new: true, runValidators: true }
-    ).select('-password -pin');
+    ).select('username phoneNumber email balance transactions kycStatus role lastViewedTimestamp pendingDeposits pendingWithdrawals twoFactorEnabled');
 
     if (!user) {
       console.error('[UpdateProfile] User not found:', req.user.phoneNumber);
@@ -940,7 +946,24 @@ router.put('/user/update', authenticateToken(['user']), generalRateLimiter, vali
     );
 
     console.log('[UpdateProfile] Profile updated:', { phoneNumber: user.phoneNumber, updatedFields: Object.keys(updates) });
-    res.json({ message: 'Profile updated', user, token });
+    res.json({
+      message: 'Profile updated',
+      status: 'updated', // Added to satisfy frontend validation
+      user: {
+        username: user.username,
+        phoneNumber: user.phoneNumber,
+        email: user.email || '',
+        balance: user.balance || 0,
+        transactions: user.transactions || [],
+        kycStatus: user.kycStatus || 'pending',
+        role: user.role || 'user',
+        lastViewedTimestamp: user.lastViewedTimestamp || 0,
+        pendingDeposits: user.pendingDeposits || [],
+        pendingWithdrawals: user.pendingWithdrawals || [],
+        twoFactorEnabled: user.twoFactorEnabled || false,
+      },
+      token,
+    });
   } catch (error) {
     console.error('[UpdateProfile] Error:', {
       message: error.message,
@@ -952,9 +975,9 @@ router.put('/user/update', authenticateToken(['user']), generalRateLimiter, vali
       return res.status(409).json({ error: 'Email already exists' });
     }
     if (error.name === 'ValidationError') {
-      return res.status(400).json({ error: 'Invalid input' });
+      return res.status(400).json({ error: 'Invalid input', details: error.message });
     }
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
 
