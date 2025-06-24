@@ -210,26 +210,35 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, generalRa
   }
 });
 
-// Register
 router.post('/register', strictRateLimiter, upload.single('idImage'), validate(registerValidation), async (req, res) => {
   const { username, name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
+
   if (!idImage) {
     return res.status(400).json({ error: 'ID image is required' });
   }
+
+  // Validate PIN: must be 4 digits
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+  }
+
   try {
     const existingUser = await User.findOne({ $or: [{ username }, { email }, { phoneNumber }] }).lean();
     if (existingUser) {
       return res.status(400).json({ error: 'Username, email, or phone number already exists' });
     }
+
     const fileStream = fs.createReadStream(idImage.path);
     const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
-    const params = { Bucket: S3_BUCKET, Key: s3Key, Body: fileStream, ContentType: idImage.mimetype, ACL: 'private' };
+    const params = { Bucket: S3_BUCKET, Key: s3Key, Body: { fileStream }, ContentType: idImage.mimetype, ACL: 'private' };
     const s3Response = await s3.upload(params).promise();
     const idImageUrl = s3Response.Location;
     fs.unlinkSync(idImage.path);
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const hashedPin = await bcrypt.hash(pin, 10);
+
     const user = new User({
       username: username.trim(),
       name: name.trim(),
@@ -246,13 +255,18 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), validate(r
       transactions: [],
       kycStatus: 'pending',
       isActive: false,
+      isArchived: false, // Explicitly set
     });
+
     await user.save();
+
     const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
+
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
       await sendPushNotification(admin.pushToken, 'New User Registration', `User ${username} needs KYC approval.`, { userId: user._id });
     }
+
     res.status(201).json({ token, username: user.username, role: user.role, kycStatus: user.kycStatus });
   } catch (error) {
     console.error('[Register] Error:', error.message, error.stack);

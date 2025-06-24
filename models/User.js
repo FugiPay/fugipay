@@ -45,7 +45,7 @@ const userSchema = new mongoose.Schema({
   },
   email: { type: String, required: true, unique: true, index: true },
   password: { type: String, required: true, minlength: 6 },
-  pin: { type: String, required: true, minlength: 4, maxlength: 4 },
+  pin: { type: String, required: true }, // Removed minlength, maxlength
   idImageUrl: { type: String },
   role: { type: String, default: 'user', enum: ['user', 'admin'] },
   balance: { type: Number, default: 0 },
@@ -55,9 +55,9 @@ const userSchema = new mongoose.Schema({
   transactions: [transactionSchema],
   kycStatus: { type: String, default: 'pending', enum: ['pending', 'verified', 'rejected'] },
   isActive: { type: Boolean, default: false },
-  isArchived: { type: Boolean, default: false, index: true }, // New: Marks account as archived
-  archivedAt: { type: Date }, // New: Timestamp of archival
-  archivedReason: { type: String }, // New: Reason for archival (e.g., 'user-requested', 'compliance')
+  isArchived: { type: Boolean, default: false, index: true },
+  archivedAt: { type: Date },
+  archivedReason: { type: String },
   resetToken: { type: String },
   resetTokenExpiry: { type: Date },
   pushToken: { type: String, default: null },
@@ -65,23 +65,19 @@ const userSchema = new mongoose.Schema({
   pendingWithdrawals: [pendingWithdrawalSchema],
   lastLogin: { type: Date, default: null },
   lastViewedTimestamp: { type: Number, default: 0 },
-  twoFactorSecret: { type: String }, // 2FA secret for TOTP
-  twoFactorEnabled: { type: Boolean, default: false }, // 2FA status
+  twoFactorSecret: { type: String },
+  twoFactorEnabled: { type: Boolean, default: false },
 }, {
   timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true },
 });
 
-// Virtual to check if account is effectively active (not archived and isActive)
 userSchema.virtual('isEffectivelyActive').get(function () {
   return this.isActive && !this.isArchived;
 });
 
-// Index for efficient querying of active/archived users
 userSchema.index({ isActive: 1, isArchived: 1 });
-
-// Ensure unique constraints are enforced
 userSchema.index({ username: 1 }, { unique: true });
 userSchema.index({ phoneNumber: 1 }, { unique: true });
 userSchema.index({ email: 1 }, { unique: true });
