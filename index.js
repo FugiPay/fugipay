@@ -2,12 +2,36 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const compression = require('compression');
+const morgan = require('morgan');
 require('dotenv').config();
+
+// Logging
+app.use(morgan('dev'));
+
+// Apply JSON parser only for non-multipart routes
+app.use((req, res, next) => {
+  if (req.headers['content-type']?.startsWith('multipart/form-data')) {
+    return next();
+  }
+  express.json()(req, res, next);
+});
 
 // Import route files
 const userRoutes = require('./routes/userRoutes');
 const businessRoutes = require('./routes/businessRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('[Global Error]', {
+    message: err.message,
+    stack: err.stack,
+    endpoint: req.originalUrl,
+    method: req.method,
+    headers: req.headers,
+  });
+  res.status(500).json({ error: 'Server error', details: err.message });
+});
 
 const app = express();
 app.use(compression()); // Enable response compression

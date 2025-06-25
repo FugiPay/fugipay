@@ -33,7 +33,39 @@ const s3 = new AWS.S3({
 });
 
 // Configure multer for temporary local storage
-const upload = multer({ dest: 'uploads/' });
+// const upload = multer({ dest: 'uploads/' });
+
+// Configure Multer for disk storage
+const uploadDir = path.join(__dirname, '..', 'uploads');
+fs.mkdirSync(uploadDir, { recursive: true });
+const upload = multer({
+  dest: uploadDir,
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf'];
+    if (!allowedTypes.includes(file.mimetype)) {
+      return cb(new Error('Only images (JPEG, PNG, GIF) or PDFs are allowed'));
+    }
+    cb(null, true);
+  },
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit (adjustable)
+});
+
+// Multer error handling middleware
+const handleMulterError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    console.error('[Multer] Error:', {
+      message: err.message,
+      code: err.code,
+      endpoint: req.originalUrl,
+    });
+    return res.status(400).json({ error: 'File upload error', details: err.message });
+  }
+  if (err.message === 'Only images (JPEG, PNG, GIF) or PDFs are allowed') {
+    console.error('[Multer] Invalid file type:', err.message);
+    return res.status(400).json({ error: 'Invalid file type', details: err.message });
+  }
+  next(err);
+};
 
 // Configure Nodemailer with Gmail
 const transporter = nodemailer.createTransport({
@@ -210,30 +242,36 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, generalRa
   }
 });
 
-router.post('/register', strictRateLimiter, upload.single('idImage'), validate(registerValidation), async (req, res) => {
+// Register User
+router.post('/register', strictRateLimiter, upload.single('idImage'), handleMulterError, validate(registerValidation), async (req, res, next) => {
+  console.log('[Register] Request Body:', req.body);
+  console.log('[Register] File:', req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size, path: req.file.path } : null);
+
   const { username, name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
 
   if (!idImage) {
-    return res.status(400).json({ error: 'ID image is required' });
-  }
-
-  // Validate PIN: must be 4 digits
-  if (!/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+    console.error('[Register] No ID image provided');
+    return res.status(400).json({ error: 'ID image or PDF is required' });
   }
 
   try {
     const existingUser = await User.findOne({ $or: [{ username }, { email }, { phoneNumber }] }).lean();
     if (existingUser) {
-      return res.status(400).json({ error: 'Username, email, or phone number already exists' });
+      console.error('[Register] Duplicate user:', { username, email, phoneNumber });
+      return res.status(409).json({ error: 'Username, email, or phone number already exists' });
     }
 
     const fileStream = fs.createReadStream(idImage.path);
     const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
-    const params = { Bucket: S3_BUCKET, Key: s3Key, Body: { fileStream }, ContentType: idImage.mimetype, ACL: 'private' };
-    const s3Response = await s3.upload(params).promise();
-    const idImageUrl = s3Response.Location;
+    const params = {
+      Bucket: process.env.S3_BUCKET,
+      Key: s3Key,
+      Body: fileStream,
+      ContentType: idImage.mimetype,
+      ACL: 'private',
+    };
+    await s3.send(new PutObjectCommand(params));
     fs.unlinkSync(idImage.path);
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -246,7 +284,7 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), validate(r
       email,
       password: hashedPassword,
       pin: hashedPin,
-      idImageUrl,
+      idImageUrl: `https://${process.env.S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`,
       role: 'user',
       balance: 0,
       zambiaCoinBalance: 0,
@@ -255,22 +293,35 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), validate(r
       transactions: [],
       kycStatus: 'pending',
       isActive: false,
-      isArchived: false, // Explicitly set
+      isArchived: false,
     });
 
     await user.save();
 
-    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
       await sendPushNotification(admin.pushToken, 'New User Registration', `User ${username} needs KYC approval.`, { userId: user._id });
     }
 
+    console.log('[Register] Success:', { username, phoneNumber });
     res.status(201).json({ token, username: user.username, role: user.role, kycStatus: user.kycStatus });
   } catch (error) {
-    console.error('[Register] Error:', error.message, error.stack);
-    res.status(500).json({ error: 'Server error during registration', details: error.message });
+    if (idImage && idImage.path) {
+      try {
+        fs.unlinkSync(idImage.path);
+      } catch (unlinkError) {
+        console.error('[Register] Failed to delete temp file:', unlinkError.message);
+      }
+    }
+    console.error('[Register] Error:', {
+      message: error.message,
+      stack: error.stack,
+      body: req.body,
+      file: req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size } : null,
+    });
+    next(error);
   }
 });
 
