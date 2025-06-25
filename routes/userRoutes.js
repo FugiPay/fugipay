@@ -3,20 +3,20 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
-const AWS = require('aws-sdk');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const mongoose = require('mongoose');
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
+const axios = require('axios');
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const Business = require('../models/Business');
 const AdminLedger = require('../models/AdminLedger');
 const authenticateToken = require('../middleware/authenticateToken');
 const { generalRateLimiter, strictRateLimiter, validate, registerValidation, loginValidation, payQrValidation, updateProfileValidation } = require('../middleware/securityMiddleware');
-const axios = require('axios');
 
 // Environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
@@ -26,20 +26,17 @@ const EMAIL_USER = process.env.EMAIL_USER || 'your_email@example.com';
 const EMAIL_PASS = process.env.EMAIL_PASS || 'your_email_password';
 
 // Configure AWS S3
-const s3 = new AWS.S3({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+const s3 = new S3Client({
   region: AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
 });
 
-// Configure multer for temporary local storage
-// const upload = multer({ dest: 'uploads/' });
-
-// Configure Multer for disk storage
-const uploadDir = path.join(__dirname, '..', 'uploads');
-fs.mkdirSync(uploadDir, { recursive: true });
+// Configure Multer with memory storage
 const upload = multer({
-  dest: uploadDir,
+  storage: multer.memoryStorage(),
   fileFilter: (req, file, cb) => {
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf'];
     if (!allowedTypes.includes(file.mimetype)) {
@@ -47,7 +44,7 @@ const upload = multer({
     }
     cb(null, true);
   },
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit (adjustable)
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
 });
 
 // Multer error handling middleware
@@ -138,7 +135,7 @@ router.post('/setup-2fa', authenticateToken(), async (req, res) => {
       name: `Zangena:${user.username}`,
     });
     user.twoFactorSecret = secret.base32;
-    user.twoFactorEnabled = false; // Enable after verification
+    user.twoFactorEnabled = false;
     await user.save();
     const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
     res.json({ qrCodeUrl, secret: secret.base32 });
@@ -245,7 +242,7 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, generalRa
 // Register User
 router.post('/register', strictRateLimiter, upload.single('idImage'), handleMulterError, validate(registerValidation), async (req, res, next) => {
   console.log('[Register] Request Body:', req.body);
-  console.log('[Register] File:', req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size, path: req.file.path } : null);
+  console.log('[Register] File:', req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size } : null);
 
   const { username, name, phoneNumber, email, password, pin } = req.body;
   const idImage = req.file;
@@ -262,17 +259,15 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       return res.status(409).json({ error: 'Username, email, or phone number already exists' });
     }
 
-    const fileStream = fs.createReadStream(idImage.path);
     const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
     const params = {
-      Bucket: process.env.S3_BUCKET,
+      Bucket: S3_BUCKET,
       Key: s3Key,
-      Body: fileStream,
+      Body: idImage.buffer,
       ContentType: idImage.mimetype,
       ACL: 'private',
     };
     await s3.send(new PutObjectCommand(params));
-    fs.unlinkSync(idImage.path);
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const hashedPin = await bcrypt.hash(pin, 10);
@@ -284,7 +279,7 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       email,
       password: hashedPassword,
       pin: hashedPin,
-      idImageUrl: `https://${process.env.S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`,
+      idImageUrl: `https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${s3Key}`,
       role: 'user',
       balance: 0,
       zambiaCoinBalance: 0,
@@ -298,7 +293,7 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
 
     await user.save();
 
-    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
 
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
@@ -308,13 +303,6 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
     console.log('[Register] Success:', { username, phoneNumber });
     res.status(201).json({ token, username: user.username, role: user.role, kycStatus: user.kycStatus });
   } catch (error) {
-    if (idImage && idImage.path) {
-      try {
-        fs.unlinkSync(idImage.path);
-      } catch (unlinkError) {
-        console.error('[Register] Failed to delete temp file:', unlinkError.message);
-      }
-    }
     console.error('[Register] Error:', {
       message: error.message,
       stack: error.stack,
@@ -509,7 +497,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), generalRateLimiter, async
       })) || [],
       pendingWithdrawals: user.pendingWithdrawals?.map(wd => ({
         ...wd,
-        amount: wd.amount?.$numberDecimal ? parseFloat(dep.amount.$numberDecimal) : wd.amount || 0,
+        amount: wd.amount?.$numberDecimal ? parseFloat(wd.amount.$numberDecimal) : wd.amount || 0,
       })) || [],
     };
     res.json({
@@ -999,7 +987,7 @@ router.put('/user/update', authenticateToken(['user']), generalRateLimiter, vali
     console.log('[UpdateProfile] Profile updated:', { phoneNumber: user.phoneNumber, updatedFields: Object.keys(updates) });
     res.json({
       message: 'Profile updated',
-      status: 'updated', // Added to satisfy frontend validation
+      status: 'updated',
       user: {
         username: user.username,
         phoneNumber: user.phoneNumber,
@@ -1051,7 +1039,6 @@ router.delete('/user/delete', authenticateToken(['user']), generalRateLimiter, a
       return res.status(400).json({ error: 'Account already archived' });
     }
 
-    // Archive user
     user.isActive = false;
     user.isArchived = true;
     user.archivedAt = new Date();
@@ -1063,16 +1050,14 @@ router.delete('/user/delete', authenticateToken(['user']), generalRateLimiter, a
     user.twoFactorEnabled = false;
     await user.save({ session });
 
-    // Archive associated QRPin records
-    const now = new Date();
     await QRPin.updateMany(
       { username: user.username },
       {
         $set: {
           isActive: false,
-          archivedAt: now,
+          archivedAt: new Date(),
           archivedReason: 'user-archived',
-          updatedAt: now,
+          updatedAt: new Date(),
         },
       },
       { session }
@@ -1241,6 +1226,7 @@ router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin
   }
 });
 
+// Reset PIN
 router.post('/reset-pin', strictRateLimiter, async (req, res) => {
   const { identifier } = req.body;
   try {
@@ -1250,7 +1236,14 @@ router.post('/reset-pin', strictRateLimiter, async (req, res) => {
     user.resetToken = resetToken;
     user.resetTokenExpiry = Date.now() + 3600000;
     await user.save();
-    // Send email with resetToken
+    const mailOptions = {
+      from: EMAIL_USER,
+      to: user.email,
+      subject: 'Zangena PIN Reset',
+      text: `Your PIN reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena app to reset your PIN.`,
+      html: `<h2>Zangena PIN Reset</h2><p>Your PIN reset token is: <strong>${resetToken}</strong></p><p>It expires in 1 hour. Enter it in the Zangena app to reset your PIN.</p>`,
+    };
+    await transporter.sendMail(mailOptions);
     res.json({ message: 'PIN reset instructions sent' });
   } catch (error) {
     console.error('[ResetPin] Error:', error.message);
