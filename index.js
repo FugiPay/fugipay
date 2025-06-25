@@ -5,8 +5,13 @@ const compression = require('compression');
 const morgan = require('morgan');
 require('dotenv').config();
 
+const app = express(); // Initialize app first
+
 // Logging
 app.use(morgan('dev'));
+
+// Enable response compression
+app.use(compression());
 
 // Apply JSON parser only for non-multipart routes
 app.use((req, res, next) => {
@@ -16,38 +21,11 @@ app.use((req, res, next) => {
   express.json()(req, res, next);
 });
 
-// Import route files
-const userRoutes = require('./routes/userRoutes');
-const businessRoutes = require('./routes/businessRoutes');
-const adminRoutes = require('./routes/adminRoutes');
-
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error('[Global Error]', {
-    message: err.message,
-    stack: err.stack,
-    endpoint: req.originalUrl,
-    method: req.method,
-    headers: req.headers,
-  });
-  res.status(500).json({ error: 'Server error', details: err.message });
-});
-
-const app = express();
-app.use(compression()); // Enable response compression
-app.use(express.json());
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Error:', err.message, err.stack);
-  res.status(err.status || 500).json({ error: err.message || 'Server error' });
-});
-
 // CORS Configuration
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3002',
-  'http://localhost:5173', // Add this
+  'http://localhost:5173',
   'http://localhost:19006',
   'https://nzubo.net',
   'https://nzubo-admin.web.app',
@@ -62,7 +40,7 @@ const corsOptions = {
     if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.exp.direct')) {
       callback(null, true);
     } else {
-      console.log(`Blocked origin: ${origin}`);
+      console.log(`[CORS] Blocked origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -71,46 +49,64 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Health Check
-app.get('/health', (req, res) => {
-  res.send('OK');
-});
-
-// Wake Endpoint
-app.get('/wake', (req, res) => {
-  console.log('[WAKE] Server pinged');
-  res.send('Awake');
-});
+// Import route files
+const userRoutes = require('./routes/userRoutes');
+const businessRoutes = require('./routes/businessRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 
 // Routes
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
+app.get('/wake', (req, res) => {
+  console.log('[WAKE] Server pinged');
+  res.status(200).send('Awake');
+});
+
 app.use('/api/users', userRoutes); // User-related endpoints
 app.use('/api/business', businessRoutes); // Business-related endpoints
 app.use('/api/admin', adminRoutes); // Admin-related endpoints
 
+// Global error handler (consolidated)
+app.use((err, req, res, next) => {
+  console.error('[Global Error]', {
+    message: err.message,
+    stack: err.stack,
+    endpoint: req.originalUrl,
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+    file: req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size } : null,
+  });
+  res.status(err.status || 500).json({ error: err.message || 'Server error', details: err.message });
+});
+
 // MongoDB Connection
 const mongoUri = process.env.MONGODB_URI;
 if (!mongoUri) {
-  console.error('MONGODB_URI is not defined');
+  console.error('[MongoDB] MONGODB_URI is not defined');
   process.exit(1);
 }
+
 mongoose.connect(mongoUri, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-  maxPoolSize: 10, // Connection pool size
+  maxPoolSize: 10,
   minPoolSize: 2,
   serverSelectionTimeoutMS: 5000,
-}) 
-  .then(() => console.log('MongoDB connected successfully'))
+})
+  .then(() => console.log('[MongoDB] Connected successfully'))
   .catch(err => {
-    console.error('MongoDB connection error:', err);
+    console.error('[MongoDB] Connection error:', err.message, err.stack);
     process.exit(1);
   });
 
 // Start Server
 const PORT = process.env.PORT || 3002;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`[Server] Running on port ${PORT}`);
 });
 
 // Log Startup
-console.log('Server starting...');
+console.log('[Server] Starting...');
