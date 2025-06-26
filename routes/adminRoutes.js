@@ -107,9 +107,11 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (re
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    user.kycStatus = kycStatus;
-    user.isActive = kycStatus === 'verified';
-    await user.save();
+    await User.updateOne(
+      { _id: id },
+      { $set: { kycStatus, isActive: kycStatus === 'verified' } },
+      { validateBeforeSave: false }
+    );
     if (user.email) {
       await sendEmail(
         user.email,
@@ -129,7 +131,7 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, async (re
     res.json({ message: 'KYC status updated' });
   } catch (error) {
     console.error('[UpdateKYC] Error:', error.message, error.stack);
-    res.status(500).json({ error: 'Failed to update KYC status' });
+    res.status(500).json({ error: `Failed to update KYC status: ${error.message}` });
   }
 });
 
