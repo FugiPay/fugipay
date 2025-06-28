@@ -9,11 +9,13 @@ const { S3Client } = require('@aws-sdk/client-s3');
 const multerS3 = require('multer-s3');
 const nodemailer = require('nodemailer');
 const { Expo } = require('expo-server-sdk');
+const speakeasy = require('speakeasy');
 const QRPin = require('../models/QRPin');
 const QRCode = require('qrcode');
 const { Business, BusinessTransaction } = require('../models/Business');
 const User = require('../models/User');
 const AdminLedger = require('../models/AdminLedger');
+const rateLimit = require('express-rate-limit');
 
 // Environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
@@ -21,18 +23,21 @@ const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 const S3_BUCKET = process.env.S3_BUCKET || 'zangena-files';
 const EMAIL_USER = process.env.EMAIL_USER || 'your_email@example.com';
 const EMAIL_PASS = process.env.EMAIL_PASS || 'your_email_password';
-
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 
-const validator = require('validator');
-const rateLimit = require('express-rate-limit');
-
-// Rate limiter for /forgot-pin (5 requests per hour per identifier)
+// Rate limiters
 const forgotPinLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 5,
   keyGenerator: (req) => req.body.identifier || req.ip,
   message: { error: 'Too many PIN reset requests. Please try again later.' },
+});
+
+const twoFactorLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  keyGenerator: (req) => req.body.businessId || req.ip,
+  message: { error: 'Too many 2FA attempts. Please try again later.' },
 });
 
 // S3 setup
@@ -68,6 +73,44 @@ const authenticateToken = (roles = ['business', 'admin']) => (req, res, next) =>
     req.user = user;
     next();
   });
+};
+
+// Middleware: Require 2FA for sensitive operations
+const require2FA = async (req, res, next) => {
+  try {
+    const business = await Business.findOne({ businessId: req.user.businessId }).select('twoFactorEnabled twoFactorSecret ownerUsername');
+    if (business.twoFactorEnabled && !req.body.totpCode) {
+      return res.status(400).json({ error: '2FA code required', twoFactorRequired: true });
+    }
+    if (business.twoFactorEnabled) {
+      const isValid = speakeasy.totp.verify({
+        secret: business.twoFactorSecret,
+        encoding: 'base32',
+        token: req.body.totpCode,
+      });
+      if (!isValid) {
+        business.auditLogs.push({
+          action: '2fa_verify',
+          performedBy: business.ownerUsername || 'unknown',
+          details: { success: false, message: 'Invalid 2FA code' },
+          timestamp: new Date(),
+        });
+        await business.save();
+        return res.status(401).json({ error: 'Invalid 2FA code' });
+      }
+      business.auditLogs.push({
+        action: '2fa_verify',
+        performedBy: business.ownerUsername || 'unknown',
+        details: { success: true, message: '2FA verified' },
+        timestamp: new Date(),
+      });
+      await business.save();
+    }
+    next();
+  } catch (error) {
+    console.error('[Require2FA] Error:', { message: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to verify 2FA', details: error.message });
+  }
 };
 
 // Ensure indexes with error handling
@@ -128,12 +171,14 @@ Please review and approve/reject this request.
   kycApproved: (business) => `Your KYC for ${business.name} has been approved!`,
   transaction: (business, transaction) => `New transaction: ${transaction.amount} ${transaction.currency} ${transaction.type} from ${transaction.toFrom}.`,
   qrGenerated: (business) => `A new QR code has been generated for ${business.name}.`,
+  twoFactorEnabled: (business) => `Two-factor authentication has been enabled for ${business.name}. Scan the QR code in your authenticator app to set up 2FA.`,
+  accountDeactivated: (business) => `Your account ${business.name} (ID: ${business.businessId}) has been deactivated.`,
 };
 
 // Send email
-const sendEmail = async (to, subject, text) => {
+const sendEmail = async (to, subject, text, html) => {
   try {
-    await transporter.sendMail({ from: EMAIL_USER, to, subject, text });
+    await transporter.sendMail({ from: EMAIL_USER, to, subject, text, html });
     console.log(`[Email] Sent to ${to}: ${subject}`);
   } catch (error) {
     console.error(`[Email] Error: ${error.message}`);
@@ -202,16 +247,148 @@ router.post('/register', upload.fields([
   }
 });
 
+// Enable 2FA
+router.post('/enable-2fa', authenticateToken(['business']), async (req, res) => {
+  try {
+    const business = await Business.findOne({ businessId: req.user.businessId });
+    if (!business || !business.isActive) {
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (business.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA already enabled' });
+    }
+    const secret = speakeasy.generateSecret({
+      length: 20,
+      name: `Zangena Business (${business.name})`,
+      issuer: 'Zangena',
+    });
+    business.twoFactorSecret = secret.base32;
+    business.twoFactorEnabled = true;
+    business.auditLogs.push({
+      action: '2fa_enable',
+      performedBy: business.ownerUsername,
+      details: { message: '2FA enabled' },
+      timestamp: new Date(),
+    });
+    await business.save();
+    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+    if (business.email) {
+      await sendEmail(
+        business.email,
+        '2FA Enabled',
+        emailTemplates.twoFactorEnabled(business),
+        `<h2>2FA Enabled for ${business.name}</h2><p>Scan this QR code in your authenticator app (e.g., Google Authenticator) to set up 2FA:</p><img src="${qrCodeUrl}" alt="2FA QR Code">`
+      );
+    }
+    if (business.pushToken) {
+      await sendPushNotification(
+        business.pushToken,
+        '2FA Enabled',
+        'Two-factor authentication has been enabled. Set up your authenticator app.',
+        { businessId: business.businessId }
+      );
+    }
+    res.json({ qrCodeUrl, secret: secret.base32 });
+  } catch (error) {
+    console.error('[Enable2FA] Error:', { message: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to enable 2FA', details: error.message });
+  }
+});
+
+// Disable 2FA
+router.post('/disable-2fa', authenticateToken(['business']), require2FA, async (req, res) => {
+  try {
+    const business = await Business.findOne({ businessId: req.user.businessId });
+    if (!business || !business.isActive) {
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (!business.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
+    business.twoFactorSecret = null;
+    business.twoFactorEnabled = false;
+    business.auditLogs.push({
+      action: '2fa_disable',
+      performedBy: business.ownerUsername,
+      details: { message: '2FA disabled' },
+      timestamp: new Date(),
+    });
+    await business.save();
+    if (business.email) {
+      await sendEmail(
+        business.email,
+        '2FA Disabled',
+        `Two-factor authentication has been disabled for ${business.name}.`
+      );
+    }
+    if (business.pushToken) {
+      await sendPushNotification(
+        business.pushToken,
+        '2FA Disabled',
+        'Two-factor authentication has been disabled.',
+        { businessId: business.businessId }
+      );
+    }
+    res.json({ message: '2FA disabled successfully' });
+  } catch (error) {
+    console.error('[Disable2FA] Error:', { message: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to disable 2FA', details: error.message });
+  }
+});
+
+// Verify 2FA
+router.post('/verify-2fa', twoFactorLimiter, authenticateToken(['business']), async (req, res) => {
+  const { totpCode } = req.body;
+  if (!totpCode) {
+    return res.status(400).json({ error: '2FA code required' });
+  }
+  try {
+    const business = await Business.findOne({ businessId: req.user.businessId }).select('twoFactorSecret twoFactorEnabled ownerUsername');
+    if (!business || !business.isActive) {
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (!business.twoFactorEnabled || !business.twoFactorSecret) {
+      return res.status(400).json({ error: '2FA not enabled' });
+    }
+    const isValid = speakeasy.totp.verify({
+      secret: business.twoFactorSecret,
+      encoding: 'base32',
+      token: totpCode,
+    });
+    if (!isValid) {
+      business.auditLogs.push({
+        action: '2fa_verify',
+        performedBy: business.ownerUsername,
+        details: { success: false, message: 'Invalid 2FA code' },
+        timestamp: new Date(),
+      });
+      await business.save();
+      return res.status(401).json({ error: 'Invalid 2FA code' });
+    }
+    business.auditLogs.push({
+      action: '2fa_verify',
+      performedBy: business.ownerUsername,
+      details: { success: true, message: '2FA verified' },
+      timestamp: new Date(),
+    });
+    await business.save();
+    res.json({ message: '2FA verified successfully' });
+  } catch (error) {
+    console.error('[Verify2FA] Error:', { message: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to verify 2FA', details: error.message });
+  }
+});
+
 // Login
 router.post('/login', async (req, res) => {
-  const { businessId, phoneNumber, pin } = req.body;
+  const { businessId, phoneNumber, pin, totpCode } = req.body;
   try {
     console.log('[Login] Attempting login with:', { businessId, phoneNumber });
     if (!pin || (!businessId && !phoneNumber)) {
       return res.status(400).json({ error: 'Business ID or phone number and PIN are required' });
     }
     const query = businessId ? { businessId } : { phoneNumber };
-    const business = await Business.findOne(query).select('+hashedPin');
+    const business = await Business.findOne(query).select('+hashedPin +twoFactorSecret +twoFactorEnabled');
     if (!business) {
       console.log('[Login] Business not found for:', { businessId, phoneNumber });
       return res.status(404).json({ error: 'Business not found' });
@@ -221,8 +398,7 @@ router.post('/login', async (req, res) => {
       isActive: business.isActive,
       kycStatus: business.kycStatus,
       ownerUsername: business.ownerUsername,
-      auditLogsCount: business.auditLogs?.length || 0,
-      auditLogActions: business.auditLogs?.map(log => log.action) || [],
+      twoFactorEnabled: business.twoFactorEnabled,
     });
     if (!business.isActive) {
       return res.status(403).json({ error: 'Business account is not active' });
@@ -258,6 +434,32 @@ router.post('/login', async (req, res) => {
         }
       );
       return res.status(401).json({ error: 'Invalid PIN' });
+    }
+    if (business.twoFactorEnabled && !totpCode) {
+      return res.status(200).json({ twoFactorRequired: true, businessId: business.businessId });
+    }
+    if (business.twoFactorEnabled) {
+      const isValid = speakeasy.totp.verify({
+        secret: business.twoFactorSecret,
+        encoding: 'base32',
+        token: totpCode,
+      });
+      if (!isValid) {
+        business.auditLogs.push({
+          action: '2fa_verify',
+          performedBy: business.ownerUsername,
+          details: { success: false, message: 'Invalid 2FA code' },
+          timestamp: new Date(),
+        });
+        await business.save();
+        return res.status(401).json({ error: 'Invalid 2FA code' });
+      }
+      business.auditLogs.push({
+        action: '2fa_verify',
+        performedBy: business.ownerUsername,
+        details: { success: true, message: '2FA verified' },
+        timestamp: new Date(),
+      });
     }
     const token = jwt.sign(
       { businessId: business.businessId, role: 'business' },
@@ -300,6 +502,7 @@ router.post('/login', async (req, res) => {
         isActive: business.isActive,
         kycStatus: business.kycStatus,
         accountTier: business.accountTier,
+        twoFactorEnabled: business.twoFactorEnabled,
       },
     });
   } catch (error) {
@@ -382,6 +585,7 @@ router.get('/debug-dashboard', authenticateToken(['business', 'admin']), async (
         name: business.name,
         isActive: business.isActive,
         kycStatus: business.kycStatus,
+        twoFactorEnabled: business.twoFactorEnabled,
       } : null,
     });
   } catch (error) {
@@ -435,7 +639,7 @@ router.post('/deposit/manual', authenticateToken(['business']), async (req, res)
 });
 
 // Withdrawal Request
-router.post('/withdraw/request', authenticateToken(['business']), async (req, res) => {
+router.post('/withdraw/request', authenticateToken(['business']), require2FA, async (req, res) => {
   const { amount, destination, currency } = req.body;
   try {
     const business = await Business.findOne({ businessId: req.user.businessId });
@@ -452,15 +656,13 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
     if (!destination || !['bank', 'mobile_money'].includes(destination.type)) {
       return res.status(400).json({ error: 'Valid destination type required (bank or mobile_money)' });
     }
-    const withdrawalFee = Math.max(amountNum * 0.01,2);
+    const withdrawalFee = Math.max(amountNum * 0.01, 2);
     const totalDeduction = amountNum + withdrawalFee;
     if (convertDecimal128(business.balances.ZMW) < totalDeduction) {
       return res.status(400).json({ error: 'Insufficient balance to cover amount and fee' });
     }
-
     const transactionId = crypto.randomBytes(16).toString('hex');
     const withdrawal = {
-      id: transactionId,
       amount: mongoose.Types.Decimal128.fromString(amountNum.toString()),
       fee: mongoose.Types.Decimal128.fromString(withdrawalFee.toString()),
       currency: 'ZMW',
@@ -483,7 +685,6 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
       status: 'pending',
       isRead: false,
     };
-
     business.pendingWithdrawals.push(withdrawal);
     business.transactions.push(transaction);
     business.auditLogs.push({
@@ -491,7 +692,6 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
       performedBy: business.ownerUsername,
       details: { amount: amountNum, fee: withdrawalFee, destination, transactionId },
     });
-
     try {
       await business.save();
     } catch (validationError) {
@@ -504,15 +704,11 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
         details: validationError.message,
       });
     }
-
-    // Send admin email
     await sendEmail(
       ADMIN_EMAIL,
       `Withdrawal Request - ${business.businessId}`,
       emailTemplates.withdrawal(business, withdrawal, transactionId)
     );
-
-    // Notify business
     if (business.email) {
       await sendEmail(
         business.email,
@@ -528,7 +724,6 @@ router.post('/withdraw/request', authenticateToken(['business']), async (req, re
         { businessId: business.businessId, transactionId }
       );
     }
-
     res.json({ message: 'Withdrawal requested. Awaiting approval', withdrawalFee, transactionId });
   } catch (error) {
     console.error('[WithdrawRequest] Error:', {
@@ -690,7 +885,6 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
     const sentTxId = new mongoose.Types.ObjectId().toString();
     const receivedTxId = new mongoose.Types.ObjectId().toString();
     const transactionDate = new Date();
-
     await User.bulkWrite([
       {
         updateOne: {
@@ -699,7 +893,7 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
             $inc: { balance: -(paymentAmount + sendingFee) },
             $push: {
               transactions: {
-                _id: sentTexId,
+                _id: sentTxId,
                 type: 'sent',
                 amount: paymentAmount,
                 toFrom: receiverIdentifier,
@@ -712,7 +906,6 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
         },
       },
     ], { session });
-
     if (qrPin.type === 'user') {
       await User.bulkWrite([
         {
@@ -752,28 +945,26 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
                   fee: receivingFee,
                   date: transactionDate,
                   qrId,
-                  isRead: false, // Mark as unread for badge
+                  isRead: false,
                 },
-              },
-              auditLogs: {
-                action: 'transaction_received',
-                performedBy: sender.username,
-                details: { amount: paymentAmount, fee: receivingFee, qrId },
-                timestamp: new Date(),
+                auditLogs: {
+                  action: 'transaction_received',
+                  performedBy: sender.username,
+                  details: { amount: paymentAmount, fee: receivingFee, qrId },
+                  timestamp: new Date(),
+                },
               },
             },
           },
         },
       ], { session });
-
-      // Send notifications
       if (receiver.email) {
         await sendEmail(
           receiver.email,
           'New Transaction Received',
           emailTemplates.transaction({
             name: receiver.name,
-            transactions: {
+            transaction: {
               amount: paymentAmount,
               currency: 'ZMW',
               type: 'received',
@@ -791,7 +982,6 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
         );
       }
     }
-
     await AdminLedger.updateOne(
       {},
       {
@@ -811,11 +1001,9 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
       },
       { upsert: true, session }
     );
-
     if (!qrPin.persistent) {
       await QRPin.deleteOne({ qrId }, { session });
     }
-
     await session.commitTransaction();
     session.endSession();
     res.json({ message: 'Payment successful', sendingFee, receivingFee, amount: paymentAmount });
@@ -831,12 +1019,9 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
       recipientType: qrPin?.type || 'unknown',
       userRole: req.user?.role,
     });
-    const status = error.message === 'Sender not found or inactive' ||
-                   error.message === 'Invalid QR code' ||
-                   error.message === 'Receiver not found or inactive' ||
-                   error.message === 'QR code expired' ? 400 :
-                   error.message === 'Invalid PIN' || error.message === 'Unauthorized sender' ? 401 :
-                   error.message === 'Insufficient balance' ? 403 : 500;
+    const status = error.message.includes('not found') || error.message.includes('expired') ? 400 :
+                   error.message.includes('Invalid PIN') || error.message.includes('Unauthorized') ? 401 :
+                   error.message.includes('Insufficient balance') ? 403 : 500;
     res.status(status).json({
       error: status === 500 ? 'Server error processing payment' : error.message,
       details: error.message,
@@ -847,7 +1032,7 @@ router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (
 // Pay QR code (User-to-business payments)
 router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
   const { qrId, amount, senderUsername, businessId } = req.body;
-  if (!quantity || !amount || !senderUsername) {
+  if (!qrId || !amount || !senderUsername) {
     return res.status(400).json({ error: 'QR ID, amount, and sender username are required' });
   }
   const paymentAmount = parseFloat(amount);
@@ -904,7 +1089,6 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
     const sentTxId = new mongoose.Types.ObjectId().toString();
     const receivedTxId = new mongoose.Types.ObjectId().toString();
     const transactionDate = new Date();
-
     await User.bulkWrite([
       {
         updateOne: {
@@ -926,7 +1110,6 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
         },
       },
     ], { session });
-
     await Business.bulkWrite([
       {
         updateOne: {
@@ -943,7 +1126,7 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
                 fee: receivingFee,
                 date: transactionDate,
                 qrId,
-                isRead: false, // Mark as unread for badge
+                isRead: false,
               },
               auditLogs: {
                 action: 'transaction_received',
@@ -956,7 +1139,6 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
         },
       },
     ], { session });
-
     await AdminLedger.updateOne(
       {},
       {
@@ -976,8 +1158,6 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
       },
       { upsert: true, session }
     );
-
-    // Send notifications
     if (business.email) {
       await sendEmail(
         business.email,
@@ -1001,7 +1181,6 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
         { businessId: business.businessId, transactionId: receivedTxId }
       );
     }
-
     await session.commitTransaction();
     session.endSession();
     res.json({
@@ -1024,11 +1203,8 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
       userRole: req.user?.role,
       jwtUsername: req.user?.username,
     });
-    const status = error.message === 'User not found or inactive' ||
-                   error.message === 'Invalid or expired QR code' ||
-                   error.message === 'Business not found or inactive' ||
-                   error.message === 'QR code does not match provided business ID' ? 400 :
-                   error.message === 'Insufficient balance' || error.message === 'Unauthorized sender' ? 403 : 500;
+    const status = error.message.includes('not found') || error.message.includes('expired') ? 400 :
+                   error.message.includes('Unauthorized') ? 403 : 500;
     res.status(status).json({
       error: status === 500 ? 'Server error processing payment' : error.message,
       details: error.message,
@@ -1157,21 +1333,18 @@ router.get('/:businessId', validateBusinessId, authenticateToken(['business', 'a
     const startTime = Date.now();
     const business = await Business.findOne(
       { businessId: req.params.businessId },
-      { businessId: 1, name: 1, ownerUsername: 1, balances: 1, transactions: 1, isActive: 1, kycStatus: 1 }
+      { businessId: 1, name: 1, ownerUsername: 1, balances: 1, transactions: 1, isActive: 1, kycStatus: 1, twoFactorEnabled: 1 }
     );
     const queryTime = Date.now() - startTime;
     console.log(`[BusinessFetch] Query completed in ${queryTime}ms`, { businessId: req.params.businessId, found: !!business });
-
     if (!business) {
       console.log(`[BusinessFetch] Business not found: ${req.params.businessId}`);
       return res.status(404).json({ error: 'Business not found' });
     }
-
     if (req.user.role !== 'admin' && req.user.businessId !== business.businessId) {
       console.log(`[BusinessFetch] Unauthorized access by ${req.user.businessId} for ${business.businessId}`);
       return res.status(403).json({ error: 'Unauthorized' });
     }
-
     const response = {
       businessId: business.businessId,
       name: business.name,
@@ -1195,8 +1368,8 @@ router.get('/:businessId', validateBusinessId, authenticateToken(['business', 'a
       })),
       isActive: business.isActive,
       kycStatus: business.kycStatus || 'pending',
+      twoFactorEnabled: business.twoFactorEnabled,
     };
-
     console.log(`[BusinessFetch] Success: ${business.businessId}, Response time: ${Date.now() - startTime}ms`);
     res.json(response);
   } catch (error) {
@@ -1257,7 +1430,6 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Invalid Business ID or phone number' });
     }
     const phoneNumber = isPhone && identifier.startsWith('0') ? `+260${identifier.slice(1)}` : identifier;
-
     const business = await Business.findOne({
       $or: [{ businessId: identifier }, { phoneNumber }],
     });
@@ -1267,7 +1439,6 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
     if (!business.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
       return res.status(500).json({ error: 'Invalid business email configuration' });
     }
-
     const resetToken = crypto.randomBytes(20).toString('hex');
     const resetTokenExpiry = Date.now() + 3600000;
     business.resetToken = resetToken;
@@ -1276,13 +1447,11 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
       action: 'pin_reset_request',
       performedBy: business.ownerUsername,
       timestamp: new Date(),
-      ipAddress: req.ip,
       details: { identifier },
     });
     await business.save();
-
     const mailOptions = {
-      from: process.env.EMAIL_USER,
+      from: EMAIL_USER,
       to: business.email,
       subject: 'Zangena Business PIN Reset',
       text: `Your PIN reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena Business app to reset your PIN.`,
@@ -1294,7 +1463,6 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
       console.error('[ForgotPin] Email delivery failed:', emailError.message);
       return res.status(500).json({ error: 'Failed to send reset email. Please try again later.' });
     }
-
     res.json({ message: 'Reset instructions have been sent to your email.' });
   } catch (error) {
     console.error('[ForgotPin] Error:', error.message);
@@ -1302,358 +1470,79 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
   }
 });
 
-router.post('/reset-pin', async (req, res) => {
-  const { token, newPin } = req.body;
-  if (!token || !newPin) {
-    return res.status(400).json({ error: 'Token and new PIN are required' });
+// Reset PIN
+router.post('/reset-pin', authenticateToken(['business']), require2FA, async (req, res) => {
+  const { resetToken, newPin } = req.body;
+  if (!resetToken || !newPin) {
+    return res.status(400).json({ error: 'Reset token and new PIN are required' });
   }
   if (!/^\d{4}$/.test(newPin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+    return res.status(400).json({ error: 'New PIN must be a 4-digit number' });
   }
   try {
-    console.log('[ResetPin] Processing request with token:', token);
     const business = await Business.findOne({
-      resetToken: token,
+      businessId: req.user.businessId,
+      resetToken,
       resetTokenExpiry: { $gt: Date.now() },
     });
     if (!business) {
       return res.status(400).json({ error: 'Invalid or expired reset token' });
     }
-
     business.hashedPin = await bcrypt.hash(newPin, 10);
-    business.resetToken = undefined;
-    business.resetTokenExpiry = undefined;
+    business.resetToken = null;
+    business.resetTokenExpiry = null;
     business.auditLogs.push({
       action: 'pin_reset',
-      performedBy: business.ownerUsername || 'unknown', // Added fallback
+      performedBy: business.ownerUsername,
+      details: { message: 'PIN reset successfully' },
       timestamp: new Date(),
-      ipAddress: req.ip,
-      details: { message: 'PIN reset successful' },
     });
-    console.log('[ResetPin] Saving business with new PIN');
     await business.save();
-
-    try {
-      await transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: business.email,
-        subject: 'Zangena Business PIN Reset Successful',
-        text: 'Your PIN has been updated. Please sign in with your new PIN.',
-        html: '<h2>Zangena Business PIN Reset Successful</h2><p>Your PIN has been updated. Please sign in with your new PIN.</p>',
-      });
-      console.log('[ResetPin] Confirmation email sent to:', business.email);
-    } catch (emailError) {
-      console.error('[ResetPin] Email delivery failed:', emailError.message);
+    if (business.email) {
+      await sendEmail(business.email, 'PIN Reset Successful', 'Your PIN has been successfully reset.');
     }
-
-    res.json({ message: 'PIN reset successful' });
+    if (business.pushToken) {
+      await sendPushNotification(business.pushToken, 'PIN Reset', 'Your PIN has been successfully reset.', { businessId: business.businessId });
+    }
+    res.json({ message: 'PIN reset successfully' });
   } catch (error) {
-    console.error('[ResetPin] Error:', {
-      message: error.message,
-      stack: error.stack,
-      token,
-    });
-    res.status(500).json({ error: 'Server error during PIN reset' });
+    console.error('[ResetPin] Error:', error.message);
+    res.status(500).json({ error: 'Failed to reset PIN', details: error.message });
   }
 });
 
-// Store QR PIN
-router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) => {
-  const { businessId, pin } = req.body;
-  if (!businessId || !pin) {
-    return res.status(400).json({ error: 'Business ID and PIN are required' });
-  }
-  if (!/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-  }
+// Delete Account
+router.delete('/delete-account', authenticateToken(['business']), require2FA, async (req, res) => {
   try {
-    let qrId;
-    try {
-      qrId = crypto.randomBytes(16).toString('hex');
-      console.log('[StoreQRPin] Generated qrId with crypto:', qrId);
-    } catch (cryptoError) {
-      console.warn('[StoreQRPin] Crypto failed, using uuid fallback:', cryptoError.message);
-      const { v4: uuidv4 } = require('uuid');
-      qrId = uuidv4().replace(/-/g, '');
-    }
-
-    const hashedPin = await bcrypt.hash(pin, 10);
-    const session = await mongoose.startSession();
-    session.startTransaction({ writeConcern: { w: 'majority' } });
-    try {
-      const business = await Business.findOne({ businessId, isActive: true }).session(session);
-      if (!business) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(404).json({ error: 'Business not found or inactive' });
-      }
-      if (businessId !== req.user.businessId) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(403).json({ error: 'Unauthorized' });
-      }
-      await QRPin.deleteOne({ businessId, type: 'business' }, { session });
-      await new QRPin({
-        type: 'business',
-        businessId,
-        qrId,
-        pin: hashedPin,
-        createdAt: new Date(),
-        persistent: true,
-      }).save({ session });
-      await Business.updateOne(
-        { businessId },
-        {
-          $push: {
-            transactions: {
-              _id: new mongoose.Types.ObjectId().toString(),
-              type: 'pending-pin',
-              amount: mongoose.Types.Decimal128.fromString('0'),
-              currency: 'ZMW',
-              toFrom: 'Self',
-              date: new Date(),
-              status: 'completed',
-              qrId,
-              isRead: false, // Mark as unread for badge
-            },
-          },
-        },
-        { session }
-      );
-      await session.commitTransaction();
-      session.endSession();
-      res.json({ qrId });
-    } catch (error) {
-      await session.abortTransaction();
-      session.endSession();
-      throw error;
-    }
-  } catch (error) {
-    console.error('[StoreQRPin] Error:', {
-      message: error.message,
-      stack: error.stack,
-      businessId,
-      pinLength: pin?.length,
-    });
-    res.status(500).json({ error: 'Server error storing QR PIN' });
-  }
-});
-
-// Get Unread Notification Count
-router.get('/:businessId/notifications/unread', validateBusinessId, authenticateToken(['business']), async (req, res) => {
-  try {
-    const business = await Business.findOne({ businessId: req.params.businessId });
-    if (!business || !business.isActive) {
-      return res.status(404).json({ error: 'Business not found or inactive' });
-    }
-    if (req.user.businessId !== business.businessId) {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-    const unreadCount = business.transactions.filter(t => t.isRead === false).length;
-    res.json({ unreadCount });
-  } catch (error) {
-    console.error('[UnreadNotifications] Error:', error.message);
-    res.status(500).json({ error: 'Failed to fetch unread notifications', details: error.message });
-  }
-});
-
-// Mark Transactions as Read
-router.post('/:businessId/notifications/mark-read', validateBusinessId, authenticateToken(['business']), async (req, res) => {
-  try {
-    const business = await Business.findOne({ businessId: req.params.businessId });
-    if (!business || !business.isActive) {
-      return res.status(404).json({ error: 'Business not found or inactive' });
-    }
-    if (req.user.businessId !== business.businessId) {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-    await Business.updateOne(
-      { businessId: req.params.businessId },
-      { $set: { 'transactions.$[].isRead': true } }
-    );
-    res.json({ message: 'Notifications marked as read' });
-  } catch (error) {
-    console.error('[MarkRead] Error:', error.message);
-    res.status(500).json({ error: 'Failed to mark notifications as read', details: error.message });
-  }
-});
-
-
-      // Delete Account
-router.post('/delete-account', authenticateToken(['business']), async (req, res) => {
-  const { pin } = req.body;
-  const maxRetries = 3;
-
-  try {
-    if (!pin || !/^\d{4}$/.test(pin)) {
-      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-    }
-
-    if (!req.user?.businessId) {
-      return res.status(401).json({ error: 'Invalid authentication data' });
-    }
-
-    const business = await Business.findOne({ businessId: req.user.businessId }).select('+hashedPin');
+    const business = await Business.findOne({ businessId: req.user.businessId });
     if (!business || !business.isActive) {
       return res.status(404).json({ error: 'Business not found or already inactive' });
     }
-
-    const isPinValid = await bcrypt.compare(pin, business.hashedPin);
-    if (!isPinValid) {
-      business.auditLogs.push({
-        action: 'delete-account',
-        performedBy: business.ownerUsername,
-        details: { success: false, message: 'Invalid PIN' },
-        timestamp: new Date(),
-      });
-      await business.save();
-      return res.status(401).json({ error: 'Invalid PIN' });
+    if (convertDecimal128(business.balances.ZMW) > 0 || convertDecimal128(business.balances.ZMC) > 0 || convertDecimal128(business.balances.USD) > 0) {
+      return res.status(400).json({ error: 'Cannot delete account with non-zero balances' });
     }
-
-    // Store notification data
-    const { email, pushToken } = business;
-
-    let lastError;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const session = await mongoose.startSession();
-      try {
-        session.startTransaction();
-
-        // Update pending deposits and withdrawals to rejected
-        const updatedDeposits = business.pendingDeposits.filter(d => d.status === 'pending').length;
-        const updatedWithdrawals = business.pendingWithdrawals.filter(w => w.status === 'pending').length;
-        business.pendingDeposits.forEach(deposit => {
-          if (deposit.status === 'pending') {
-            deposit.status = 'rejected';
-            deposit.rejectionReason = 'Account deactivated';
-            deposit.date = new Date();
-          }
-        });
-        business.pendingWithdrawals.forEach(withdrawal => {
-          if (withdrawal.status === 'pending') {
-            withdrawal.status = 'rejected';
-            withdrawal.rejectionReason = 'Account deactivated';
-            withdrawal.date = new Date();
-          }
-        });
-
-        // Deactivate account
-        business.isActive = false;
-
-        // Update pending transactions to expired
-        const updatedTransactions = await BusinessTransaction.updateMany(
-          { businessId: business.businessId, status: 'pending' },
-          { $set: { status: 'expired', expiresAt: new Date() } },
-          { session }
-        );
-
-        // Log deactivation and updates
-        business.auditLogs.push({
-          action: 'delete-account',
-          performedBy: business.ownerUsername,
-          details: {
-            message: 'Account deactivated successfully',
-            updated: {
-              deposits: updatedDeposits,
-              withdrawals: updatedWithdrawals,
-              transactions: updatedTransactions.modifiedCount || 0,
-            },
-          },
-          timestamp: new Date(),
-        });
-
-        // Delete QRPin records
-        await QRPin.deleteMany({ businessId: business.businessId }, { session });
-        await business.save({ session });
-
-        await session.commitTransaction();
-        session.endSession();
-        lastError = null;
-        break;
-      } catch (error) {
-        await session.abortTransaction();
-        session.endSession();
-        lastError = error;
-        console.warn(`[DeactivateAccount] Retry ${attempt}/${maxRetries} failed:`, {
-          message: error.message,
-          stack: error.stack,
-          businessId: req.user.businessId,
-        });
-        if (attempt === maxRetries || !['WriteConflict', 'TransientTransactionError'].includes(error.codeName)) {
-          throw error;
-        }
-        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-      }
+    if (business.pendingDeposits.length > 0 || business.pendingWithdrawals.length > 0) {
+      return res.status(400).json({ error: 'Cannot delete account with pending transactions' });
     }
-
-    if (lastError) {
-      throw lastError;
+    business.isActive = false;
+    business.auditLogs.push({
+      action: 'delete-account',
+      performedBy: business.ownerUsername,
+      details: { message: 'Account deactivated' },
+      timestamp: new Date(),
+    });
+    await business.save();
+    if (business.email) {
+      await sendEmail(business.email, 'Account Deactivated', emailTemplates.accountDeactivated(business));
     }
-
-    // Send notifications
-    try {
-      if (email) {
-        await Promise.allSettled([
-          sendEmail(
-            email,
-            'Account Deactivation Confirmation',
-            emailTemplates.accountDeactivated(business)
-          ),
-          sendEmail(
-            ADMIN_EMAIL,
-            `Account Deactivation: ${business.businessId}`,
-            `Business ${business.name} (ID: ${business.businessId}) has deactivated their account.`
-          ),
-        ]);
-      }
-      if (pushToken) {
-        await sendPushNotification(
-          pushToken,
-          'Account Deactivated',
-          'Your Zangena account has been deactivated.',
-          { businessId: business.businessId }
-        );
-      }
-    } catch (notificationError) {
-      console.error('[DeactivateAccount] Notification Error:', {
-        message: notificationError.message,
-        stack: notificationError.stack,
-        businessId: req.user.businessId,
-      });
+    if (business.pushToken) {
+      await sendPushNotification(business.pushToken, 'Account Deactivated', 'Your account has been deactivated.', { businessId: business.businessId });
     }
-
     res.json({ message: 'Account deactivated successfully' });
   } catch (error) {
-    console.error('[DeactivateAccount] Error:', {
-      message: error.message,
-      stack: error.stack,
-      businessId: req.user.businessId || 'unknown',
-      operation: error.operation || 'delete-account',
-    });
-    if (error.name === 'ValidationError') {
-      return res.status(400).json({ error: 'Invalid data provided', details: error.message });
-    }
-    res.status(500).json({ error: 'Failed to deactivate account', details: error.message });
-  }
-});
-
-router.post('/request-kyc', async (req, res) => {
-  try {
-    const { businessId } = req.body;
-    const business = await Business.findOne({ businessId });
-    if (!business) {
-      return res.status(404).json({ error: 'Business not found' });
-    }
-    // Notify admin or update status
-    business.kycRequestStatus = 'pending';
-    await business.save();
-    // Optionally send email to admin
-    res.json({ message: 'KYC request submitted' });
-  } catch (error) {
-    console.error('[RequestKyc] Error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('[DeleteAccount] Error:', error.message);
+    res.status(500).json({ error: 'Failed to delete account', details: error.message });
   }
 });
 
 module.exports = router;
-

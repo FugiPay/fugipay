@@ -11,7 +11,7 @@ const auditLogSchema = new mongoose.Schema({
       'create', 'update', 'delete', 'kyc_update', 'balance_change', 'login',
       'pin_reset', 'pin_reset_request', 'view_dashboard', 'update_notifications', 'withdrawal_request',
       'transaction_received', 'qr_generate', 'withdrawal', 'deposit_verification',
-      'set_active', 'tier_update', 'delete-account' // Added delete-account
+      'set_active', 'tier_update', 'delete-account', '2fa_enable', '2fa_disable', '2fa_verify'
     ],
   },
   performedBy: { type: String, required: true },
@@ -107,6 +107,8 @@ const businessSchema = new mongoose.Schema({
   hashedPin: { type: String, required: true },
   resetToken: { type: String },
   resetTokenExpiry: { type: Date },
+  twoFactorSecret: { type: String }, // TOTP secret for 2FA
+  twoFactorEnabled: { type: Boolean, default: false }, // 2FA status
   balances: {
     ZMW: { type: mongoose.Schema.Types.Decimal128, default: 0 },
     ZMC: { type: mongoose.Schema.Types.Decimal128, default: 0 },
