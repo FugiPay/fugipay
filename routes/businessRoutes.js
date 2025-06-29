@@ -810,45 +810,6 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
   }
 });
 
-// POST /api/business/store-qr-pin
-router.post('/store-qr-pin', authenticateToken(['business']), async (req, res) => {
-  const { businessId, pin } = req.body;
-  try {
-    if (!pin.match(/^\d{4}$/)) {
-      return res.status(400).json({ error: 'PIN must be a 4-digit number' });
-    }
-    const business = await Business.findOne({ businessId });
-    if (!business) {
-      return res.status(404).json({ error: 'Business not found' });
-    }
-    if (business.kycStatus !== 'verified') {
-      return res.status(403).json({ error: 'KYC verification required to generate QR code' });
-    }
-    const hashedPin = await bcrypt.hash(pin, SALT_ROUNDS);
-    const qrId = `QR-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    business.qrId = qrId;
-    business.qrPin = hashedPin;
-    business.auditLogs.push({
-      action: 'qr_code_generated',
-      performedBy: req.user.username,
-      details: { qrId },
-      timestamp: new Date(),
-    });
-    await business.save();
-    if (business.email) {
-      await sendEmail(
-        business.email,
-        'QR Code Generated',
-        `A new QR code (ID: ${qrId}) has been generated for your business ${business.name}.`
-      );
-    }
-    res.json({ qrId });
-  } catch (error) {
-    console.error('[StoreQRPin] Error:', error.message);
-    res.status(500).json({ error: 'Failed to generate QR code', details: error.message });
-  }
-});
-
 // Pay QR (Handles both user-to-user and user-to-business payments)
 router.post('/pay-qr', authenticateToken(['user', 'business', 'admin']), async (req, res) => {
   const { qrId, amount, pin, senderUsername } = req.body;
