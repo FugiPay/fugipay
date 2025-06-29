@@ -1212,6 +1212,24 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
   }
 });
 
+// Get Unread Notifications Count
+router.get('/:businessId/notifications/unread', validateBusinessId, authenticateToken(['business']), async (req, res) => {
+  try {
+    const business = await Business.findOne({ businessId: req.params.businessId });
+    if (!business || !business.isActive) {
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (req.user.businessId !== business.businessId) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const unreadCount = business.transactions.filter(t => t.isRead === false).length;
+    res.json({ unreadCount });
+  } catch (error) {
+    console.error('[NotificationsUnread] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch unread notifications count' });
+  }
+});
+
 // Currency Conversion
 router.post('/currency/convert', authenticateToken(['business']), async (req, res) => {
   const { fromCurrency, toCurrency, amount } = req.body;
