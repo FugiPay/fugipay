@@ -491,9 +491,9 @@ router.post('/login', async (req, res) => {
         name: business.name,
         ownerUsername: business.ownerUsername,
         balances: {
-          ZMW: convertDecimal128(business.balances.ZMW),
-          ZMC: convertDecimal128(business.balances.ZMC),
-          USD: convertDecimal128(business.balances.USD),
+          ZMW: parseFloat(business.balances.ZMW.toString()),
+          ZMC: parseFloat(business.balances.ZMC.toString()),
+          USD: parseFloat(business.balances.USD.toString()),
         },
         isActive: business.isActive,
         kycStatus: business.kycStatus,
@@ -1247,7 +1247,7 @@ router.post('/:businessId/notifications/mark-read', validateBusinessId, authenti
       console.warn(`[NotificationsMarkRead] No transactions updated for businessId: ${req.params.businessId}`);
     }
     business.auditLogs.push({
-      action: 'notifications_marked_read',
+      action: 'update',
       performedBy: business.ownerUsername,
       details: { message: 'All transactions marked as read' },
       timestamp: new Date(),
@@ -1257,7 +1257,7 @@ router.post('/:businessId/notifications/mark-read', validateBusinessId, authenti
       await sendEmail(
         business.email,
         'Notifications Marked as Read',
-        emailTemplates.notificationsMarkedRead(business)
+        `All notifications for ${business.name} (ID: ${business.businessId}) have been marked as read.`
       );
     }
     if (business.pushToken) {
