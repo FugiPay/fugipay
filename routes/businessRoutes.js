@@ -776,6 +776,7 @@ router.post('/verify-kyc', authenticateToken(['admin']), async (req, res) => {
   }
 });
 
+
 router.post('/qr/generate', authenticateToken(['business']), async (req, res) => {
   const { pin, amount, description } = req.body;
   try {
@@ -819,7 +820,7 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
       _id: crypto.randomBytes(16).toString('hex'),
       type: 'pending-pin',
       amount: amount ? parseFloat(amount) : 0,
-      currency: amount ? 'ZMW' : 'N/A', // Use ZMW if amount is provided, else N/A
+      currency: 'ZMW', // Always use ZMW to satisfy enum constraint
       toFrom: 'Self',
       date: new Date(),
       status: 'completed',
@@ -829,7 +830,7 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
     };
     business.transactions.push(transaction);
     business.qrCode = qrCodeUrl;
-    business.qrId = qrId; // Store qrId in Business document
+    business.qrId = qrId;
     business.auditLogs.push({
       action: 'qr_generate',
       performedBy: business.ownerUsername,
