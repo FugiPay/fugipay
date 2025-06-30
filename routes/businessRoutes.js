@@ -776,7 +776,6 @@ router.post('/verify-kyc', authenticateToken(['admin']), async (req, res) => {
   }
 });
 
-// Generate QR Code
 router.post('/qr/generate', authenticateToken(['business']), async (req, res) => {
   const { pin, amount, description } = req.body;
   try {
@@ -814,7 +813,23 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
       description,
     });
     const qrCodeUrl = await QRCode.toDataURL(qrData);
+    
+    // Add transaction for QR code generation
+    const transaction = {
+      _id: crypto.randomBytes(16).toString('hex'),
+      type: 'pending-pin',
+      amount: amount ? parseFloat(amount) : 0,
+      currency: amount ? 'ZMW' : 'N/A', // Use ZMW if amount is provided, else N/A
+      toFrom: 'Self',
+      date: new Date(),
+      status: 'completed',
+      qrId,
+      isRead: false, // Mark as unread for notification
+      description: description || 'QR code generated'
+    };
+    business.transactions.push(transaction);
     business.qrCode = qrCodeUrl;
+    business.qrId = qrId; // Store qrId in Business document
     business.auditLogs.push({
       action: 'qr_generate',
       performedBy: business.ownerUsername,
@@ -822,6 +837,7 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
       timestamp: new Date(),
     });
     await business.save();
+    
     if (business.email) {
       await sendEmail(
         business.email,
