@@ -26,15 +26,15 @@ const EMAIL_PASS = process.env.EMAIL_PASS || 'your_email_password';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 
 // Rate limiters
-const forgotPinLimiter = rateLimit({
+/* const forgotPinLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 5,
   keyGenerator: (req) => req.body.identifier || req.ip,
   message: { error: 'Too many PIN reset requests. Please try again later.' },
-});
+}); */
 
 // Rate limiter for /forgot-pin endpoint
-/* const forgotPinLimiter = rateLimit({
+const forgotPinLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5, // 5 requests per IP
   message: { error: 'Too many PIN reset requests from this IP, please try again after 15 minutes' },
@@ -44,7 +44,20 @@ const forgotPinLimiter = rateLimit({
     console.warn('[ForgotPin] Rate limit exceeded for IP:', req.ip);
     res.status(options.statusCode).json(options.message);
   },
-}); */
+});
+
+// Rate limiter for /update-email endpoint
+const updateEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 requests per IP
+  message: { error: 'Too many email update requests from this IP, please try again after 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res, next, options) => {
+    console.warn('[UpdateEmail] Rate limit exceeded for IP:', req.ip);
+    res.status(options.statusCode).json(options.message);
+  },
+});
 
 const twoFactorLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
@@ -1533,7 +1546,7 @@ router.patch('/:businessId/notifications', authenticateToken(['business']), asyn
 });
 
 // Forgot PIN
-router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
+router.post('/forgot-pin', forgotPinLimiter, authenticate, async (req, res) => {
   const { businessId } = req.body;
   const ip = req.ip;
   try {
@@ -1550,6 +1563,12 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
     if (!business || !business.isActive) {
       console.log('[ForgotPin] Business not found or inactive:', { businessId, ip });
       return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+
+    // Verify business ownership
+    if (businessId !== req.businessId) {
+      console.warn('[ForgotPin] Unauthorized access attempt:', { requestedBusinessId: businessId, authenticatedBusinessId: req.businessId, ip });
+      return res.status(403).json({ error: 'Unauthorized: You can only request PIN reset for your own business' });
     }
 
     // Validate email
@@ -1615,57 +1634,183 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
   }
 });
 
-// Reset PIN (unchanged)
-router.post('/reset-pin', async (req, res) => {
+// Reset PIN
+router.post('/reset-pin', authenticate, async (req, res) => {
   const { businessId, resetToken, newPin } = req.body;
+  const ip = req.ip;
   try {
-    console.log('[ResetPin] Attempting PIN reset for:', { businessId });
+    console.log('[ResetPin] Attempting PIN reset:', { businessId, ip });
     if (!newPin || !/^\d{4}$/.test(newPin)) {
+      console.log('[ResetPin] Invalid PIN format:', { businessId, ip });
       return res.status(400).json({ error: 'New PIN must be a 4-digit number' });
     }
+
+    // Verify business ownership
+    if (businessId !== req.businessId) {
+      console.warn('[ResetPin] Unauthorized access attempt:', { requestedBusinessId: businessId, authenticatedBusinessId: req.businessId, ip });
+      return res.status(403).json({ error: 'Unauthorized: You can only reset PIN for your own business' });
+    }
+
     const business = await Business.findOne({
       businessId,
       resetPinToken: resetToken,
       resetPinExpires: { $gt: new Date() },
     }).select('+hashedPin');
     if (!business || !business.isActive) {
-      console.log('[ResetPin] Invalid token or business:', { businessId });
+      console.log('[ResetPin] Invalid token or business:', { businessId, ip });
       return res.status(400).json({ error: 'Invalid or expired reset token' });
     }
     business.hashedPin = newPin; // Will be hashed by pre('save') middleware
     business.resetPinToken = null;
     business.resetPinExpires = null;
     business.auditLogs.push({
-      action: 'reset_pin',
-      performedBy: business.ownerUsername,
+      action: 'pin_reset',
+      performedBy: business.ownerUsername || 'unknown',
       details: { success: true, message: 'PIN reset successfully' },
       timestamp: new Date(),
     });
     await business.save();
     if (business.email) {
-      await sendEmail(
-        business.email,
-        'PIN Reset Successful',
-        `Your PIN for ${business.name} (ID: ${business.businessId}) has been reset successfully.`
-      );
+      try {
+        await sendEmail(
+          business.email,
+          'PIN Reset Successful',
+          `Your PIN for ${business.name} (ID: ${business.businessId}) has been reset successfully.`
+        );
+        console.log('[ResetPin] Confirmation email sent:', { businessId, email: business.email, ip });
+      } catch (emailError) {
+        console.warn('[ResetPin] Failed to send confirmation email:', {
+          message: emailError.message,
+          stack: emailError.stack,
+          businessId,
+          ip,
+        });
+        // Don't fail the request if email fails
+      }
     }
-    if (business.pushToken) {
-      await sendPushNotification(
-        business.pushToken,
-        'PIN Reset Successful',
-        `Your PIN for ${business.name} has been reset.`,
-        { businessId: business.businessId }
-      );
-    }
-    console.log('[ResetPin] Success:', { businessId });
+    console.log('[ResetPin] Success:', { businessId, ip });
     res.json({ message: 'PIN reset successful' });
   } catch (error) {
     console.error('[ResetPin] Error:', {
       message: error.message,
       stack: error.stack,
       businessId,
+      ip,
     });
     res.status(500).json({ error: 'Failed to reset PIN', details: error.message });
+  }
+});
+
+// Update Email
+router.post('/update-email', updateEmailLimiter, authenticate, async (req, res) => {
+  const { businessId, newEmail } = req.body;
+  const ip = req.ip;
+  try {
+    console.log('[UpdateEmail] Request received:', { businessId, newEmail, ip });
+
+    // Verify MongoDB connection
+    if (mongoose.connection.readyState !== 1) {
+      console.error('[UpdateEmail] MongoDB not connected:', { readyState: mongoose.connection.readyState, businessId, ip });
+      return res.status(500).json({ error: 'Database connection error' });
+    }
+
+    // Validate input
+    if (!businessId || !newEmail) {
+      console.log('[UpdateEmail] Missing required fields:', { businessId, newEmail, ip });
+      return res.status(400).json({ error: 'Business ID and new email are required' });
+    }
+
+    // Verify business ownership
+    if (businessId !== req.businessId) {
+      console.warn('[UpdateEmail] Unauthorized access attempt:', { requestedBusinessId: businessId, authenticatedBusinessId: req.businessId, ip });
+      return res.status(403).json({ error: 'Unauthorized: You can only update email for your own business' });
+    }
+
+    // Validate new email format
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+      console.log('[UpdateEmail] Invalid email format:', { businessId, newEmail, ip });
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+
+    // Find business
+    const business = await Business.findOne({ businessId });
+    if (!business || !business.isActive) {
+      console.log('[UpdateEmail] Business not found or inactive:', { businessId, ip });
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+
+    // Check if new email is already in use
+    const existingBusiness = await Business.findOne({ email: newEmail.toLowerCase() });
+    if (existingBusiness && existingBusiness.businessId !== businessId) {
+      console.log('[UpdateEmail] Email already in use:', { businessId, newEmail, ip });
+      return res.status(409).json({ error: 'Email address is already in use by another business' });
+    }
+
+    // Store old email for notification
+    const oldEmail = business.email;
+
+    // Update email
+    business.email = newEmail.toLowerCase();
+    business.auditLogs.push({
+      action: 'update',
+      performedBy: business.ownerUsername || 'unknown',
+      details: { success: true, message: 'Email updated', oldEmail, newEmail },
+      timestamp: new Date(),
+    });
+
+    // Save business document
+    try {
+      await business.save();
+      console.log('[UpdateEmail] Business document updated:', { businessId, newEmail, ip });
+    } catch (dbError) {
+      console.error('[UpdateEmail] Database save error:', {
+        message: dbError.message,
+        stack: dbError.stack,
+        businessId,
+        newEmail,
+        ip,
+      });
+      return res.status(500).json({ error: 'Failed to update email', details: dbError.message });
+    }
+
+    // Send confirmation emails
+    try {
+      await sendEmail(
+        newEmail,
+        'Email Address Updated',
+        `Your email address for ${business.name} (ID: ${business.businessId}) has been updated to ${newEmail}.`
+      );
+      console.log('[UpdateEmail] Confirmation email sent to new email:', { businessId, newEmail, ip });
+      if (oldEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(oldEmail) && oldEmail !== newEmail) {
+        await sendEmail(
+          oldEmail,
+          'Email Address Changed',
+          `The email address for ${business.name} (ID: ${business.businessId}) has been changed to ${newEmail}. If you did not make this change, please contact support immediately.`
+        );
+        console.log('[UpdateEmail] Notification email sent to old email:', { businessId, oldEmail, ip });
+      }
+    } catch (emailError) {
+      console.warn('[UpdateEmail] Failed to send confirmation emails:', {
+        message: emailError.message,
+        stack: emailError.stack,
+        businessId,
+        newEmail,
+        ip,
+      });
+      // Don't fail the request if email fails, but log the issue
+    }
+
+    console.log('[UpdateEmail] Success:', { businessId, newEmail, ip });
+    res.json({ message: 'Email updated successfully' });
+  } catch (error) {
+    console.error('[UpdateEmail] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId,
+      newEmail,
+      ip,
+    });
+    res.status(500).json({ error: 'Failed to update email', details: error.message });
   }
 });
 
