@@ -98,15 +98,16 @@ const businessSchema = new mongoose.Schema({
   },
   email: {
     type: String,
-    required: true, // Changed to required to ensure email is always present
+    required: true,
     unique: true,
     match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email address'],
     lowercase: true,
     trim: true,
+    index: { unique: true }, // Explicitly define unique index without sparse
   },
   hashedPin: { type: String, required: true, select: false },
-  resetPinToken: { type: String, select: false }, // Renamed from resetToken
-  resetPinExpires: { type: Date, select: false }, // Renamed from resetTokenExpiry
+  resetPinToken: { type: String, select: false },
+  resetPinExpires: { type: Date, select: false },
   twoFactorSecret: { type: String, select: false },
   twoFactorEnabled: { type: Boolean, default: false },
   balances: {
@@ -161,12 +162,13 @@ const businessSchema = new mongoose.Schema({
 businessSchema.index({ 'transactions.date': -1 });
 businessSchema.index({ 'auditLogs.timestamp': -1 });
 businessSchema.index({ kycStatus: 1 });
-businessSchema.index({ resetPinExpires: 1 }, { expireAfterSeconds: 900, background: true }); // TTL index for reset tokens
+businessSchema.index({ resetPinExpires: 1 }, { expireAfterSeconds: 900, background: true });
 
 // Middleware: Hash PIN
 businessSchema.pre('save', async function (next) {
   if (this.isModified('hashedPin') && this.hashedPin && !this.hashedPin.startsWith('$2')) {
     if (!/^\d{4}$/.test(this.hashedPin)) {
+      console.error('[BusinessSchema] Invalid PIN format:', { businessId: this.businessId });
       return next(new Error('PIN must be a 4-digit number'));
     }
     this.hashedPin = await bcrypt.hash(this.hashedPin, 10);
@@ -175,6 +177,7 @@ businessSchema.pre('save', async function (next) {
       performedBy: this.ownerUsername || 'system',
       details: { message: 'PIN updated' },
     });
+    console.log('[BusinessSchema] PIN hashed and audit log added:', { businessId: this.businessId });
   }
   next();
 });
@@ -194,6 +197,7 @@ businessSchema.pre('save', function (next) {
         },
       },
     });
+    console.log('[BusinessSchema] Balance change logged:', { businessId: this.businessId });
     this._previousBalances = { ...this.balances };
   }
   next();
@@ -206,6 +210,11 @@ businessSchema.pre('save', async function (next) {
     if (newTransaction && ['received', 'deposited', 'withdrawn'].includes(newTransaction.type)) {
       const amount = parseFloat(newTransaction.amount.toString());
       if (amount > this.transactionLimits.maxPerTransaction) {
+        console.error('[BusinessSchema] Transaction exceeds max limit:', {
+          businessId: this.businessId,
+          amount,
+          maxPerTransaction: this.transactionLimits.maxPerTransaction,
+        });
         return next(new Error(`Transaction amount exceeds max limit of ${this.transactionLimits.maxPerTransaction} ZMW`));
       }
       const startOfDay = new Date();
@@ -214,6 +223,12 @@ businessSchema.pre('save', async function (next) {
         .filter(t => t.date >= startOfDay && ['received', 'deposited', 'withdrawn'].includes(t.type))
         .reduce((sum, t) => sum + parseFloat(t.amount.toString()), 0);
       if (dailyTotal + amount > this.transactionLimits.daily) {
+        console.error('[BusinessSchema] Transaction exceeds daily limit:', {
+          businessId: this.businessId,
+          dailyTotal,
+          amount,
+          dailyLimit: this.transactionLimits.daily,
+        });
         return next(new Error(`Transaction exceeds daily limit of ${this.transactionLimits.daily} ZMW`));
       }
     }
@@ -232,7 +247,7 @@ const businessTransactionSchema = new mongoose.Schema({
   qrCodeUrl: { type: String },
   description: { type: String, maxlength: 200 },
   fromUsername: { type: String },
-  expiresAt: { type: Date, index: { expireAfterSeconds: 900, background: true } }, // TTL index for transaction expiry
+  expiresAt: { type: Date, index: { expireAfterSeconds: 900, background: true } },
   createdAt: { type: Date, default: Date.now },
   refundedAmount: { type: mongoose.Schema.Types.Decimal128, default: 0 },
 });

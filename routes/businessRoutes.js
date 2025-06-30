@@ -1534,40 +1534,81 @@ router.patch('/:businessId/notifications', authenticateToken(['business']), asyn
 // Forgot PIN
 router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
   const { businessId } = req.body;
+  const ip = req.ip;
   try {
-    console.log('[ForgotPin] Request for:', { businessId });
+    console.log('[ForgotPin] Request received:', { businessId, ip });
+
+    // Verify MongoDB connection
+    if (mongoose.connection.readyState !== 1) {
+      console.error('[ForgotPin] MongoDB not connected:', { readyState: mongoose.connection.readyState, businessId, ip });
+      return res.status(500).json({ error: 'Database connection error' });
+    }
+
+    // Find business
     const business = await Business.findOne({ businessId });
     if (!business || !business.isActive) {
-      console.log('[ForgotPin] Business not found or inactive:', { businessId });
+      console.log('[ForgotPin] Business not found or inactive:', { businessId, ip });
       return res.status(404).json({ error: 'Business not found or inactive' });
     }
-    if (!business.email) {
-      console.log('[ForgotPin] No email configured for business:', { businessId });
-      return res.status(400).json({ error: 'No email address configured for this business' });
+
+    // Validate email
+    if (!business.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(business.email)) {
+      console.log('[ForgotPin] Invalid or missing email:', { businessId, email: business.email, ip });
+      return res.status(400).json({ error: 'No valid email address configured for this business' });
     }
+
+    // Generate reset token
     const resetToken = crypto.randomBytes(32).toString('hex');
     const resetTokenExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
     business.resetPinToken = resetToken;
     business.resetPinExpires = resetTokenExpires;
     business.auditLogs.push({
-      action: 'forgot_pin',
-      performedBy: business.ownerUsername,
+      action: 'pin_reset_request',
+      performedBy: business.ownerUsername || 'unknown',
       details: { success: true, message: 'PIN reset token generated' },
       timestamp: new Date(),
     });
-    await business.save();
-    await sendEmail(
-      business.email,
-      'PIN Reset Request',
-      `Use this token to reset your PIN: ${resetToken}\nThis token expires at ${resetTokenExpires.toLocaleString()}.`
-    );
-    console.log('[ForgotPin] Success:', { businessId });
+
+    // Save business document
+    try {
+      await business.save();
+      console.log('[ForgotPin] Business document updated:', { businessId, ip });
+    } catch (dbError) {
+      console.error('[ForgotPin] Database save error:', {
+        message: dbError.message,
+        stack: dbError.stack,
+        businessId,
+        ip,
+      });
+      return res.status(500).json({ error: 'Failed to save reset token', details: dbError.message });
+    }
+
+    // Send email
+    try {
+      await sendEmail(
+        business.email,
+        'PIN Reset Request',
+        `Use this token to reset your PIN: ${resetToken}\nThis token expires at ${resetTokenExpires.toLocaleString()}.`
+      );
+      console.log('[ForgotPin] Email sent successfully:', { businessId, email: business.email, ip });
+    } catch (emailError) {
+      console.error('[ForgotPin] Email sending error:', {
+        message: emailError.message,
+        stack: emailError.stack,
+        businessId,
+        ip,
+      });
+      return res.status(500).json({ error: 'Failed to send reset email', details: emailError.message });
+    }
+
+    console.log('[ForgotPin] Success:', { businessId, ip });
     res.json({ message: 'PIN reset token sent to your email' });
   } catch (error) {
     console.error('[ForgotPin] Error:', {
       message: error.message,
       stack: error.stack,
       businessId,
+      ip,
     });
     res.status(500).json({ error: 'Failed to request PIN reset', details: error.message });
   }
