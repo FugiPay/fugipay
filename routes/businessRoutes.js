@@ -140,24 +140,6 @@ const require2FA = async (req, res, next) => {
   }
 };
 
-// Ensure indexes with error handling
-const ensureIndexes = async () => {
-  try {
-    await Business.createIndexes({ businessId: 1, email: 1 });
-    await QRPin.createIndexes({ qrId: 1, businessId: 1 });
-    await User.createIndexes({ username: 1 });
-    console.log('[Indexes] Successfully ensured indexes for Business, QRPin, and User');
-  } catch (error) {
-    console.error('[Indexes] Error creating indexes:', {
-      message: error.message,
-      code: error.code,
-      codeName: error.codeName,
-    });
-    if (error.code !== 85) throw error; // Ignore IndexOptionsConflict
-  }
-};
-ensureIndexes();
-
 // Middleware: Validate businessId
 const validateBusinessId = (req, res, next) => {
   const { businessId } = req.params;
