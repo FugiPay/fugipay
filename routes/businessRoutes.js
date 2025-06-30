@@ -1546,7 +1546,7 @@ router.patch('/:businessId/notifications', authenticateToken(['business']), asyn
 });
 
 // Forgot PIN
-router.post('/forgot-pin', forgotPinLimiter, authenticate, async (req, res) => {
+router.post('/forgot-pin', forgotPinLimiter, authenticateToken(['business']), async (req, res) => {
   const { businessId } = req.body;
   const ip = req.ip;
   try {
@@ -1566,8 +1566,8 @@ router.post('/forgot-pin', forgotPinLimiter, authenticate, async (req, res) => {
     }
 
     // Verify business ownership
-    if (businessId !== req.businessId) {
-      console.warn('[ForgotPin] Unauthorized access attempt:', { requestedBusinessId: businessId, authenticatedBusinessId: req.businessId, ip });
+    if (businessId !== req.user.businessId) {
+      console.warn('[ForgotPin] Unauthorized access attempt:', { requestedBusinessId: businessId, authenticatedBusinessId: req.user.businessId, ip });
       return res.status(403).json({ error: 'Unauthorized: You can only request PIN reset for your own business' });
     }
 
@@ -1635,7 +1635,7 @@ router.post('/forgot-pin', forgotPinLimiter, authenticate, async (req, res) => {
 });
 
 // Reset PIN
-router.post('/reset-pin', authenticate, async (req, res) => {
+router.post('/reset-pin', authenticateToken(['business']), async (req, res) => {
   const { businessId, resetToken, newPin } = req.body;
   const ip = req.ip;
   try {
@@ -1646,8 +1646,8 @@ router.post('/reset-pin', authenticate, async (req, res) => {
     }
 
     // Verify business ownership
-    if (businessId !== req.businessId) {
-      console.warn('[ResetPin] Unauthorized access attempt:', { requestedBusinessId: businessId, authenticatedBusinessId: req.businessId, ip });
+    if (businessId !== req.user.businessId) {
+      console.warn('[ResetPin] Unauthorized access attempt:', { requestedBusinessId: businessId, authenticatedBusinessId: req.user.businessId, ip });
       return res.status(403).json({ error: 'Unauthorized: You can only reset PIN for your own business' });
     }
 
@@ -1702,7 +1702,7 @@ router.post('/reset-pin', authenticate, async (req, res) => {
 });
 
 // Update Email
-router.post('/update-email', updateEmailLimiter, authenticate, async (req, res) => {
+router.post('/update-email', updateEmailLimiter, authenticateToken(['business']), async (req, res) => {
   const { businessId, newEmail } = req.body;
   const ip = req.ip;
   try {
@@ -1721,8 +1721,8 @@ router.post('/update-email', updateEmailLimiter, authenticate, async (req, res) 
     }
 
     // Verify business ownership
-    if (businessId !== req.businessId) {
-      console.warn('[UpdateEmail] Unauthorized access attempt:', { requestedBusinessId: businessId, authenticatedBusinessId: req.businessId, ip });
+    if (businessId !== req.user.businessId) {
+      console.warn('[UpdateEmail] Unauthorized access attempt:', { requestedBusinessId: businessId, authenticatedBusinessId: req.user.businessId, ip });
       return res.status(403).json({ error: 'Unauthorized: You can only update email for your own business' });
     }
 
@@ -1797,7 +1797,7 @@ router.post('/update-email', updateEmailLimiter, authenticate, async (req, res) 
         newEmail,
         ip,
       });
-      // Don't fail the request if email fails, but log the issue
+      // Don't fail the request if email fails
     }
 
     console.log('[UpdateEmail] Success:', { businessId, newEmail, ip });
