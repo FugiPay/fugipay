@@ -769,40 +769,74 @@ router.post('/verify-kyc', authenticateToken(['admin']), async (req, res) => {
 
 // Generate QR Code
 router.post('/qr/generate', authenticateToken(['business']), async (req, res) => {
-  const { amount, description } = req.body;
+  const { pin, amount, description } = req.body;
   try {
-    const business = await Business.findOne({ businessId: req.user.businessId });
+    console.log('[QRGenerate] Generating QR code for:', { businessId: req.user.businessId, amount, description });
+    if (!pin || !/^\d{4}$/.test(pin)) {
+      return res.status(400).json({ error: 'A valid 4-digit PIN is required' });
+    }
+    const business = await Business.findOne({ businessId: req.user.businessId }).select('+hashedPin');
     if (!business || !business.isActive) {
+      console.log('[QRGenerate] Business not found or inactive:', req.user.businessId);
       return res.status(403).json({ error: 'Business not found or inactive' });
     }
-    const qrPin = await QRPin.findOne({ businessId: req.user.businessId, type: 'business' });
-    if (!qrPin) {
-      return res.status(400).json({ error: 'No QR PIN set for this business. Please set one first.' });
+    if (!business.hashedPin) {
+      console.error('[QRGenerate] Missing hashedPin for business:', business.businessId);
+      return res.status(500).json({ error: 'Invalid business account configuration' });
     }
+    const isPinValid = await bcrypt.compare(pin, business.hashedPin);
+    if (!isPinValid) {
+      console.log('[QRGenerate] Invalid PIN for business:', business.businessId);
+      business.auditLogs.push({
+        action: 'qr_generate',
+        performedBy: business.ownerUsername,
+        details: { success: false, message: 'Invalid PIN', amount, description },
+        timestamp: new Date(),
+      });
+      await business.save();
+      return res.status(401).json({ error: 'Invalid PIN' });
+    }
+    const qrId = crypto.randomBytes(16).toString('hex');
     const qrData = JSON.stringify({
       type: 'business_payment',
       businessId: business.businessId,
-      qrId: qrPin.qrId,
+      qrId,
       amount: amount ? parseFloat(amount) : undefined,
       description,
     });
     const qrCodeUrl = await QRCode.toDataURL(qrData);
+    business.qrCode = qrCodeUrl;
     business.auditLogs.push({
       action: 'qr_generate',
       performedBy: business.ownerUsername,
-      details: { amount, description, qrId: qrPin.qrId },
+      details: { success: true, qrId, amount, description },
+      timestamp: new Date(),
     });
     await business.save();
     if (business.email) {
-      await sendEmail(business.email, 'QR Code Generated', emailTemplates.qrGenerated(business));
+      await sendEmail(
+        business.email,
+        'QR Code Generated',
+        `A new QR code has been generated for ${business.name} (ID: ${business.businessId}).`
+      );
     }
     if (business.pushToken) {
-      await sendPushNotification(business.pushToken, 'QR Code Generated', `A new QR code has been generated for ${business.name}.`, { businessId: business.businessId });
+      await sendPushNotification(
+        business.pushToken,
+        'QR Code Generated',
+        `A new QR code has been generated for ${business.name}.`,
+        { businessId: business.businessId }
+      );
     }
-    res.json({ qrId: qrPin.qrId, qrCodeUrl, amount, description });
+    console.log('[QRGenerate] Success:', { qrId, businessId: business.businessId });
+    res.json({ qrId, qrCodeUrl, amount, description });
   } catch (error) {
-    console.error('[QRGenerate] Error:', error.message);
-    res.status(500).json({ error: 'Failed to generate QR code' });
+    console.error('[QRGenerate] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId: req.user.businessId,
+    });
+    res.status(500).json({ error: 'Failed to generate QR code', details: error.message });
   }
 });
 
