@@ -26,15 +26,15 @@ const EMAIL_PASS = process.env.EMAIL_PASS || 'your_email_password';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 
 // Rate limiters
-/* const forgotPinLimiter = rateLimit({
+const forgotPinLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 5,
   keyGenerator: (req) => req.body.identifier || req.ip,
   message: { error: 'Too many PIN reset requests. Please try again later.' },
-}); */
+});
 
 // Rate limiter for /forgot-pin endpoint
-const forgotPinLimiter = rateLimit({
+/* const forgotPinLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5, // 5 requests per IP
   message: { error: 'Too many PIN reset requests from this IP, please try again after 15 minutes' },
@@ -44,7 +44,8 @@ const forgotPinLimiter = rateLimit({
     console.warn('[ForgotPin] Rate limit exceeded for IP:', req.ip);
     res.status(options.statusCode).json(options.message);
   },
-});
+}); */
+
 const twoFactorLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 10,
