@@ -173,6 +173,7 @@ Please review and approve/reject this request.
   qrGenerated: (business) => `A new QR code has been generated for ${business.name}.`,
   twoFactorEnabled: (business) => `Two-factor authentication has been enabled for ${business.name}. Scan the QR code in your authenticator app to set up 2FA.`,
   accountDeactivated: (business) => `Your account ${business.name} (ID: ${business.businessId}) has been deactivated.`,
+  notificationsMarkedRead: (business) => `All notifications for ${business.name} (ID: ${business.businessId}) have been marked as read.`,
 };
 
 // Send email
@@ -407,17 +408,12 @@ router.post('/login', async (req, res) => {
       console.error('[Login] Missing hashedPin for business:', business.businessId);
       return res.status(500).json({ error: 'Invalid business account configuration' });
     }
-    let isPinValid = false;
-    if (business.hashedPin.length === 4 && /^\d{4}$/.test(business.hashedPin)) {
-      console.warn('[Login] Detected plain text PIN for business:', business.businessId);
-      isPinValid = pin === business.hashedPin;
-      if (isPinValid) {
-        business.hashedPin = await bcrypt.hash(pin, 10);
-        await Business.updateOne({ _id: business._id }, { $set: { hashedPin: business.hashedPin } });
-      }
-    } else {
-      isPinValid = await bcrypt.compare(pin, business.hashedPin);
+    // Reject plaintext PINs
+    if (business.hashedPin.length <= 4 || /^\d{4}$/.test(business.hashedPin)) {
+      console.error('[Login] Detected invalid PIN format for business:', business.businessId);
+      return res.status(500).json({ error: 'Invalid PIN configuration. Please reset your PIN.' });
     }
+    const isPinValid = await bcrypt.compare(pin, business.hashedPin);
     if (!isPinValid) {
       console.log('[Login] Invalid PIN for business:', business.businessId);
       await Business.updateOne(
@@ -1227,6 +1223,60 @@ router.get('/:businessId/notifications/unread', validateBusinessId, authenticate
   } catch (error) {
     console.error('[NotificationsUnread] Error:', error.message);
     res.status(500).json({ error: 'Failed to fetch unread notifications count' });
+  }
+});
+
+// Mark Notifications as Read
+router.post('/:businessId/notifications/mark-read', validateBusinessId, authenticateToken(['business']), async (req, res) => {
+  try {
+    console.log(`[NotificationsMarkRead] Marking notifications as read for businessId: ${req.params.businessId}`);
+    const business = await Business.findOne({ businessId: req.params.businessId });
+    if (!business || !business.isActive) {
+      console.log(`[NotificationsMarkRead] Business not found or inactive: ${req.params.businessId}`);
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (req.user.businessId !== business.businessId) {
+      console.log(`[NotificationsMarkRead] Unauthorized access by ${req.user.businessId} for ${business.businessId}`);
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const updateResult = await Business.updateOne(
+      { businessId: req.params.businessId },
+      { $set: { 'transactions.$[].isRead': true } }
+    );
+    if (updateResult.modifiedCount === 0) {
+      console.warn(`[NotificationsMarkRead] No transactions updated for businessId: ${req.params.businessId}`);
+    }
+    business.auditLogs.push({
+      action: 'notifications_marked_read',
+      performedBy: business.ownerUsername,
+      details: { message: 'All transactions marked as read' },
+      timestamp: new Date(),
+    });
+    await business.save();
+    if (business.email) {
+      await sendEmail(
+        business.email,
+        'Notifications Marked as Read',
+        emailTemplates.notificationsMarkedRead(business)
+      );
+    }
+    if (business.pushToken) {
+      await sendPushNotification(
+        business.pushToken,
+        'Notifications Marked as Read',
+        'All your transactions have been marked as read.',
+        { businessId: business.businessId }
+      );
+    }
+    console.log(`[NotificationsMarkRead] Success: ${req.params.businessId}`);
+    res.json({ message: 'All notifications marked as read' });
+  } catch (error) {
+    console.error('[NotificationsMarkRead] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId: req.params.businessId,
+    });
+    res.status(500).json({ error: 'Failed to mark notifications as read', details: error.message });
   }
 });
 
