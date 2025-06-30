@@ -1521,13 +1521,17 @@ router.patch('/:businessId/notifications', authenticateToken(['business']), asyn
 
 // Forgot PIN
 router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
-  const { businessId, email } = req.body;
+  const { businessId } = req.body;
   try {
-    console.log('[ForgotPin] Request for:', { businessId, email });
-    const business = await Business.findOne({ businessId, email });
+    console.log('[ForgotPin] Request for:', { businessId });
+    const business = await Business.findOne({ businessId });
     if (!business || !business.isActive) {
-      console.log('[ForgotPin] Business not found or inactive:', { businessId, email });
-      return res.status(404).json({ error: 'Business not found or email does not match' });
+      console.log('[ForgotPin] Business not found or inactive:', { businessId });
+      return res.status(404).json({ error: 'Business not found or inactive' });
+    }
+    if (!business.email) {
+      console.log('[ForgotPin] No email configured for business:', { businessId });
+      return res.status(400).json({ error: 'No email address configured for this business' });
     }
     const resetToken = crypto.randomBytes(32).toString('hex');
     const resetTokenExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
@@ -1557,7 +1561,7 @@ router.post('/forgot-pin', forgotPinLimiter, async (req, res) => {
   }
 });
 
-// Reset PIN
+// Reset PIN (unchanged)
 router.post('/reset-pin', async (req, res) => {
   const { businessId, resetToken, newPin } = req.body;
   try {
