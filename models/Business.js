@@ -15,7 +15,7 @@ const auditLogSchema = new mongoose.Schema({
     ],
   },
   performedBy: { type: String, required: true },
-  timestamp: { type: Date, default: Date.now, index: true },
+  timestamp: { type: Date, default: Date.now },
   details: { type: mongoose.Schema.Types.Mixed },
 });
 
@@ -39,7 +39,7 @@ const transactionSchema = new mongoose.Schema({
   exchangeRate: { type: Number },
   reason: { type: String, maxlength: 200 },
   trustRating: { type: Number, min: 1, max: 5 },
-  date: { type: Date, default: Date.now, index: true },
+  date: { type: Date, default: Date.now },
   status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'completed' },
   qrId: { type: String },
   isRead: { type: Boolean, default: true },
@@ -98,17 +98,17 @@ const businessSchema = new mongoose.Schema({
   },
   email: {
     type: String,
+    required: true, // Changed to required to ensure email is always present
     unique: true,
-    sparse: true,
     match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email address'],
     lowercase: true,
     trim: true,
   },
-  hashedPin: { type: String, required: true },
-  resetToken: { type: String },
-  resetTokenExpiry: { type: Date },
-  twoFactorSecret: { type: String }, // TOTP secret for 2FA
-  twoFactorEnabled: { type: Boolean, default: false }, // 2FA status
+  hashedPin: { type: String, required: true, select: false },
+  resetPinToken: { type: String, select: false }, // Renamed from resetToken
+  resetPinExpires: { type: Date, select: false }, // Renamed from resetTokenExpiry
+  twoFactorSecret: { type: String, select: false },
+  twoFactorEnabled: { type: Boolean, default: false },
   balances: {
     ZMW: { type: mongoose.Schema.Types.Decimal128, default: 0 },
     ZMC: { type: mongoose.Schema.Types.Decimal128, default: 0 },
@@ -161,6 +161,7 @@ const businessSchema = new mongoose.Schema({
 businessSchema.index({ 'transactions.date': -1 });
 businessSchema.index({ 'auditLogs.timestamp': -1 });
 businessSchema.index({ kycStatus: 1 });
+businessSchema.index({ resetPinExpires: 1 }, { expireAfterSeconds: 900, background: true }); // TTL index for reset tokens
 
 // Middleware: Hash PIN
 businessSchema.pre('save', async function (next) {
@@ -231,8 +232,8 @@ const businessTransactionSchema = new mongoose.Schema({
   qrCodeUrl: { type: String },
   description: { type: String, maxlength: 200 },
   fromUsername: { type: String },
-  expiresAt: { type: Date },
-  createdAt: { type: Date, default: Date.now, index: true },
+  expiresAt: { type: Date, index: { expireAfterSeconds: 900, background: true } }, // TTL index for transaction expiry
+  createdAt: { type: Date, default: Date.now },
   refundedAmount: { type: mongoose.Schema.Types.Decimal128, default: 0 },
 });
 
