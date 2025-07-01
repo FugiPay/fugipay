@@ -9,13 +9,17 @@ const qrPinSchema = new mongoose.Schema({
   },
   username: {
     type: String,
-    required: function() { return this.type === 'user'; },
+    required: function () {
+      return this.type === 'user';
+    },
     ref: 'User',
     index: true,
   },
   businessId: {
     type: String,
-    required: function() { return this.type === 'business'; },
+    required: function () {
+      return this.type === 'business';
+    },
     ref: 'Business',
     index: true,
   },
@@ -26,7 +30,9 @@ const qrPinSchema = new mongoose.Schema({
   },
   pin: {
     type: String,
-    required: function() { return this.type === 'user'; }, // PIN required only for user type
+    required: function () {
+      return this.type === 'user';
+    },
   },
   createdAt: {
     type: Date,
@@ -39,7 +45,9 @@ const qrPinSchema = new mongoose.Schema({
   },
   persistent: {
     type: Boolean,
-    default: function() { return this.type === 'business'; }, // Persistent by default for business
+    default: function () {
+      return this.type === 'business';
+    },
   },
   isActive: {
     type: Boolean,
@@ -53,7 +61,7 @@ const qrPinSchema = new mongoose.Schema({
     type: String,
   },
 }, {
-  timestamps: false,
+  timestamps: false, // Disable automatic timestamps to manage updatedAt manually
 });
 
 // Define indexes
@@ -64,7 +72,7 @@ qrPinSchema.index({ isActive: 1 });
 qrPinSchema.index({ createdAt: 1 });
 
 // Pre-save hook to hash PIN (if provided), ensure persistent business QR pins, and update timestamps
-qrPinSchema.pre('save', async function(next) {
+qrPinSchema.pre('save', async function (next) {
   if (this.isModified('pin') && this.pin && !this.pin.startsWith('$2')) {
     if (!/^\d{4}$/.test(this.pin)) {
       return next(new Error('PIN must be a 4-digit number'));
@@ -79,13 +87,13 @@ qrPinSchema.pre('save', async function(next) {
 });
 
 // Method to compare PIN
-qrPinSchema.methods.comparePin = async function(candidatePin) {
+qrPinSchema.methods.comparePin = async function (candidatePin) {
   if (!this.pin) return true; // No PIN required for business QR codes without a PIN
   return await bcrypt.compare(candidatePin, this.pin);
-});
+};
 
 // Virtual to check if QR pin is effectively usable
-qrPinSchema.virtual('isEffectivelyUsable').get(function() {
+qrPinSchema.virtual('isEffectivelyUsable').get(function () {
   return this.isActive && !this.archivedAt;
 });
 
