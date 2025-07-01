@@ -814,23 +814,34 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
       description,
     });
     const qrCodeUrl = await QRCode.toDataURL(qrData);
-    
+
+    // Create QRPin document
+    const qrPin = new QRPin({
+      qrId,
+      type: 'business',
+      businessId: business.businessId,
+      createdAt: new Date(),
+      persistent: true, // Set to true as per QRPin schema default
+      isActive: true,
+    });
+    await qrPin.save();
+
     // Add transaction for QR code generation
     const transaction = {
       _id: crypto.randomBytes(16).toString('hex'),
       type: 'pending-pin',
       amount: amount ? parseFloat(amount) : 0,
-      currency: 'ZMW', // Always use ZMW to satisfy enum constraint
+      currency: 'ZMW',
       toFrom: 'Self',
       date: new Date(),
       status: 'completed',
       qrId,
-      isRead: false, // Mark as unread for notification
-      description: description || 'QR code generated'
+      isRead: false,
+      description: description || 'QR code generated',
     };
     business.transactions.push(transaction);
-    business.qrCode = qrCodeUrl;
-    business.qrId = qrId;
+    business.qrCode = qrCodeUrl; // Optional: keep for backward compatibility
+    business.qrId = qrId; // Optional: keep for backward compatibility
     business.auditLogs.push({
       action: 'qr_generate',
       performedBy: business.ownerUsername,
@@ -838,7 +849,7 @@ router.post('/qr/generate', authenticateToken(['business']), async (req, res) =>
       timestamp: new Date(),
     });
     await business.save();
-    
+
     if (business.email) {
       await sendEmail(
         business.email,
@@ -1110,11 +1121,23 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
       session.endSession();
       return res.status(403).json({ error: 'Unauthorized sender' });
     }
-    const qrPin = await QRPin.findOne({ qrId, type: 'business' }).session(session);
+    const qrPin = await QRPin.findOne({ qrId, type: 'business', isActive: true }).session(session);
     if (!qrPin) {
       await session.abortTransaction();
       session.endSession();
       return res.status(404).json({ error: 'Invalid or expired QR code' });
+    }
+    if (!qrPin.isEffectivelyUsable) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ error: 'QR code is inactive or archived' });
+    }
+    // Check expiry for non-persistent QR codes (optional, as business QR codes are persistent)
+    if (!qrPin.persistent && qrPin.createdAt < new Date(Date.now() - 15 * 60 * 1000)) {
+      await QRPin.deleteOne({ qrId }, { session });
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ error: 'QR code expired' });
     }
     if (businessId && qrPin.businessId !== businessId) {
       await session.abortTransaction();
@@ -1214,6 +1237,9 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
       },
       { upsert: true, session }
     );
+    if (!qrPin.persistent) {
+      await QRPin.deleteOne({ qrId }, { session });
+    }
     if (business.email) {
       await sendEmail(
         business.email,
@@ -1811,6 +1837,43 @@ router.post('/update-email', updateEmailLimiter, authenticateToken(['business'])
       ip,
     });
     res.status(500).json({ error: 'Failed to update email', details: error.message });
+  }
+});
+
+router.get('/qr/latest/:businessId', authenticateToken(['business']), async (req, res) => {
+  try {
+    const { businessId } = req.params;
+    if (req.user.businessId !== businessId) {
+      return res.status(403).json({ error: 'Unauthorized access to business' });
+    }
+    const qrPin = await QRPin.findOne({
+      businessId,
+      type: 'business',
+      isActive: true,
+      archivedAt: null,
+    })
+      .sort({ createdAt: -1 }) // Get the most recent QR code
+      .lean();
+    if (!qrPin) {
+      return res.status(200).json({}); // No active QR code
+    }
+    const qrData = JSON.stringify({
+      type: 'business_payment',
+      businessId: qrPin.businessId,
+      qrId: qrPin.qrId,
+    });
+    const qrCodeUrl = await QRCode.toDataURL(qrData); // Regenerate QR code URL for consistency
+    res.json({
+      qrId: qrPin.qrId,
+      qrCodeUrl,
+    });
+  } catch (error) {
+    console.error('[QRLatest] Error:', {
+      message: error.message,
+      stack: error.stack,
+      businessId: req.params.businessId,
+    });
+    res.status(500).json({ error: 'Failed to fetch latest QR code', details: error.message });
   }
 });
 
