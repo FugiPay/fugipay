@@ -173,21 +173,42 @@ const authenticateToken = (roles = ['business', 'admin']) => (req, res, next) =>
   }
   try {
     const user = jwt.verify(token, JWT_SECRET);
-    console.log('[AuthToken] Decoded JWT:', { user });
+    console.log('[AuthToken] Decoded JWT:', { user, path: req.path });
     if (!user || typeof user !== 'object' || !user.role || !roles.includes(user.role)) {
-      console.warn('[AuthToken] Invalid user or role', { user, expectedRoles: roles });
+      console.warn('[AuthToken] Invalid user or role', { user, expectedRoles: roles, path: req.path });
       return res.status(403).json({ error: 'Invalid or unauthorized token' });
     }
     req.user = user;
     next();
   } catch (err) {
-    console.error('[AuthToken] JWT verification failed:', { error: err.message, token });
+    console.error('[AuthToken] JWT verification failed:', { error: err.message, token, path: req.path });
     return res.status(403).json({ error: 'Invalid or expired token', details: err.message });
   }
 };
 
+const validateBusinessId = (req, res, next) => {
+  const { businessId } = req.params;
+  if (!businessId) {
+    console.warn('[ValidateBusinessId] Missing businessId', { path: req.path });
+    return res.status(400).json({ error: 'Business ID is required' });
+  }
+  if (!req.user) {
+    console.error('[ValidateBusinessId] No user in request', { businessId, path: req.path });
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  if (req.user.role !== 'admin' && req.user.businessId !== businessId) {
+    console.warn('[ValidateBusinessId] Unauthorized access', { user: req.user, businessId, path: req.path });
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  next();
+};
+
 const require2FA = async (req, res, next) => {
   const business = await Business.findOne({ businessId: req.user.businessId }).select('twoFactorEnabled twoFactorSecret ownerUsername');
+  if (!business) {
+    console.warn('[Require2FA] Business not found', { businessId: req.user.businessId });
+    return res.status(404).json({ error: 'Business not found' });
+  }
   if (business.twoFactorEnabled && !req.body.totpCode) {
     return res.status(400).json({ error: '2FA code required', twoFactorRequired: true });
   }
@@ -202,16 +223,6 @@ const require2FA = async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid 2FA code' });
     }
     await logAudit(business, '2fa_verify', business.ownerUsername, { success: true, message: '2FA verified' });
-  }
-  next();
-};
-
-const validateBusinessId = (req, res, next) => {
-  const { businessId } = req.params;
-  if (!businessId) return res.status(400).json({ error: 'Business ID is required' });
-  if (req.user.role !== 'admin' && req.user.businessId !== businessId) {
-    console.warn('[ValidateBusinessId] Unauthorized access', { user: req.user, businessId });
-    return res.status(403).json({ error: 'Unauthorized' });
   }
   next();
 };
@@ -700,7 +711,7 @@ router.post('/qr/pay', authenticateToken(['user']), async (req, res) => {
 });
 
 // Get Unread Notifications Count
-router.get('/:businessId/notifications/unread', validateBusinessId, authenticateToken(['business']), async (req, res) => {
+router.get('/:businessId/notifications/unread', authenticateToken(['business']), validateBusinessId, async (req, res) => {
   console.log('[Notifications] Fetching unread count', { businessId: req.params.businessId });
   const business = await Business.findOne({ businessId: req.params.businessId });
   if (!business || !business.isActive) {
@@ -712,7 +723,7 @@ router.get('/:businessId/notifications/unread', validateBusinessId, authenticate
 });
 
 // Mark Notifications as Read
-router.post('/:businessId/notifications/mark-read', validateBusinessId, authenticateToken(['business']), async (req, res) => {
+router.post('/:businessId/notifications/mark-read', authenticateToken(['business']), validateBusinessId, async (req, res) => {
   const business = await Business.findOne({ businessId: req.params.businessId });
   if (!business || !business.isActive) return res.status(404).json({ error: 'Business not found or inactive' });
   
@@ -793,7 +804,7 @@ router.post('/update-tier', authenticateToken(['admin']), async (req, res) => {
 });
 
 // Get Business Details
-router.get('/:businessId', validateBusinessId, authenticateToken(['business', 'admin']), async (req, res) => {
+router.get('/:businessId', authenticateToken(['business', 'admin']), validateBusinessId, async (req, res) => {
   console.log('[GetBusiness] Fetching details', { businessId: req.params.businessId, user: req.user });
   const business = await Business.findOne({ businessId: req.params.businessId }, 
     { businessId: 1, name: 1, ownerUsername: 1, balances: 1, transactions: 1, isActive: 1, kycStatus: 1, twoFactorEnabled: 1 });
@@ -906,7 +917,7 @@ router.post('/update-email', updateEmailLimiter, authenticateToken(['business'])
 });
 
 // Get Latest QR Code
-router.get('/qr/latest/:businessId', validateBusinessId, authenticateToken(['business']), async (req, res) => {
+router.get('/qr/latest/:businessId', authenticateToken(['business']), validateBusinessId, async (req, res) => {
   const qrPin = await QRPin.findOne({ businessId: req.params.businessId, type: 'business', isActive: true, archivedAt: null })
     .sort({ createdAt: -1 }).lean();
   if (!qrPin) return res.status(200).json({});
@@ -933,7 +944,7 @@ router.delete('/delete-account', authenticateToken(['business']), require2FA, as
 
 // Version Endpoint for Debugging
 router.get('/version', (req, res) => {
-  res.json({ version: '1.0.1', commit: process.env.HEROKU_SLUG_COMMIT || 'unknown' });
+  res.json({ version: '1.0.2', commit: process.env.HEROKU_SLUG_COMMIT || 'unknown' });
 });
 
 module.exports = router;
