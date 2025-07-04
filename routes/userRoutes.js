@@ -125,19 +125,24 @@ const requireAdmin = async (req, res, next) => {
 };
 
 // Setup 2FA
-router.post('/setup-2fa', authenticateToken(), async (req, res) => {
+router.post('/setup-2fa', authenticateToken(), strictRateLimiter, async (req, res) => {
+  const { phoneNumber } = req.body;
   try {
-    const user = await User.findOne({ username: req.user.username });
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+    const user = await User.findOne({ phoneNumber, username: req.user.username });
+    if (!user || !user.isActive) {
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+    if (user.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA already enabled' });
     }
     const secret = speakeasy.generateSecret({
+      length: 20,
       name: `Zangena:${user.username}`,
+      issuer: 'Zangena',
     });
     user.twoFactorSecret = secret.base32;
-    user.twoFactorEnabled = false;
     await user.save();
-    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+    const qrCodeUrl = await qrcode.toDataURL(secret.otpauth_url);
     res.json({ qrCodeUrl, secret: secret.base32 });
   } catch (error) {
     console.error('[Setup2FA] Error:', error.message);
@@ -146,15 +151,18 @@ router.post('/setup-2fa', authenticateToken(), async (req, res) => {
 });
 
 // Verify 2FA
-router.post('/verify-2fa', authenticateToken(), async (req, res) => {
-  const { totpCode } = req.body;
+router.post('/verify-2fa', authenticateToken(), strictRateLimiter, async (req, res) => {
+  const { phoneNumber, totpCode } = req.body;
   if (!totpCode || !/^\d{6}$/.test(totpCode)) {
-    return res.status(400).json({ error: 'Valid 6-digit TOTP code is required' });
+    return res.status(400).json({ error: 'Valid 6-digit TOTP code required' });
   }
   try {
-    const user = await User.findOne({ username: req.user.username });
-    if (!user || !user.twoFactorSecret) {
-      return res.status(404).json({ error: '2FA not setup for this user' });
+    const user = await User.findOne({ phoneNumber, username: req.user.username });
+    if (!user || !user.isActive) {
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+    if (!user.twoFactorSecret) {
+      return res.status(400).json({ error: '2FA not setup' });
     }
     const verified = speakeasy.totp.verify({
       secret: user.twoFactorSecret,
@@ -166,7 +174,7 @@ router.post('/verify-2fa', authenticateToken(), async (req, res) => {
     }
     user.twoFactorEnabled = true;
     await user.save();
-    res.json({ message: '2FA enabled successfully' });
+    res.json({ user: { ...user.toObject(), twoFactorEnabled: true } });
   } catch (error) {
     console.error('[Verify2FA] Error:', error.message);
     res.status(500).json({ error: 'Failed to verify 2FA' });
@@ -523,31 +531,39 @@ router.get('/phone/:phoneNumber', authenticateToken(), generalRateLimiter, async
   }
 });
 
-// Get User by Phone Number (Alternative)
-router.get('/user/phone/:phoneNumber', authenticateToken(), generalRateLimiter, async (req, res) => {
+// Update User by Phone Number to include twoFactorEnabled
+router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => {
+  const { phoneNumber } = req.params;
+  const { limit = 10, skip = 0 } = req.query;
   try {
-    const user = await User.findOne({ phoneNumber: req.params.phoneNumber });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    const qrPin = await QRPin.findOne({ username: user.username, type: 'user' });
-    if (user.phoneNumber !== req.user.phoneNumber) return res.status(403).json({ error: 'Unauthorized' });
+    const user = await User.findOne({ phoneNumber, username: req.user.username });
+    if (!user || !user.isActive) {
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+    const transactions = user.transactions
+      .slice(parseInt(skip), parseInt(skip) + parseInt(limit))
+      .map(tx => ({
+        _id: tx._id,
+        type: tx.type,
+        toFrom: tx.toFrom,
+        amount: tx.amount,
+        fee: tx.fee,
+        date: tx.date,
+      }));
     res.json({
-      phoneNumber: user.phoneNumber,
       username: user.username,
-      email: user.email,
-      name: user.name,
-      balance: user.balance || 0,
-      transactions: user.transactions || [],
+      phoneNumber: user.phoneNumber,
+      balance: user.balance,
+      transactions,
       kycStatus: user.kycStatus,
-      role: user.role,
-      lastViewedTimestamp: user.lastViewedTimestamp || 0,
-      pendingDeposits: user.pendingDeposits,
-      pendingWithdrawals: user.pendingWithdrawals,
-      qrId: qrPin ? qrPin.qrId : null,
-      twoFactorEnabled: user.twoFactorEnabled,
+      email: user.email,
+      twoFactorEnabled: user.twoFactorEnabled || false,
+      isArchived: user.isArchived,
+      lastViewedTimestamp: user.lastViewedTimestamp,
     });
   } catch (error) {
-    console.error('[GetUserByPhoneAlt] Error:', error.message);
-    res.status(500).json({ error: 'Server error' });
+    console.error('[GetUserByPhone] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch user data' });
   }
 });
 
