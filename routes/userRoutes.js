@@ -812,27 +812,61 @@ router.post('/pay-qr', authenticateToken(), strictRateLimiter, validate(payQrVal
   }
 });
 
-// Manual Deposit
-router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (req, res) => {
-  const { amount, transactionId } = req.body;
+// Updated Manual Deposit
+router.post('/deposit/manual', authenticateToken(), strictRateLimiter, async (req, res) => {
+  const { amount, transactionId, totpCode } = req.body;
   console.log('[DepositManual] Request:', { amount, transactionId });
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user || !user.isActive) {
       return res.status(403).json({ error: 'User not found or inactive' });
     }
+    if (!user.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA required for deposits' });
+    }
+    if (!totpCode || !/^\d{6}$/.test(totpCode)) {
+      return res.status(400).json({ error: 'Valid 6-digit TOTP code required' });
+    }
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: totpCode,
+    });
+    if (!verified) {
+      return res.status(400).json({ error: 'Invalid TOTP code' });
+    }
     if (!amount || amount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
     }
-    if (!transactionId || user.pendingDeposits.some(d => d.transactionId === transactionId)) {
-      return res.status(400).json({ error: 'Transaction ID required or already used' });
+    if (amount > 10000) {
+      return res.status(400).json({ error: 'Deposit amount cannot exceed 10,000 ZMW' });
+    }
+    if (!transactionId || typeof transactionId !== 'string' || transactionId.trim() === '') {
+      return res.status(400).json({ error: 'Transaction ID required' });
+    }
+    // Check for duplicate transactionId across all users
+    const existingDeposit = await User.findOne({ 'pendingDeposits.transactionId': transactionId });
+    if (existingDeposit) {
+      return res.status(400).json({ error: 'Transaction ID already used' });
     }
     user.pendingDeposits = user.pendingDeposits || [];
     user.pendingDeposits.push({ amount, transactionId, date: new Date(), status: 'pending' });
+    // Flag account if excessive deposits (5+ in 24 hours)
+    const recentDeposits = user.pendingDeposits.filter(
+      d => d.date > new Date(Date.now() - 24 * 60 * 60 * 1000)
+    );
+    if (recentDeposits.length >= 5) {
+      user.isFlagged = true;
+    }
     await user.save();
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
-      await sendPushNotification(admin.pushToken, 'New Deposit Request', `Deposit of ${amount} ZMW from ${user.username} needs approval.`, { userId: user._id, transactionId });
+      await sendPushNotification(
+        admin.pushToken,
+        'New Deposit Request',
+        `Deposit of ${amount} ZMW from ${user.username} needs approval.`,
+        { userId: user._id, transactionId }
+      );
     }
     res.json({ message: 'Deposit submitted for verification' });
   } catch (error) {
@@ -1248,6 +1282,46 @@ router.post('/reset-pin', strictRateLimiter, async (req, res) => {
   } catch (error) {
     console.error('[ResetPin] Error:', error.message);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Verify TOTP Code
+router.post('/verify-totp', authenticateToken(), strictRateLimiter, async (req, res) => {
+  const { totpCode } = req.body;
+  if (!totpCode || !/^\d{6}$/.test(totpCode)) {
+    return res.status(400).json({ error: 'Valid 6-digit TOTP code required' });
+  }
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
+      return res.status(400).json({ error: '2FA not enabled' });
+    }
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: totpCode,
+    });
+    if (!verified) {
+      return res.status(400).json({ error: 'Invalid TOTP code' });
+    }
+    res.json({ message: 'TOTP verified' });
+  } catch (error) {
+    console.error('[VerifyTOTP] Error:', error.message);
+    res.status(500).json({ error: 'Server error verifying TOTP' });
+  }
+});
+
+// Validate Token
+router.get('/validate-token', authenticateToken(), strictRateLimiter, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || !user.isActive) {
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+    res.json({ message: 'Token valid' });
+  } catch (error) {
+    console.error('[ValidateToken] Error:', error.message);
+    res.status(500).json({ error: 'Server error validating token' });
   }
 });
 
