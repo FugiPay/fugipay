@@ -125,15 +125,17 @@ const requireAdmin = async (req, res, next) => {
 };
 
 // Setup 2FA
-// routes/users.js
 router.post('/setup-2fa', authenticateToken(), strictRateLimiter, async (req, res) => {
   const { phoneNumber } = req.body;
+  console.log('[Setup2FA] Request:', { phoneNumber, username: req.user.username });
   try {
     const user = await User.findOne({ phoneNumber, username: req.user.username });
     if (!user || !user.isActive) {
+      console.log('[Setup2FA] User check failed:', { found: !!user, isActive: user?.isActive });
       return res.status(403).json({ error: 'User not found or inactive' });
     }
     if (user.twoFactorEnabled) {
+      console.log('[Setup2FA] 2FA already enabled for user:', user.username);
       return res.status(400).json({ error: '2FA already enabled' });
     }
     const secret = speakeasy.generateSecret({
@@ -141,12 +143,15 @@ router.post('/setup-2fa', authenticateToken(), strictRateLimiter, async (req, re
       name: `Zangena:${user.username}`,
       issuer: 'Zangena',
     });
+    console.log('[Setup2FA] Generated secret:', secret.base32);
     user.twoFactorSecret = secret.base32;
     await user.save();
+    console.log('[Setup2FA] User updated with secret:', user.twoFactorSecret);
     const qrCodeUrl = await qrcode.toDataURL(secret.otpauth_url);
-    res.json({ qrCodeUrl, secret: secret.base32 });
+    console.log('[Setup2FA] QR code generated');
+    res.json({ qrCodeUrl, secret: secret.base32 }); // Return secret.base32
   } catch (error) {
-    console.error('[Setup2FA] Error:', error.message);
+    console.error('[Setup2FA] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to setup 2FA' });
   }
 });
@@ -833,26 +838,12 @@ router.post('/pay-qr', authenticateToken(), strictRateLimiter, validate(payQrVal
 
 // Updated Manual Deposit
 router.post('/deposit/manual', authenticateToken(), strictRateLimiter, async (req, res) => {
-  const { amount, transactionId, totpCode } = req.body;
+  const { amount, transactionId } = req.body;
   console.log('[DepositManual] Request:', { amount, transactionId });
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user || !user.isActive) {
       return res.status(403).json({ error: 'User not found or inactive' });
-    }
-    if (!user.twoFactorEnabled) {
-      return res.status(400).json({ error: '2FA required for deposits' });
-    }
-    if (!totpCode || !/^\d{6}$/.test(totpCode)) {
-      return res.status(400).json({ error: 'Valid 6-digit TOTP code required' });
-    }
-    const verified = speakeasy.totp.verify({
-      secret: user.twoFactorSecret,
-      encoding: 'base32',
-      token: totpCode,
-    });
-    if (!verified) {
-      return res.status(400).json({ error: 'Invalid TOTP code' });
     }
     if (!amount || amount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
