@@ -538,6 +538,7 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
   try {
     const user = await User.findOne({ phoneNumber, username: req.user.username });
     if (!user || !user.isActive) {
+      console.log('[GetUserByPhone] User check failed:', { found: !!user, isActive: user?.isActive });
       return res.status(403).json({ error: 'User not found or inactive' });
     }
     const transactions = user.transactions
@@ -557,12 +558,13 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
       transactions,
       kycStatus: user.kycStatus,
       email: user.email,
+      name: user.name || '', // Include name, default to empty string
       twoFactorEnabled: user.twoFactorEnabled || false,
       isArchived: user.isArchived,
       lastViewedTimestamp: user.lastViewedTimestamp,
     });
   } catch (error) {
-    console.error('[GetUserByPhone] Error:', error.message);
+    console.error('[GetUserByPhone] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to fetch user data' });
   }
 });
