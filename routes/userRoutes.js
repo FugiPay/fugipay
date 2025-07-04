@@ -142,7 +142,7 @@ router.post('/setup-2fa', authenticateToken(), strictRateLimiter, async (req, re
     });
     user.twoFactorSecret = secret.base32;
     await user.save();
-    const qrCodeUrl = await qrcode.toDataURL(secret.otpauth_url);
+    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
     res.json({ qrCodeUrl, secret: secret.base32 });
   } catch (error) {
     console.error('[Setup2FA] Error:', error.message);
