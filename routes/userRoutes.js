@@ -127,15 +127,12 @@ const requireAdmin = async (req, res, next) => {
 // Setup 2FA
 router.post('/setup-2fa', authenticateToken(), strictRateLimiter, async (req, res) => {
   const { phoneNumber } = req.body;
-  console.log('[Setup2FA] Request:', { phoneNumber, username: req.user.username });
   try {
     const user = await User.findOne({ phoneNumber, username: req.user.username });
     if (!user || !user.isActive) {
-      console.log('[Setup2FA] User check failed:', { found: !!user, isActive: user?.isActive });
       return res.status(403).json({ error: 'User not found or inactive' });
     }
     if (user.twoFactorEnabled) {
-      console.log('[Setup2FA] 2FA already enabled for user:', user.username);
       return res.status(400).json({ error: '2FA already enabled' });
     }
     const secret = speakeasy.generateSecret({
@@ -143,15 +140,12 @@ router.post('/setup-2fa', authenticateToken(), strictRateLimiter, async (req, re
       name: `Zangena:${user.username}`,
       issuer: 'Zangena',
     });
-    console.log('[Setup2FA] Generated secret:', secret.base32);
     user.twoFactorSecret = secret.base32;
     await user.save();
-    console.log('[Setup2FA] User updated with secret:', user.twoFactorSecret);
     const qrCodeUrl = await qrcode.toDataURL(secret.otpauth_url);
-    console.log('[Setup2FA] QR code generated');
-    res.json({ qrCodeUrl, secret: secret.base32 }); // Return secret.base32
+    res.json({ qrCodeUrl, secret: secret.base32 });
   } catch (error) {
-    console.error('[Setup2FA] Error:', error.message, error.stack);
+    console.error('[Setup2FA] Error:', error.message);
     res.status(500).json({ error: 'Failed to setup 2FA' });
   }
 });
