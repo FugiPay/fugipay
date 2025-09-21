@@ -3,7 +3,7 @@ const User = require('./models/User');
 
 async function migrateUserSchema() {
   try {
-    await mongoose.connect('mongodb+srv://KHAH-YAH:01H0EwNnhMYW8zpO@cluster0.1ap41.mongodb.net/Zangena?retryWrites=true&w=majority', {
+    await mongoose.connect(process.env.MONGODB_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });

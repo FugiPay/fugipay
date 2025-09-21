@@ -12,7 +12,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # MongoDB connection
-MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://KHAH-YAH:01H0EwNnhMYW8zpO@cluster0.1ap41.mongodb.net/Zangena?retryWrites=true&w=majority')
+MONGO_URI = os.getenv('MONGODB_URI')
+if not MONGO_URI:
+    logger.error('[FraudDetection] MONGODB_URI not set in .env file')
+    raise ValueError('MONGODB_URI environment variable is required')
 try:
     client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     db = client['zangena']

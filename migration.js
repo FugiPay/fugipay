@@ -4,7 +4,7 @@ const { Business } = require('./models/Business');
 
 async function migrateAuditLogs() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://KHAH-YAH:01H0EwNnhMYW8zpO@cluster0.1ap41.mongodb.net/Zangena?retryWrites=true&w=majority', {
+    await mongoose.connect(process.env.MONGODB_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
