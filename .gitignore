@@ -1,2 +1,12 @@
 node_modules
 .env
+.env
+.env.example
+.DS_Store
+node_modules/
+venv/
+uploads/
+*.log
+*.zip
+*.pem
+*.key
