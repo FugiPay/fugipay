@@ -33,6 +33,8 @@ const allowedOrigins = [
   'https://khah-334000.web.app',
   'https://api.ipify.org',
   'https://zangena-e33a7e55637a.herokuapp.com',
+  'https://fugipay-4727b9eec37a.herokuapp.com',
+  'https://fugipay.onrender.com',
 ];
 
 const corsOptions = {
@@ -104,9 +106,12 @@ mongoose.connect(mongoUri, {
 
 // Start Server
 const PORT = process.env.PORT || 3002;
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Running on port ${PORT}`);
 });
+/* app.listen(PORT, () => {
+  console.log(`[Server] Running on port ${PORT}`);
+}); */
 
 // Log Startup
 console.log('[Server] Starting...');
