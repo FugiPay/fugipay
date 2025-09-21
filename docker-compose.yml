@@ -1,0 +1,26 @@
+version: '3.8'
+services:
+  flask_app:
+    build: .
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/zangena
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mongo
+  mongo:
+    image: mongo:5.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+  nginx:
+    image: nginx:latest
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - flask_app
+volumes:
+  mongo-data:

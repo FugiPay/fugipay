@@ -11,10 +11,12 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@aws-sdk/client-rekognition": "^3.844.0",
     "aws-sdk": "^2.1692.0",
     "axios": "^1.8.1",
     "bcryptjs": "^3.0.2",
     "bullmq": "^5.52.1",
+    "child_process": "^1.0.2",
     "compression": "^1.8.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
@@ -37,7 +39,9 @@
     "qrcode": "^1.5.4",
     "redis": "^4.7.0",
     "speakeasy": "^2.0.0",
-    "twilio": "^5.5.0",
+    "twilio": "^5.10.0",
+    "util": "^0.12.5",
+    "uuid": "^11.1.0",
     "validator": "^13.15.15"
   }
 }
