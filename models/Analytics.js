@@ -64,7 +64,6 @@ const analyticsSchema = new mongoose.Schema({
     ip: { type: String }, // Device metadata for fraud detection
     userAgent: { type: String }, // Device metadata for fraud detection
   },
-  createdAt: { type: Date, default: Date.now, expires: '90d' }, // Auto-expire after 90 days
 }, {
   timestamps: true,
 });
@@ -74,6 +73,6 @@ analyticsSchema.index({ event: 1, timestamp: -1 });
 analyticsSchema.index({ username: 1, timestamp: -1 });
 analyticsSchema.index({ phoneNumber: 1, timestamp: -1 });
 analyticsSchema.index({ identifier: 1, timestamp: -1 });
-analyticsSchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 }); // 90 days TTL
+analyticsSchema.index({ 'timestamps.createdAt': 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 }); // 90 days TTL on timestamps.createdAt
 
 module.exports = mongoose.model('Analytics', analyticsSchema);

@@ -102,41 +102,9 @@ const transporter = nodemailer.createTransport({
 const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH_TOKEN);
 
 // Ensure indexes for QRPin only
-const ensureIndexes = async () => {
-  const maxRetries = 3;
-  let attempt = 1;
-
-  while (attempt <= maxRetries) {
-    try {
-      console.log(`[Indexes] Attempt ${attempt} to ensure indexes for QRPin`);
-      await QRPin.createIndexes([
-        { key: { qrId: 1 }, unique: true },
-      ], { maxTimeMS: 30000 });
-      console.log('[Indexes] Successfully ensured indexes for QRPin');
-      return;
-    } catch (error) {
-      console.error('[Indexes] Error creating indexes for QRPin:', {
-        message: error.message,
-        code: error.code,
-        codeName: error.codeName,
-        attempt,
-      });
-      if (error.message.includes('buffering timed out') && attempt < maxRetries) {
-        console.log(`[Indexes] Retrying in 5s...`);
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        attempt++;
-      } else if (error.code === 85 || error.code === 86) {
-        console.log('[Indexes] Ignoring index conflict error (code 85 or 86) for QRPin');
-        return;
-      } else {
-        throw error;
-      }
-    }
-  }
-  console.error('[Indexes] Failed to create indexes for QRPin after', maxRetries, 'attempts');
-};
-
-ensureIndexes();
+mongoose.connection.once('open', () => {
+  console.log('[MongoDB] Connected successfully again');
+});
 
 // Debug route to inspect indexes
 router.get('/debug/indexes', authenticateToken(['admin']), async (req, res) => {
@@ -2434,10 +2402,13 @@ router.get('/validate-token', authenticateToken(), strictRateLimiter, async (req
 
 // Analytics Endpoint
 router.post('/analytics', authenticateToken(), generalRateLimiter, async (req, res) => {
-  const { event, username, amount, transactionId, error, focusCount, errorCount, depositAttempts } = req.body;
+  const { event, username, amount, transactionId, error, focusCount, errorCount, depositAttempts, signupAttempts, fileType, fileSize, kycStatus, kycAnalysis } = req.body;
 
   // Validate request
-  if (!event || !username || !['deposit_submitted', 'deposit_failed', 'input_error', 'focus_event'].includes(event)) {
+  if (!event || !username || ![
+    'deposit_submitted', 'deposit_failed', 'input_error', 'focus_event',
+    'signup_success', 'signup_failed', 'signup_document_upload', 'signup_document_failed', 'signup_document_removed'
+  ].includes(event)) {
     console.error('[Analytics] Invalid request:', { event, username });
     return res.status(400).json({ error: 'Invalid event or username' });
   }
@@ -2459,11 +2430,21 @@ router.post('/analytics', authenticateToken(), generalRateLimiter, async (req, r
         focusCount: parseInt(focusCount) || 0,
         errorCount: parseInt(errorCount) || 0,
         depositAttempts: parseInt(depositAttempts) || 0,
+        signupAttempts: parseInt(signupAttempts) || 0,
+        fileType: fileType || '',
+        fileSize: parseInt(fileSize) || 0,
+        kycStatus: kycStatus || '',
+        kycAnalysis: kycAnalysis || null,
       },
     });
 
     await analyticsEntry.save();
-    console.log('[Analytics] Event saved:', { event, username, phoneNumber: req.user.phoneNumber });
+    console.log('[Analytics] Event saved:', { 
+      event, 
+      username, 
+      phoneNumber: req.user.phoneNumber, 
+      timestamp: new Date().toISOString() 
+    });
     res.status(201).json({ message: 'Analytics event recorded' });
   } catch (error) {
     console.error('[Analytics] Error:', {
@@ -2472,6 +2453,61 @@ router.post('/analytics', authenticateToken(), generalRateLimiter, async (req, r
       body: req.body,
     });
     res.status(500).json({ error: 'Failed to record analytics event' });
+  }
+});
+
+router.post('/analytics/batch', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { events } = req.body;
+  if (!Array.isArray(events) || events.length === 0) {
+    console.error('[Analytics] Invalid batch request:', { events });
+    return res.status(400).json({ error: 'Invalid or empty events array' });
+  }
+
+  try {
+    const validEvents = events.filter(e => 
+      e.event && 
+      [
+        'deposit_submitted', 'deposit_failed', 'input_error', 'focus_event',
+        'signup_success', 'signup_failed', 'signup_document_upload', 
+        'signup_document_failed', 'signup_document_removed'
+      ].includes(e.event) &&
+      e.username === req.user.username
+    );
+
+    if (validEvents.length === 0) {
+      console.error('[Analytics] No valid events in batch:', { events });
+      return res.status(400).json({ error: 'No valid events provided' });
+    }
+
+    await Analytics.insertMany(validEvents.map(event => ({
+      event: event.event,
+      username: event.username,
+      phoneNumber: req.user.phoneNumber,
+      timestamp: new Date(event.timestamp),
+      data: {
+        amount: parseFloat(event.amount) || 0,
+        transactionId: event.transactionId || '',
+        error: event.error || '',
+        focusCount: parseInt(event.focusCount) || 0,
+        errorCount: parseInt(event.errorCount) || 0,
+        depositAttempts: parseInt(event.depositAttempts) || 0,
+        signupAttempts: parseInt(event.signupAttempts) || 0,
+        fileType: event.fileType || '',
+        fileSize: parseInt(event.fileSize) || 0,
+        kycStatus: event.kycStatus || '',
+        kycAnalysis: event.kycAnalysis || null,
+      },
+    })), { ordered: false });
+
+    console.log('[Analytics] Batch events saved:', { count: validEvents.length });
+    res.status(201).json({ message: 'Batch analytics events recorded', count: validEvents.length });
+  } catch (error) {
+    console.error('[Analytics] Batch Error:', { 
+      message: error.message, 
+      stack: error.stack, 
+      eventsCount: events.length 
+    });
+    res.status(500).json({ error: 'Failed to record batch analytics events' });
   }
 });
 

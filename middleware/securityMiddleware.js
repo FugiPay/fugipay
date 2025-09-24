@@ -51,7 +51,7 @@ const registerValidation = [
     .withMessage('Invalid email format'),
   body('phoneNumber')
     .trim()
-    .matches(/^\+260(9[5678]|7[34679])\d{7}$/)
+    .matches(/^\+260(9[5678]|7[34679]|5\d)\d{7}$/)
     .withMessage('Invalid Zambian phone number'),
   body('password')
     .isLength({ min: 6 })
