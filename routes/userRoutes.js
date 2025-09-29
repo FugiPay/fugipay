@@ -528,7 +528,112 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
 });
 
 // Login endpoint
-router.post('/login', strictRateLimiter, validate(loginValidation), async (req, res) => {
+
+// Simplified login validation (remove totpCode)
+const simplifiedLoginValidation = [
+  body('identifier')
+    .trim()
+    .isString()
+    .isLength({ min: 1 })
+    .withMessage('Username or phone number is required'),
+  body('password')
+    .isString()
+    .isLength({ min: 1 })
+    .withMessage('Password is required'),
+];
+
+// Login endpoint
+router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), async (req, res) => {
+  const { identifier, password } = req.body;
+  console.log('[Login] Request:', { identifier });
+
+  try {
+    const user = await User.findOne({
+      $or: [{ username: identifier }, { phoneNumber: identifier }],
+    });
+
+    if (!user) {
+      console.log('[Login] User not found:', identifier);
+      await Analytics.create({
+        event: 'login_failed',
+        username: identifier,
+        data: { reason: 'User not found' },
+        timestamp: new Date(),
+      });
+      return res.status(400).json({ error: 'Invalid username or password' });
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      console.log('[Login] Invalid password for:', user.username);
+      await Analytics.create({
+        event: 'login_failed',
+        username: user.username,
+        data: { reason: 'Invalid password' },
+        timestamp: new Date(),
+      });
+      return res.status(400).json({ error: 'Invalid username or password' });
+    }
+
+    if (!user.isEffectivelyActive) {
+      console.log('[Login] Inactive or archived user:', user.username);
+      await Analytics.create({
+        event: 'login_failed',
+        username: user.username,
+        data: { reason: 'Account inactive or archived' },
+        timestamp: new Date(),
+      });
+      return res.status(403).json({ error: 'Account is inactive or archived. Please contact support.' });
+    }
+
+    user.lastLogin = new Date();
+    user.lastLoginAttempts = (user.lastLoginAttempts || 0) + 1;
+    await user.save();
+
+    const token = jwt.sign(
+      { username: user.username, role: user.role, phoneNumber: user.phoneNumber },
+      JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    const analyticsEvent = await Analytics.create({
+      event: 'login_success',
+      username: user.username,
+      data: { role: user.role, kycStatus: user.kycStatus },
+      timestamp: new Date(),
+    });
+
+    await AdminLedger.create({
+      action: 'login',
+      username: user.username,
+      details: { analyticsEventId: analyticsEvent._id },
+      timestamp: new Date(),
+    });
+
+    res.json({
+      phoneNumber: user.phoneNumber,
+      token,
+      username: user.username,
+      name: user.name,
+      role: user.role,
+      kycStatus: user.kycStatus,
+      isFirstLogin: !user.lastLoginAttempts || user.lastLoginAttempts === 1,
+      isActive: user.isActive,
+      twoFactorEnabled: false, // Always false since 2FA is disabled
+    });
+  } catch (error) {
+    console.error('[Login] Error:', error.message, error.stack);
+    await Analytics.create({
+      event: 'login_failed',
+      username: identifier || 'unknown',
+      data: { reason: error.message },
+      timestamp: new Date(),
+    });
+    res.status(500).json({ error: 'Server error. Please try again later.' });
+  }
+});
+
+/* router.post('/login', strictRateLimiter, validate(loginValidation), async (req, res) => {
   const { identifier, password, smsCode } = req.body;
   console.log('[Login] Request:', { identifier });
 
@@ -669,7 +774,7 @@ router.post('/login', strictRateLimiter, validate(loginValidation), async (req, 
     });
     res.status(500).json({ error: 'Server error' });
   }
-});
+}); */
 
 // Enable SMS 2FA
 router.post('/enable-sms-2fa', authenticateToken(), strictRateLimiter, async (req, res) => {
