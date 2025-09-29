@@ -529,28 +529,36 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
 
 // Login endpoint
 
-// Simplified login validation (remove totpCode)
+// Validation middleware for login
 const simplifiedLoginValidation = [
   body('identifier')
     .trim()
     .isString()
-    .isLength({ min: 1 })
+    .notEmpty()
     .withMessage('Username or phone number is required'),
   body('password')
     .isString()
-    .isLength({ min: 1 })
+    .notEmpty()
     .withMessage('Password is required'),
 ];
 
 // Login endpoint
-router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), async (req, res) => {
+router.post('/login', strictRateLimiter, simplifiedLoginValidation, async (req, res) => {
+  // Check validation results
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    console.log('[Login] Validation errors:', errors.array());
+    return res.status(400).json({ error: errors.array()[0].msg });
+  }
+
   const { identifier, password } = req.body;
   console.log('[Login] Request:', { identifier });
 
   try {
+    // Optimize database query with indexed fields and lean()
     const user = await User.findOne({
       $or: [{ username: identifier }, { phoneNumber: identifier }],
-    });
+    }).lean().select('username phoneNumber password role kycStatus isActive lastLogin lastLoginAttempts name');
 
     if (!user) {
       console.log('[Login] User not found:', identifier);
@@ -575,7 +583,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
       return res.status(400).json({ error: 'Invalid username or password' });
     }
 
-    if (!user.isEffectivelyActive) {
+    if (!user.isActive) {
       console.log('[Login] Inactive or archived user:', user.username);
       await Analytics.create({
         event: 'login_failed',
@@ -586,9 +594,14 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
       return res.status(403).json({ error: 'Account is inactive or archived. Please contact support.' });
     }
 
-    user.lastLogin = new Date();
-    user.lastLoginAttempts = (user.lastLoginAttempts || 0) + 1;
-    await user.save();
+    // Update user login details
+    await User.updateOne(
+      { _id: user._id },
+      {
+        lastLogin: new Date(),
+        $inc: { lastLoginAttempts: 1 },
+      }
+    );
 
     const token = jwt.sign(
       { username: user.username, role: user.role, phoneNumber: user.phoneNumber },
@@ -617,9 +630,9 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
       name: user.name,
       role: user.role,
       kycStatus: user.kycStatus,
-      isFirstLogin: !user.lastLoginAttempts || user.lastLoginAttempts === 1,
+      isFirstLogin: !user.lastLoginAttempts || user.lastLoginAttempts === 0,
       isActive: user.isActive,
-      twoFactorEnabled: false, // Always false since 2FA is disabled
+      twoFactorEnabled: false,
     });
   } catch (error) {
     console.error('[Login] Error:', error.message, error.stack);
@@ -629,6 +642,11 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
       data: { reason: error.message },
       timestamp: new Date(),
     });
+
+    // Handle specific errors for better frontend feedback
+    if (error.name === 'MongoServerError' || error.message.includes('database')) {
+      return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
+    }
     res.status(500).json({ error: 'Server error. Please try again later.' });
   }
 });
