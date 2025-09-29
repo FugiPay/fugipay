@@ -19,6 +19,7 @@ const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const Business = require('../models/Business');
 const AdminLedger = require('../models/AdminLedger');
+const { body, validationResult } = require('express-validator'); // Added missing import
 const authenticateToken = require('../middleware/authenticateToken');
 const { generalRateLimiter, strictRateLimiter, validate, registerValidation, loginValidation, payQrValidation, updateProfileValidation } = require('../middleware/securityMiddleware');
 const { exec } = require('child_process');
