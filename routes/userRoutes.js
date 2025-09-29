@@ -1,3 +1,4 @@
+
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -12,7 +13,7 @@ const QRCode = require('qrcode');
 const axios = require('axios');
 const twilio = require('twilio');
 const { v4: uuidv4 } = require('uuid');
-const { body, validationResult } = require('express-validator'); // Added missing import
+const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const Business = require('../models/Business');
@@ -520,7 +521,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
     if (!user) {
       console.log('[Login] User not found:', identifier);
       await Analytics.create({
-        event: 'login_failed',
+        event: 'signin_failed',
         username: identifier,
         data: { reason: 'User not found' },
         timestamp: new Date(),
@@ -532,7 +533,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
     if (!isPasswordValid) {
       console.log('[Login] Invalid password for:', user.username);
       await Analytics.create({
-        event: 'login_failed',
+        event: 'signin_failed',
         username: user.username,
         data: { reason: 'Invalid password' },
         timestamp: new Date(),
@@ -543,7 +544,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
     if (!user.isActive) {
       console.log('[Login] Inactive or archived user:', user.username);
       await Analytics.create({
-        event: 'login_failed',
+        event: 'signin_failed',
         username: user.username,
         data: { reason: 'Account inactive or archived' },
         timestamp: new Date(),
@@ -570,7 +571,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
       } catch (error) {
         console.error('[Login] SMS send error:', error.message);
         await Analytics.create({
-          event: 'login_failed',
+          event: 'signin_failed',
           username: user.username,
           data: { reason: 'SMS send failed', error: error.message },
           timestamp: new Date(),
@@ -584,7 +585,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
       if (!/^\d{6}$/.test(smsCode)) {
         console.log('[Login] Invalid SMS code format for:', user.username);
         await Analytics.create({
-          event: 'login_failed',
+          event: 'signin_failed',
           username: user.username,
           data: { reason: 'Invalid SMS code format' },
           timestamp: new Date(),
@@ -594,7 +595,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
       if (user.twoFactorSecret !== smsCode || user.twoFactorExpiry < new Date()) {
         console.log('[Login] Invalid or expired SMS code for:', user.username);
         await Analytics.create({
-          event: 'login_failed',
+          event: 'signin_failed',
           username: user.username,
           data: { reason: 'Invalid or expired SMS code' },
           timestamp: new Date(),
@@ -620,7 +621,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
     );
 
     const analyticsEvent = await Analytics.create({
-      event: 'login_success',
+      event: 'signin_success',
       username: user.username,
       data: { role: user.role, kycStatus: user.kycStatus },
       timestamp: new Date(),
@@ -647,7 +648,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
   } catch (error) {
     console.error('[Login] Error:', error.message, error.stack);
     await Analytics.create({
-      event: 'login_failed',
+      event: 'signin_failed',
       username: identifier || 'unknown',
       data: { reason: error.message },
       timestamp: new Date(),
@@ -1672,7 +1673,7 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
       amount: withdrawAmount,
       transactionId,
       fraudScore,
-      analyticsEventId: null, // Will be updated after analytics creation
+      analyticsEventId: null,
       fraudAnalyticsEventId,
       status: 'pending',
     });
