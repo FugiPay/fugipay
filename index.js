@@ -5,7 +5,7 @@ const compression = require('compression');
 const morgan = require('morgan');
 require('dotenv').config();
 
-const app = express(); // Initialize app first
+const app = express();
 
 // Logging
 app.use(morgan('dev'));
@@ -58,7 +58,10 @@ const adminRoutes = require('./routes/adminRoutes');
 
 // Routes
 app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ error: 'Database unavailable', timestamp: new Date() });
+  }
+  res.status(200).json({ status: 'OK', timestamp: new Date() });
 });
 
 app.get('/wake', (req, res) => {
@@ -66,11 +69,11 @@ app.get('/wake', (req, res) => {
   res.status(200).send('Awake');
 });
 
-app.use('/api/users', userRoutes); // User-related endpoints
-app.use('/api/business', businessRoutes); // Business-related endpoints
-app.use('/api/admin', adminRoutes); // Admin-related endpoints
+app.use('/api/users', userRoutes);
+app.use('/api/business', businessRoutes);
+app.use('/api/admin', adminRoutes);
 
-// Global error handler (consolidated)
+// Global error handler
 app.use((err, req, res, next) => {
   console.error('[Global Error]', {
     message: err.message,
@@ -105,12 +108,8 @@ mongoose.connect(mongoUri, {
   });
 
 // Start Server
-/* const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3002;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Server] Running on port ${PORT}`);
-}); */
-
-app.listen(PORT, () => {
   console.log(`[Server] Running on port ${PORT}`);
 });
 
