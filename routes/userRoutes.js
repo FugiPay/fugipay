@@ -364,66 +364,20 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
 
   if (!idImage) {
     console.error('[Register] No ID image provided');
-    const analytics = await new Analytics({
-      event: 'signup_failed',
-      username: username || 'unknown',
-      data: { error: 'ID image or PDF is required' },
-      timestamp: new Date(),
-    }).save();
-    return res.status(400).json({ error: 'ID image or PDF is required', analyticsEventId: analytics._id });
+    return res.status(400).json({ error: 'ID image or PDF is required' });
   }
 
   try {
-    // Check for duplicate user
     const existingUser = await User.findOne({ $or: [{ username }, { email: email.toLowerCase() }, { phoneNumber }] }).lean();
     if (existingUser) {
       console.error('[Register] Duplicate user:', { username, email, phoneNumber });
-      const analytics = await new Analytics({
-        event: 'signup_failed',
-        username,
-        data: { error: 'Duplicate user', username, email, phoneNumber },
-        timestamp: new Date(),
-      }).save();
-      return res.status(409).json({ error: 'Username, email, or phone number already exists', analyticsEventId: analytics._id });
+      return res.status(409).json({ error: 'Username, email, or phone number already exists' });
     }
 
-    // AI: Check for suspicious input patterns
     if (username.match(/(.)\1{3,}/) || email.match(/(.)\1{3,}@/)) {
-      const analytics = await new Analytics({
-        event: 'signup_failed',
-        username,
-        data: { error: 'Suspicious input patterns', username, email },
-        timestamp: new Date(),
-      }).save();
-      return res.status(403).json({ error: 'Suspicious input detected', isFlagged: true, analyticsEventId: analytics._id });
+      return res.status(403).json({ error: 'Suspicious input detected', isFlagged: true });
     }
 
-    // AI: Fraud detection via microservice
-    let fraudScore = 1;
-    try {
-      const fraudResult = await axios.post('http://localhost:5000/predict', {
-        username,
-        email,
-        phoneNumber,
-        timestamp: Date.now(),
-      });
-      fraudScore = fraudResult.data.is_anomaly ? -1 : 1;
-    } catch (fraudError) {
-      console.error('[Register] Fraud Detection Error:', fraudError.message);
-      fraudScore = 0; // Neutral score if fraud detection fails
-    }
-
-    if (fraudScore < -0.5) {
-      const analytics = await new Analytics({
-        event: 'signup_failed',
-        username,
-        data: { error: 'High-risk signup detected', fraudScore, username, email, phoneNumber },
-        timestamp: new Date(),
-      }).save();
-      return res.status(403).json({ error: 'High-risk signup detected', isFlagged: true, fraudScore, analyticsEventId: analytics._id });
-    }
-
-    // KYC: Analyze ID image with AWS Rekognition
     let kycAnalysis = { textCount: 0, faceCount: 0, isValid: false, analyzedAt: new Date() };
     try {
       const detectTextCommand = new DetectTextCommand({ Image: { Bytes: idImage.buffer } });
@@ -438,33 +392,28 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
     } catch (rekogError) {
       console.error('[Rekognition] Error:', rekogError.message);
       kycAnalysis.error = rekogError.message;
+      kycAnalysis.isValid = false; // Fallback to manual review
     }
 
-    // Log KYC analysis to analytics
-    const kycAnalytics = await new Analytics({
-      event: 'kyc_image_analysis',
-      username,
-      phoneNumber,
-      data: kycAnalysis,
-      timestamp: new Date(),
-    }).save();
+    let idImageUrl = '';
+    try {
+      const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
+      const params = {
+        Bucket: S3_BUCKET,
+        Key: s3Key,
+        Body: idImage.buffer,
+        ContentType: idImage.mimetype,
+        ACL: 'private',
+      };
+      await s3.send(new PutObjectCommand(params));
+      idImageUrl = `https://${S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
+    } catch (s3Error) {
+      console.error('[S3] Error:', s3Error.message);
+      idImageUrl = ''; // Fallback to empty URL, allow manual review
+    }
 
-    // Upload ID to S3
-    const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
-    const params = {
-      Bucket: S3_BUCKET,
-      Key: s3Key,
-      Body: idImage.buffer,
-      ContentType: idImage.mimetype,
-      ACL: 'private',
-    };
-    await s3.send(new PutObjectCommand(params));
-    const idImageUrl = `https://${S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
+    const trustScore = kycAnalysis.faceCount > 0 ? 10 : 0;
 
-    // Calculate initial trust score
-    const trustScore = kycAnalysis.faceCount > 0 ? 10 : 0 + (fraudScore > 0 ? 5 : 0);
-
-    // Create user
     const user = new User({
       username: username.trim(),
       name: name.trim(),
@@ -479,26 +428,16 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       trustScore,
       ratingCount: 0,
       transactions: [],
-      kycStatus: kycAnalysis.isValid ? 'pending' : 'pending', // Always pending for manual review
-      kycAnalysis: { ...kycAnalysis, analyticsEventId: kycAnalytics._id },
+      kycStatus: 'pending',
+      kycAnalysis,
       isActive: false,
       isArchived: false,
-      isFlagged: fraudScore < -0.5,
+      isFlagged: false,
     });
     await user.save();
 
-    // Log signup request to analytics
-    const signupAnalytics = await new Analytics({
-      event: 'signup_request',
-      username,
-      data: { kycAnalysis, idImageUrl, fraudScore },
-      timestamp: new Date(),
-    }).save();
-
-    // Generate JWT
     const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
 
-    // Notify admin
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
       await sendPushNotification(
@@ -518,13 +457,7 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       body: req.body,
       file: req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size } : null,
     });
-    const analytics = await new Analytics({
-      event: 'signup_failed',
-      username: username || 'unknown',
-      data: { error: error.message, kycAnalysis: kycAnalysis || null },
-      timestamp: new Date(),
-    }).save();
-    res.status(500).json({ error: 'Server error during registration', analyticsEventId: analytics._id });
+    res.status(500).json({ error: 'Server error during registration' });
   }
 });
 
