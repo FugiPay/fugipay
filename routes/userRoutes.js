@@ -1,4 +1,3 @@
-
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -6,33 +5,42 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { RekognitionClient, DetectTextCommand, DetectFacesCommand } = require('@aws-sdk/client-rekognition');
+const fs = require('fs');
+const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const mongoose = require('mongoose');
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 const axios = require('axios');
 const twilio = require('twilio');
+// const { sendPushNotification } = require('../utils/notifications');
 const { v4: uuidv4 } = require('uuid');
-const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const QRPin = require('../models/QRPin');
 const Business = require('../models/Business');
 const AdminLedger = require('../models/AdminLedger');
-const Analytics = require('../models/Analytics');
+const { body, validationResult } = require('express-validator'); // Added missing import
 const authenticateToken = require('../middleware/authenticateToken');
 const { generalRateLimiter, strictRateLimiter, validate, registerValidation, loginValidation, payQrValidation, updateProfileValidation } = require('../middleware/securityMiddleware');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+const Analytics = require('../models/Analytics');
 
+// Environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'Zangena123$@2025';
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 const S3_BUCKET = process.env.S3_BUCKET || 'zangena';
 const EMAIL_USER = process.env.EMAIL_USER || 'your_email@example.com';
 const EMAIL_PASS = process.env.EMAIL_PASS || 'your_email_password';
+
+const MAX_WITHDRAW_AMOUNT = 10000; // BoZ-compliant max withdrawal per transaction
+const MTN_PREFIXES = ['96', '76'];
+const AIRTEL_PREFIXES = ['97', '77'];
+
 const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
-const MAX_WITHDRAW_AMOUNT = 10000;
-const MTN_PREFIXES = ['96', '76'];
-const AIRTEL_PREFIXES = ['97', '77'];
 
 // Configure AWS S3
 const s3 = new S3Client({
@@ -91,6 +99,20 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// Middleware to check admin role
+const requireAdmin = async (req, res, next) => {
+  try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+  } catch (error) {
+    console.error('[Admin] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 // Configure Twilio
 const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH_TOKEN);
 
@@ -113,7 +135,27 @@ router.get('/debug/indexes', authenticateToken(['admin']), async (req, res) => {
   }
 });
 
-// Ensure analytics indexes
+
+// Analytics Schema
+/* const analyticsSchema = new mongoose.Schema({
+  event: { type: String, required: true, enum: ['deposit_submitted', 'deposit_failed', 'input_error', 'focus_event'] },
+  username: { type: String, required: true, index: true },
+  phoneNumber: { type: String, required: true, index: true },
+  timestamp: { type: Date, required: true, default: Date.now },
+  data: {
+    amount: { type: Number, default: 0 },
+    transactionId: { type: String },
+    error: { type: String },
+    focusCount: { type: Number, default: 0 },
+    errorCount: { type: Number, default: 0 },
+    depositAttempts: { type: Number, default: 0 },
+  },
+  createdAt: { type: Date, default: Date.now, expires: '90d' }, // Auto-expire after 90 days
+}); */
+
+// const Analytics = mongoose.model('Analytics', analyticsSchema);
+
+// Ensure indexes
 const ensureAnalyticsIndexes = async () => {
   try {
     await Analytics.createIndexes({ username: 1, phoneNumber: 1, timestamp: 1 });
@@ -124,27 +166,33 @@ const ensureAnalyticsIndexes = async () => {
 };
 ensureAnalyticsIndexes();
 
-// Calculate trust score
 async function calculateTrustScore(username) {
   try {
     const user = await User.findOne({ username });
     const analytics = await Analytics.find({ username });
     
-    let trustScore = 50;
+    // Base score
+    let trustScore = 50; // Neutral starting point (0-100 scale)
+    
+    // KYC status
     if (user.kycStatus === 'verified') trustScore += 20;
     else if (user.kycStatus === 'rejected') trustScore -= 20;
     
+    // Transaction frequency (last 30 days)
     const recentTransactions = user.transactions.filter(
       t => t.date > new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
     );
-    trustScore += Math.min(recentTransactions.length * 2, 20);
+    trustScore += Math.min(recentTransactions.length * 2, 20); // +2 per transaction, max 20
     
+    // Analytics: Error rate
     const errorCount = analytics.reduce((sum, a) => sum + (a.data.errorCount || 0), 0);
-    trustScore -= Math.min(errorCount * 5, 20);
+    trustScore -= Math.min(errorCount * 5, 20); // -5 per error, max -20
     
+    // Analytics: Deposit attempts
     const depositAttempts = analytics.reduce((sum, a) => sum + (a.data.depositAttempts || 0), 0);
-    trustScore -= depositAttempts > 10 ? 10 : 0;
+    trustScore -= depositAttempts > 10 ? 10 : 0; // Penalty for excessive attempts
     
+    // Ensure score is between 0 and 100
     trustScore = Math.max(0, Math.min(100, trustScore));
     
     await User.updateOne({ username }, { trustScore });
@@ -156,8 +204,9 @@ async function calculateTrustScore(username) {
   }
 }
 
-// Send push notification
-async function sendPushNotification(pushToken, title, body, data = {}, username = 'unknown') {
+
+// Function to send push notifications
+async function sendPushNotification(pushToken, title, body, data = {}) {
   const message = {
     to: pushToken,
     sound: 'default',
@@ -171,26 +220,10 @@ async function sendPushNotification(pushToken, title, body, data = {}, username 
       timeout: 5000,
     });
     console.log(`[Push] Sent to ${pushToken}: ${title} - ${body}`);
-    return { success: true };
   } catch (error) {
     console.error('[Push] Error:', error.message);
-    return { error: error.message };
   }
 }
-
-// Require admin middleware
-const requireAdmin = async (req, res, next) => {
-  try {
-    const user = await User.findOne({ phoneNumber: req.user.phoneNumber });
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-    next();
-  } catch (error) {
-    console.error('[Admin] Error:', error.message);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
 
 // Setup 2FA
 router.post('/setup-2fa', authenticateToken(), strictRateLimiter, async (req, res) => {
@@ -211,10 +244,13 @@ router.post('/setup-2fa', authenticateToken(), strictRateLimiter, async (req, re
       name: `Zangena:${user.username}`,
       issuer: 'Zangena',
     });
+    console.log('[Setup2FA] Generated secret:', secret.base32);
     user.twoFactorSecret = secret.base32;
     await user.save();
-    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
-    res.json({ qrCodeUrl, secret: secret.base32 });
+    console.log('[Setup2FA] User updated with secret:', user.twoFactorSecret);
+    const qrCodeUrl = await qrcode.toDataURL(secret.otpauth_url);
+    console.log('[Setup2FA] QR code generated');
+    res.json({ qrCodeUrl, secret: secret.base32 }); // Return secret.base32
   } catch (error) {
     console.error('[Setup2FA] Error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to setup 2FA' });
@@ -318,7 +354,7 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, generalRa
   }
 });
 
-// Register User
+// Updated Register User
 router.post('/register', strictRateLimiter, upload.single('idImage'), handleMulterError, validate(registerValidation), async (req, res, next) => {
   console.log('[Register] Request Body:', req.body);
   console.log('[Register] File:', req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size } : null);
@@ -328,43 +364,41 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
 
   if (!idImage) {
     console.error('[Register] No ID image provided');
-    const analytics = await Analytics.create({
+    const analytics = await new Analytics({
       event: 'signup_failed',
       username: username || 'unknown',
       data: { error: 'ID image or PDF is required' },
       timestamp: new Date(),
-    });
+    }).save();
     return res.status(400).json({ error: 'ID image or PDF is required', analyticsEventId: analytics._id });
   }
 
   try {
-    if (mongoose.connection.readyState !== 1) {
-      console.error('[Register] MongoDB not connected');
-      return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
-    }
-
+    // Check for duplicate user
     const existingUser = await User.findOne({ $or: [{ username }, { email: email.toLowerCase() }, { phoneNumber }] }).lean();
     if (existingUser) {
       console.error('[Register] Duplicate user:', { username, email, phoneNumber });
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'signup_failed',
         username,
         data: { error: 'Duplicate user', username, email, phoneNumber },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(409).json({ error: 'Username, email, or phone number already exists', analyticsEventId: analytics._id });
     }
 
+    // AI: Check for suspicious input patterns
     if (username.match(/(.)\1{3,}/) || email.match(/(.)\1{3,}@/)) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'signup_failed',
         username,
         data: { error: 'Suspicious input patterns', username, email },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({ error: 'Suspicious input detected', isFlagged: true, analyticsEventId: analytics._id });
     }
 
+    // AI: Fraud detection via microservice
     let fraudScore = 1;
     try {
       const fraudResult = await axios.post('http://localhost:5000/predict', {
@@ -376,19 +410,20 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       fraudScore = fraudResult.data.is_anomaly ? -1 : 1;
     } catch (fraudError) {
       console.error('[Register] Fraud Detection Error:', fraudError.message);
-      fraudScore = 0;
+      fraudScore = 0; // Neutral score if fraud detection fails
     }
 
     if (fraudScore < -0.5) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'signup_failed',
         username,
         data: { error: 'High-risk signup detected', fraudScore, username, email, phoneNumber },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({ error: 'High-risk signup detected', isFlagged: true, fraudScore, analyticsEventId: analytics._id });
     }
 
+    // KYC: Analyze ID image with AWS Rekognition
     let kycAnalysis = { textCount: 0, faceCount: 0, isValid: false, analyzedAt: new Date() };
     try {
       const detectTextCommand = new DetectTextCommand({ Image: { Bytes: idImage.buffer } });
@@ -405,38 +440,31 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       kycAnalysis.error = rekogError.message;
     }
 
-    const kycAnalytics = await Analytics.create({
+    // Log KYC analysis to analytics
+    const kycAnalytics = await new Analytics({
       event: 'kyc_image_analysis',
       username,
       phoneNumber,
       data: kycAnalysis,
       timestamp: new Date(),
-    });
+    }).save();
 
+    // Upload ID to S3
     const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
-    try {
-      const params = {
-        Bucket: S3_BUCKET,
-        Key: s3Key,
-        Body: idImage.buffer,
-        ContentType: idImage.mimetype,
-        ACL: 'private',
-      };
-      await s3.send(new PutObjectCommand(params));
-    } catch (s3Error) {
-      console.error('[S3] Error:', s3Error.message);
-      const analytics = await Analytics.create({
-        event: 'signup_failed',
-        username,
-        data: { error: 'S3 upload failed', details: s3Error.message },
-        timestamp: new Date(),
-      });
-      return res.status(500).json({ error: 'Failed to upload ID image', analyticsEventId: analytics._id });
-    }
+    const params = {
+      Bucket: S3_BUCKET,
+      Key: s3Key,
+      Body: idImage.buffer,
+      ContentType: idImage.mimetype,
+      ACL: 'private',
+    };
+    await s3.send(new PutObjectCommand(params));
+    const idImageUrl = `https://${S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
 
-    const idImageUrl = `https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${s3Key}`;
+    // Calculate initial trust score
     const trustScore = kycAnalysis.faceCount > 0 ? 10 : 0 + (fraudScore > 0 ? 5 : 0);
 
+    // Create user
     const user = new User({
       username: username.trim(),
       name: name.trim(),
@@ -451,7 +479,7 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       trustScore,
       ratingCount: 0,
       transactions: [],
-      kycStatus: kycAnalysis.isValid ? 'pending' : 'pending',
+      kycStatus: kycAnalysis.isValid ? 'pending' : 'pending', // Always pending for manual review
       kycAnalysis: { ...kycAnalysis, analyticsEventId: kycAnalytics._id },
       isActive: false,
       isArchived: false,
@@ -459,15 +487,18 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
     });
     await user.save();
 
-    const signupAnalytics = await Analytics.create({
+    // Log signup request to analytics
+    const signupAnalytics = await new Analytics({
       event: 'signup_request',
       username,
       data: { kycAnalysis, idImageUrl, fraudScore },
       timestamp: new Date(),
-    });
+    }).save();
 
+    // Generate JWT
     const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
 
+    // Notify admin
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
       await sendPushNotification(
@@ -487,64 +518,76 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       body: req.body,
       file: req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size } : null,
     });
-    const analytics = await Analytics.create({
+    const analytics = await new Analytics({
       event: 'signup_failed',
       username: username || 'unknown',
       data: { error: error.message, kycAnalysis: kycAnalysis || null },
       timestamp: new Date(),
-    });
+    }).save();
     res.status(500).json({ error: 'Server error during registration', analyticsEventId: analytics._id });
   }
 });
 
-// Simplified Login Validation
+// Login endpoint
+
+// Validation middleware for login
 const simplifiedLoginValidation = [
-  body('identifier').trim().notEmpty().withMessage('Username or phone number is required'),
-  body('password').trim().notEmpty().withMessage('Password is required'),
+  body('identifier')
+    .trim()
+    .isString()
+    .notEmpty()
+    .withMessage('Username or phone number is required'),
+  body('password')
+    .isString()
+    .notEmpty()
+    .withMessage('Password is required'),
 ];
 
 // Login endpoint
-router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), async (req, res) => {
-  const { identifier, password, smsCode } = req.body;
+router.post('/login', strictRateLimiter, simplifiedLoginValidation, async (req, res) => {
+  // Check validation results
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    console.log('[Login] Validation errors:', errors.array());
+    return res.status(400).json({ error: errors.array()[0].msg });
+  }
+
+  const { identifier, password } = req.body;
   console.log('[Login] Request:', { identifier });
 
   try {
-    if (mongoose.connection.readyState !== 1) {
-      console.error('[Login] MongoDB not connected');
-      return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
-    }
-
+    // Optimize database query with indexed fields and lean()
     const user = await User.findOne({
       $or: [{ username: identifier }, { phoneNumber: identifier }],
-    }).lean().select('username phoneNumber password role kycStatus isActive lastLogin lastLoginAttempts name twoFactorEnabled twoFactorSecret twoFactorExpiry');
+    }).lean().select('username phoneNumber password role kycStatus isActive lastLogin lastLoginAttempts name');
 
     if (!user) {
       console.log('[Login] User not found:', identifier);
       await Analytics.create({
-        event: 'signin_failed',
+        event: 'login_failed',
         username: identifier,
         data: { reason: 'User not found' },
         timestamp: new Date(),
       });
-      return res.status(400).json({ error: 'Invalid credentials' });
+      return res.status(400).json({ error: 'Invalid username or password' });
     }
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       console.log('[Login] Invalid password for:', user.username);
       await Analytics.create({
-        event: 'signin_failed',
+        event: 'login_failed',
         username: user.username,
         data: { reason: 'Invalid password' },
         timestamp: new Date(),
       });
-      return res.status(400).json({ error: 'Invalid credentials' });
+      return res.status(400).json({ error: 'Invalid username or password' });
     }
 
     if (!user.isActive) {
       console.log('[Login] Inactive or archived user:', user.username);
       await Analytics.create({
-        event: 'signin_failed',
+        event: 'login_failed',
         username: user.username,
         data: { reason: 'Account inactive or archived' },
         timestamp: new Date(),
@@ -552,65 +595,12 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
       return res.status(403).json({ error: 'Account is inactive or archived. Please contact support.' });
     }
 
-    if (user.twoFactorEnabled && !smsCode) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      await User.updateOne(
-        { _id: user._id },
-        {
-          twoFactorSecret: smsCode,
-          twoFactorExpiry: new Date(Date.now() + 10 * 60 * 1000),
-        }
-      );
-      try {
-        await twilioClient.messages.create({
-          body: `Your FugiPay 2FA code is ${smsCode}. It expires in 10 minutes.`,
-          from: TWILIO_PHONE_NUMBER,
-          to: user.phoneNumber,
-        });
-        console.log('[Login] SMS sent to:', user.phoneNumber);
-      } catch (error) {
-        console.error('[Login] SMS send error:', error.message);
-        await Analytics.create({
-          event: 'signin_failed',
-          username: user.username,
-          data: { reason: 'SMS send failed', error: error.message },
-          timestamp: new Date(),
-        });
-        return res.status(500).json({ error: 'Failed to send 2FA code' });
-      }
-      return res.status(401).json({ error: 'SMS 2FA code required', twoFactorEnabled: true });
-    }
-
-    if (user.twoFactorEnabled && smsCode) {
-      if (!/^\d{6}$/.test(smsCode)) {
-        console.log('[Login] Invalid SMS code format for:', user.username);
-        await Analytics.create({
-          event: 'signin_failed',
-          username: user.username,
-          data: { reason: 'Invalid SMS code format' },
-          timestamp: new Date(),
-        });
-        return res.status(400).json({ error: 'Invalid 2FA code' });
-      }
-      if (user.twoFactorSecret !== smsCode || user.twoFactorExpiry < new Date()) {
-        console.log('[Login] Invalid or expired SMS code for:', user.username);
-        await Analytics.create({
-          event: 'signin_failed',
-          username: user.username,
-          data: { reason: 'Invalid or expired SMS code' },
-          timestamp: new Date(),
-        });
-        return res.status(400).json({ error: 'Invalid or expired 2FA code' });
-      }
-    }
-
+    // Update user login details
     await User.updateOne(
       { _id: user._id },
       {
         lastLogin: new Date(),
         $inc: { lastLoginAttempts: 1 },
-        twoFactorSecret: null,
-        twoFactorExpiry: null,
       }
     );
 
@@ -621,7 +611,7 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
     );
 
     const analyticsEvent = await Analytics.create({
-      event: 'signin_success',
+      event: 'login_success',
       username: user.username,
       data: { role: user.role, kycStatus: user.kycStatus },
       timestamp: new Date(),
@@ -643,22 +633,167 @@ router.post('/login', strictRateLimiter, validate(simplifiedLoginValidation), as
       kycStatus: user.kycStatus,
       isFirstLogin: !user.lastLoginAttempts || user.lastLoginAttempts === 0,
       isActive: user.isActive,
-      twoFactorEnabled: user.twoFactorEnabled,
+      twoFactorEnabled: false,
     });
   } catch (error) {
     console.error('[Login] Error:', error.message, error.stack);
     await Analytics.create({
-      event: 'signin_failed',
+      event: 'login_failed',
       username: identifier || 'unknown',
       data: { reason: error.message },
       timestamp: new Date(),
     });
+
+    // Handle specific errors for better frontend feedback
     if (error.name === 'MongoServerError' || error.message.includes('database')) {
       return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
     }
     res.status(500).json({ error: 'Server error. Please try again later.' });
   }
 });
+
+/* router.post('/login', strictRateLimiter, validate(loginValidation), async (req, res) => {
+  const { identifier, password, smsCode } = req.body;
+  console.log('[Login] Request:', { identifier });
+
+  try {
+    const user = await User.findOne({
+      $or: [{ username: identifier }, { phoneNumber: identifier }],
+    });
+
+    if (!user) {
+      console.log('[Login] User not found:', identifier);
+      await Analytics.create({
+        event: 'login_failed',
+        username: identifier,
+        data: { reason: 'User not found' },
+        timestamp: new Date(),
+      });
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      console.log('[Login] Invalid password for:', user.username);
+      await Analytics.create({
+        event: 'login_failed',
+        username: user.username,
+        data: { reason: 'Invalid password' },
+        timestamp: new Date(),
+      });
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+
+    if (!user.isEffectivelyActive) {
+      console.log('[Login] Inactive or archived user:', user.username);
+      await Analytics.create({
+        event: 'login_failed',
+        username: user.username,
+        data: { reason: 'Account inactive or archived' },
+        timestamp: new Date(),
+      });
+      return res.status(403).json({ error: 'Account is inactive or archived' });
+    }
+
+    if (user.twoFactorEnabled && !smsCode) {
+      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
+      user.twoFactorSecret = smsCode;
+      user.twoFactorExpiry = new Date(Date.now() + 10 * 60 * 1000);
+      await user.save();
+
+      try {
+        await twilioClient.messages.create({
+          body: `Your FugiPay 2FA code is ${smsCode}. It expires in 10 minutes.`,
+          from: TWILIO_PHONE_NUMBER,
+          to: user.phoneNumber,
+        });
+        console.log('[Login] SMS sent to:', user.phoneNumber);
+      } catch (error) {
+        console.error('[Login] SMS send error:', error.message);
+        await Analytics.create({
+          event: 'login_failed',
+          username: user.username,
+          data: { reason: 'SMS send failed' },
+          timestamp: new Date(),
+        });
+        return res.status(500).json({ error: 'Failed to send 2FA code' });
+      }
+
+      console.log('[Login] SMS 2FA required for:', user.username);
+      return res.status(401).json({ error: 'SMS 2FA code required', twoFactorEnabled: true });
+    }
+
+    if (user.twoFactorEnabled && smsCode) {
+      if (!/^\d{6}$/.test(smsCode)) {
+        console.log('[Login] Invalid SMS code format for:', user.username);
+        await Analytics.create({
+          event: 'login_failed',
+          username: user.username,
+          data: { reason: 'Invalid SMS code format' },
+          timestamp: new Date(),
+        });
+        return res.status(400).json({ error: 'Invalid 2FA code' });
+      }
+      if (user.twoFactorSecret !== smsCode || user.twoFactorExpiry < new Date()) {
+        console.log('[Login] Invalid or expired SMS code for:', user.username);
+        await Analytics.create({
+          event: 'login_failed',
+          username: user.username,
+          data: { reason: 'Invalid or expired SMS code' },
+          timestamp: new Date(),
+        });
+        return res.status(400).json({ error: 'Invalid or expired 2FA code' });
+      }
+    }
+
+    user.lastLogin = new Date();
+    user.lastLoginAttempts = (user.lastLoginAttempts || 0) + 1;
+    user.twoFactorSecret = undefined;
+    user.twoFactorExpiry = undefined;
+    await user.save();
+
+    const token = jwt.sign(
+      { username: user.username, role: user.role },
+      JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    const analyticsEvent = await Analytics.create({
+      event: 'login_success',
+      username: user.username,
+      data: { role: user.role, kycStatus: user.kycStatus },
+      timestamp: new Date(),
+    });
+
+    await AdminLedger.create({
+      action: 'login',
+      username: user.username,
+      details: { analyticsEventId: analyticsEvent._id },
+      timestamp: new Date(),
+    });
+
+    res.json({
+      phoneNumber: user.phoneNumber,
+      token,
+      username: user.username,
+      name: user.name,
+      role: user.role,
+      kycStatus: user.kycStatus,
+      isFirstLogin: !user.lastLoginAttempts || user.lastLoginAttempts === 1,
+      isActive: user.isActive,
+      twoFactorEnabled: user.twoFactorEnabled,
+    });
+  } catch (error) {
+    console.error('[Login] Error:', error.message, error.stack);
+    await Analytics.create({
+      event: 'login_failed',
+      username: identifier,
+      data: { reason: error.message },
+      timestamp: new Date(),
+    });
+    res.status(500).json({ error: 'Server error' });
+  }
+}); */
 
 // Enable SMS 2FA
 router.post('/enable-sms-2fa', authenticateToken(), strictRateLimiter, async (req, res) => {
@@ -719,6 +854,24 @@ router.post('/verify-sms-2fa', strictRateLimiter, async (req, res) => {
   }
 });
 
+// Disable 2FA
+router.post('/disable-2fa', authenticateToken(), async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    user.twoFactorSecret = undefined;
+    user.twoFactorEnabled = false;
+    user.twoFactorExpiry = undefined;
+    await user.save();
+    res.json({ message: '2FA disabled successfully' });
+  } catch (error) {
+    console.error('[Disable2FA] Error:', error.message);
+    res.status(500).json({ error: 'Failed to disable 2FA' });
+  }
+});
+
 // Forgot Password
 router.post('/forgot-password', strictRateLimiter, async (req, res) => {
   const { identifier } = req.body;
@@ -738,19 +891,14 @@ router.post('/forgot-password', strictRateLimiter, async (req, res) => {
     user.resetToken = resetToken;
     user.resetTokenExpiry = resetTokenExpiry;
     await user.save();
-    try {
-      const mailOptions = {
-        from: EMAIL_USER,
-        to: user.email,
-        subject: 'FugiPay Password Reset',
-        text: `Your password reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the FugiPay app to reset your password.`,
-        html: `<h2>FugiPay Password Reset</h2><p>Your password reset token is: <strong>${resetToken}</strong></p><p>It expires in 1 hour. Enter it in the FugiPay app to reset your password.</p>`,
-      };
-      await transporter.sendMail(mailOptions);
-    } catch (emailError) {
-      console.error('[ForgotPassword] Email send error:', emailError.message);
-      return res.status(500).json({ error: 'Failed to send reset email' });
-    }
+    const mailOptions = {
+      from: EMAIL_USER,
+      to: user.email,
+      subject: 'Zangena Password Reset',
+      text: `Your password reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena app to reset your password.`,
+      html: `<h2>Zangena Password Reset</h2><p>Your password reset token is: <strong>${resetToken}</strong></p><p>It expires in 1 hour. Enter it in the Zangena app to reset your password.</p>`,
+    };
+    await transporter.sendMail(mailOptions);
     res.json({ message: 'Reset instructions have been sent to your email.' });
   } catch (error) {
     console.error('[ForgotPassword] Error:', error.message);
@@ -840,7 +988,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), generalRateLimiter, async
       return res.status(403).json({ error: 'Unauthorized' });
     }
     const user = await User.findOne({ phoneNumber })
-      .select('phoneNumber username email name balance zambiaCoinBalance trustScore kycStatus role lastViewedTimestamp pendingDeposits pendingWithdrawals twoFactorEnabled')
+      .select('phoneNumber username email name balance zambiaCoinBalance trustScore kycStatus role lastViewedTimestamp pendingDeposits pendingWithdrawals transactions')
       .slice('transactions', [Number(skip), Number(limit)])
       .lean()
       .exec();
@@ -888,7 +1036,7 @@ router.get('/phone/:phoneNumber', authenticateToken(), generalRateLimiter, async
   }
 });
 
-// Update User by Phone Number
+// Update User by Phone Number to include twoFactorEnabled
 router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => {
   const { phoneNumber } = req.params;
   const { limit = 10, skip = 0 } = req.query;
@@ -915,7 +1063,7 @@ router.get('/user/phone/:phoneNumber', authenticateToken(), async (req, res) => 
       transactions,
       kycStatus: user.kycStatus,
       email: user.email,
-      name: user.name || '',
+      name: user.name || '', // Include name, default to empty string
       twoFactorEnabled: user.twoFactorEnabled || false,
       isArchived: user.isArchived,
       lastViewedTimestamp: user.lastViewedTimestamp,
@@ -1187,119 +1335,129 @@ router.post('/pay-qr', authenticateToken(), strictRateLimiter, validate(payQrVal
   }
 });
 
-// Manual Deposit
+// Updated Manual Deposit
 router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (req, res) => {
   const { amount, transactionId } = req.body;
   const { username } = req.user;
   console.log('[DepositManual] Request:', { username, amount, transactionId });
 
   try {
+    // Validate amount
     const depositAmount = parseFloat(amount);
     if (isNaN(depositAmount) || depositAmount <= 0) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         data: { error: 'Invalid amount', amount },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(400).json({ error: 'Invalid amount', analyticsEventId: analytics._id });
     }
-    if (depositAmount > 10000) {
-      const analytics = await Analytics.create({
+    if (depositAmount > MAX_DEPOSIT_AMOUNT) {
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
-        data: { error: 'Amount cannot exceed K10000', amount },
+        data: { error: `Amount cannot exceed K${MAX_DEPOSIT_AMOUNT}`, amount },
         timestamp: new Date(),
-      });
-      return res.status(400).json({ error: 'Amount cannot exceed K10000', analyticsEventId: analytics._id });
+      }).save();
+      return res.status(400).json({ error: `Amount cannot exceed K${MAX_DEPOSIT_AMOUNT}`, analyticsEventId: analytics._id });
     }
 
-    if (!transactionId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(transactionId)) {
-      const analytics = await Analytics.create({
+    // Validate transactionId
+    if (!transactionId || typeof transactionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(transactionId)) {
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         data: { error: 'Invalid transaction ID format (must be UUID)', transactionId },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(400).json({ error: 'Invalid transaction ID format (must be UUID)', analyticsEventId: analytics._id });
     }
 
+    // Fetch user
     const user = await User.findOne({ username });
     if (!user) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         data: { error: 'User not found' },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(404).json({ error: 'User not found', analyticsEventId: analytics._id });
     }
 
+    // Validate user status
     if (!user.isActive || user.isArchived) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         data: { error: 'User is not active or archived' },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({ error: 'User is not active or archived', analyticsEventId: analytics._id });
     }
 
     if (user.kycStatus !== 'verified') {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         data: { error: 'KYC verification required' },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({ error: 'KYC verification required', analyticsEventId: analytics._id });
     }
 
     if (user.isFlagged) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         data: { error: 'Account flagged', fraudScore: -1, isFlagged: true },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({ error: 'Account flagged', fraudScore: -1, isFlagged: true, analyticsEventId: analytics._id });
     }
 
+    // Validate phone number (MTN/Airtel)
     let phoneNumber = user.phoneNumber;
     if (!phoneNumber.startsWith('+260')) {
       if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
       else if (phoneNumber.startsWith('0')) phoneNumber = '+260' + phoneNumber.slice(1);
       else {
-        const analytics = await Analytics.create({
+        const analytics = await new Analytics({
           event: 'deposit_failed',
           identifier: username,
           data: { error: 'Invalid phone number format' },
           timestamp: new Date(),
-        });
+        }).save();
         return res.status(400).json({ error: 'Invalid phone number format', analyticsEventId: analytics._id });
       }
     }
     const prefix = phoneNumber.slice(4, 6);
     if (!MTN_PREFIXES.includes(prefix) && !AIRTEL_PREFIXES.includes(prefix)) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         data: { error: 'Deposits only supported for MTN or Airtel numbers' },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(400).json({ error: 'Deposits only supported for MTN or Airtel numbers', analyticsEventId: analytics._id });
     }
 
+    // Check for duplicate transactionId
     if (user.pendingDeposits.some(deposit => deposit.transactionId === transactionId)) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         data: { error: 'Duplicate transaction ID', transactionId },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(400).json({ error: 'Duplicate transaction ID', analyticsEventId: analytics._id });
     }
 
+    // Calculate fee (1% with min K2, consistent with withdraw.tsx)
+    const fee = Math.max(depositAmount * 0.01, 2);
+
+    // AI: Fraud detection
     let fraudScore = 1;
     let fraudAnalyticsEventId = null;
     try {
@@ -1315,33 +1473,33 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
       const { is_anomaly, analyticsEventId, error } = fraudResult.data;
       if (error) {
         console.error('[DepositManual] Fraud Detection Error:', error);
-        const analytics = await Analytics.create({
+        const analytics = await new Analytics({
           event: 'deposit_failed',
           identifier: username,
           phoneNumber: user.phoneNumber,
           data: { error: `Fraud detection error: ${error}`, transactionId },
           timestamp: new Date(),
-        });
+        }).save();
         return res.status(500).json({ error: 'Fraud detection failed', analyticsEventId: analytics._id });
       }
       fraudScore = is_anomaly ? -1 : 1;
       fraudAnalyticsEventId = analyticsEventId;
     } catch (fraudError) {
       console.error('[DepositManual] Fraud Detection Error:', fraudError.message);
-      fraudScore = 0;
-      const analytics = await Analytics.create({
+      fraudScore = 0; // Neutral score if fraud detection fails
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         phoneNumber: user.phoneNumber,
         data: { error: `Fraud detection error: ${fraudError.message}`, transactionId },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(500).json({ error: 'Fraud detection failed', analyticsEventId: analytics._id });
     }
 
     if (fraudScore < -0.5) {
       await User.updateOne({ username }, { $set: { isFlagged: true } });
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'deposit_failed',
         identifier: username,
         phoneNumber: user.phoneNumber,
@@ -1354,7 +1512,7 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
           fraudAnalyticsEventId
         },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({
         error: 'High-risk deposit detected',
         fraudScore,
@@ -1364,13 +1522,13 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
       });
     }
 
-    const fee = Math.max(depositAmount * 0.01, 2);
+    // Increment deposit attempts
     user.depositAttempts = (user.depositAttempts || 0) + 1;
     if (user.depositAttempts >= 5) {
       user.isFlagged = true;
     }
 
-    const analyticsEntry = await Analytics.create({
+    const analyticsEntry = await new Analytics({
       event: 'deposit_request',
       identifier: username,
       phoneNumber: user.phoneNumber,
@@ -1384,7 +1542,7 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
         userAgent: req.headers['user-agent'],
       },
       timestamp: new Date(),
-    });
+    }).save();
 
     user.pendingDeposits.push({
       amount: depositAmount,
@@ -1396,6 +1554,7 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
     });
     await user.save();
 
+    // Update AdminLedger with deposit fee
     await AdminLedger.updateOne(
       {},
       {
@@ -1434,11 +1593,12 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
           fraudAnalyticsEventId,
           ip: req.ip,
           userAgent: req.headers['user-agent'],
-        }
+        },
+        username
       );
       if (notificationResult.error) {
         console.error('[DepositManual] Notification Error:', notificationResult.error);
-        const analytics = await Analytics.create({
+        const analytics = await new Analytics({
           event: 'deposit_notification_failed',
           identifier: username,
           phoneNumber: user.phoneNumber,
@@ -1449,7 +1609,7 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
             fraudAnalyticsEventId
           },
           timestamp: new Date(),
-        });
+        }).save();
       }
     }
 
@@ -1475,7 +1635,7 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
       status = 429;
       errorMessage = 'Too many requests. Please try again later.';
     }
-    const analytics = await Analytics.create({
+    const analytics = await new Analytics({
       event: 'deposit_failed',
       identifier: username || 'unknown',
       phoneNumber: user?.phoneNumber,
@@ -1487,7 +1647,7 @@ router.post('/deposit/manual', authenticateToken(), generalRateLimiter, async (r
         userAgent: req.headers['user-agent'],
       },
       timestamp: new Date(),
-    });
+    }).save();
     res.status(status).json({ error: errorMessage, analyticsEventId: analytics._id });
   }
 });
@@ -1499,44 +1659,47 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
   console.log('[WithdrawRequest] Request:', { username, amount });
 
   try {
+    // Validate amount
     const withdrawAmount = parseFloat(amount);
     if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
         data: { error: 'Invalid amount', amount },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(400).json({ error: 'Invalid amount', analyticsEventId: analytics._id });
     }
     if (withdrawAmount > MAX_WITHDRAW_AMOUNT) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
         data: { error: `Amount cannot exceed K${MAX_WITHDRAW_AMOUNT}`, amount },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(400).json({ error: `Amount cannot exceed K${MAX_WITHDRAW_AMOUNT}`, analyticsEventId: analytics._id });
     }
 
+    // Fetch user
     const user = await User.findOne({ username });
     if (!user) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
         data: { error: 'User not found' },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(404).json({ error: 'User not found', analyticsEventId: analytics._id });
     }
 
+    // Validate user status
     if (!user.isActive || user.isArchived) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
         data: { error: user.isActive ? 'Account is inactive' : 'Account is archived' },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({
         error: user.isActive ? 'Account is inactive' : 'Account is archived',
         analyticsEventId: analytics._id,
@@ -1544,22 +1707,22 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
     }
 
     if (user.kycStatus !== 'verified') {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
         data: { error: 'KYC verification required' },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({ error: 'KYC verification required', analyticsEventId: analytics._id });
     }
 
     if (user.isFlagged) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
         data: { error: 'Account flagged', fraudScore: -1, isFlagged: true },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({
         error: 'Account flagged for suspicious activity. Contact support.',
         fraudScore: -1,
@@ -1568,42 +1731,61 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
       });
     }
 
+    // Validate phone number (MTN/Airtel)
     let phoneNumber = user.phoneNumber;
     if (!phoneNumber.startsWith('+260')) {
       if (phoneNumber.startsWith('260')) phoneNumber = '+' + phoneNumber;
       else if (phoneNumber.startsWith('0')) phoneNumber = '+260' + phoneNumber.slice(1);
       else {
-        const analytics = await Analytics.create({
+        const analytics = await new Analytics({
           event: 'withdraw_failed',
           identifier: username,
           data: { error: 'Invalid phone number format' },
           timestamp: new Date(),
-        });
+        }).save();
         return res.status(400).json({ error: 'Invalid phone number format', analyticsEventId: analytics._id });
       }
     }
     const prefix = phoneNumber.slice(4, 6);
     if (!MTN_PREFIXES.includes(prefix) && !AIRTEL_PREFIXES.includes(prefix)) {
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
         data: { error: 'Withdrawals only supported for MTN or Airtel numbers' },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(400).json({ error: 'Withdrawals only supported for MTN or Airtel numbers', analyticsEventId: analytics._id });
     }
 
-    if (user.balance < withdrawAmount) {
-      const analytics = await Analytics.create({
+    // Calculate fee
+    const fee = Math.max(withdrawAmount * 0.01, 2);
+    const totalDeduction = withdrawAmount + fee;
+    if (user.balance < totalDeduction) {
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
-        data: { error: 'Insufficient balance', balance: user.balance, amount: withdrawAmount },
+        data: { error: 'Insufficient balance including fee', amount: withdrawAmount, fee, balance: user.balance },
         timestamp: new Date(),
+      }).save();
+      return res.status(400).json({
+        error: 'Insufficient balance including fee',
+        analyticsEventId: analytics._id,
       });
-      return res.status(400).json({ error: 'Insufficient balance', analyticsEventId: analytics._id });
     }
 
+    // Generate transactionId
     const transactionId = uuidv4();
+    if (user.pendingWithdrawals.some(withdrawal => withdrawal.transactionId === transactionId)) {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: username,
+        data: { error: 'Duplicate transaction ID', transactionId },
+        timestamp: new Date(),
+      }).save();
+      return res.status(400).json({ error: 'Duplicate transaction ID', analyticsEventId: analytics._id });
+    }
+
+    // AI: Fraud detection
     let fraudScore = 1;
     let fraudAnalyticsEventId = null;
     try {
@@ -1619,33 +1801,33 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
       const { is_anomaly, analyticsEventId, error } = fraudResult.data;
       if (error) {
         console.error('[WithdrawRequest] Fraud Detection Error:', error);
-        const analytics = await Analytics.create({
+        const analytics = await new Analytics({
           event: 'withdraw_failed',
           identifier: username,
           phoneNumber: user.phoneNumber,
           data: { error: `Fraud detection error: ${error}`, transactionId },
           timestamp: new Date(),
-        });
+        }).save();
         return res.status(500).json({ error: 'Fraud detection failed', analyticsEventId: analytics._id });
       }
       fraudScore = is_anomaly ? -1 : 1;
       fraudAnalyticsEventId = analyticsEventId;
     } catch (fraudError) {
       console.error('[WithdrawRequest] Fraud Detection Error:', fraudError.message);
-      fraudScore = 0;
-      const analytics = await Analytics.create({
+      fraudScore = 0; // Neutral score if fraud detection fails
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
         phoneNumber: user.phoneNumber,
         data: { error: `Fraud detection error: ${fraudError.message}`, transactionId },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(500).json({ error: 'Fraud detection failed', analyticsEventId: analytics._id });
     }
 
     if (fraudScore < -0.5) {
       await User.updateOne({ username }, { $set: { isFlagged: true } });
-      const analytics = await Analytics.create({
+      const analytics = await new Analytics({
         event: 'withdraw_failed',
         identifier: username,
         phoneNumber: user.phoneNumber,
@@ -1658,7 +1840,7 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
           fraudAnalyticsEventId
         },
         timestamp: new Date(),
-      });
+      }).save();
       return res.status(403).json({
         error: 'High-risk withdrawal detected',
         fraudScore,
@@ -1668,18 +1850,14 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
       });
     }
 
-    const fee = Math.max(withdrawAmount * 0.01, 2);
-    user.pendingWithdrawals.push({
-      amount: withdrawAmount,
-      transactionId,
-      fraudScore,
-      analyticsEventId: null,
-      fraudAnalyticsEventId,
-      status: 'pending',
-    });
-    await user.save();
+    // Increment withdrawal attempts
+    user.lastWithdrawAttempts = (user.lastWithdrawAttempts || 0) + 1;
+    if (user.lastWithdrawAttempts >= 5) {
+      user.isFlagged = true;
+    }
 
-    const analyticsEntry = await Analytics.create({
+    // Create analytics entry
+    const analytics = await new Analytics({
       event: 'withdraw_request',
       identifier: username,
       phoneNumber: user.phoneNumber,
@@ -1693,13 +1871,21 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
         userAgent: req.headers['user-agent'],
       },
       timestamp: new Date(),
+    }).save();
+
+    // Add to pendingWithdrawals
+    user.pendingWithdrawals = user.pendingWithdrawals || [];
+    user.pendingWithdrawals.push({
+      amount: withdrawAmount,
+      transactionId,
+      date: new Date(),
+      status: 'pending',
+      analyticsEventId: analytics._id,
+      fraudAnalyticsEventId
     });
+    await user.save();
 
-    await User.updateOne(
-      { username, 'pendingWithdrawals.transactionId': transactionId },
-      { $set: { 'pendingWithdrawals.$.analyticsEventId': analyticsEntry._id } }
-    );
-
+    // Update AdminLedger with withdrawal fee
     await AdminLedger.updateOne(
       {},
       {
@@ -1707,13 +1893,13 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
         $set: { lastUpdated: new Date() },
         $push: {
           transactions: {
-            type: 'withdraw_fee',
+            type: 'withdrawal_fee',
             amount: fee,
             sender: username,
             receiver: 'System',
             userTransactionIds: [transactionId],
             fraudScore,
-            analyticsEventId: analyticsEntry._id,
+            analyticsEventId: analytics._id,
             fraudAnalyticsEventId,
             ip: req.ip,
             userAgent: req.headers['user-agent'],
@@ -1724,6 +1910,7 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
       { upsert: true }
     );
 
+    // Notify admin
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
       const notificationResult = await sendPushNotification(
@@ -1731,38 +1918,40 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
         'New Withdrawal Request',
         `User ${username} submitted a withdrawal of K${withdrawAmount.toFixed(2)} (fee: K${fee.toFixed(2)}).`,
         {
-          type: 'withdraw_request',
+          type: 'withdrawal_request',
           userId: user._id,
-          withdrawId: transactionId,
-          analyticsEventId: analyticsEntry._id,
+          withdrawalIndex: user.pendingWithdrawals.length - 1,
+          transactionId,
+          analyticsEventId: analytics._id,
           fraudAnalyticsEventId,
           ip: req.ip,
           userAgent: req.headers['user-agent'],
-        }
+        },
+        username
       );
       if (notificationResult.error) {
         console.error('[WithdrawRequest] Notification Error:', notificationResult.error);
-        const analytics = await Analytics.create({
+        const analytics = await new Analytics({
           event: 'withdraw_notification_failed',
           identifier: username,
           phoneNumber: user.phoneNumber,
           data: {
             error: notificationResult.error,
             transactionId,
-            analyticsEventId: analyticsEntry._id,
+            analyticsEventId: analytics._id,
             fraudAnalyticsEventId
           },
           timestamp: new Date(),
-        });
+        }).save();
       }
     }
 
-    console.log('[WithdrawRequest] Success:', { username, amount: withdrawAmount, transactionId, fraudScore, analyticsEventId: analyticsEntry._id, fraudAnalyticsEventId });
+    console.log('[WithdrawRequest] Success:', { username, amount: withdrawAmount, transactionId, fraudScore, analyticsEventId: analytics._id, fraudAnalyticsEventId });
     res.status(200).json({
-      message: 'Withdrawal submitted for verification',
+      message: 'Withdrawal requested. Awaiting approval.',
       transactionId,
       fraudScore,
-      analyticsEventId: analyticsEntry._id,
+      analyticsEventId: analytics._id,
       fraudAnalyticsEventId
     });
   } catch (error) {
@@ -1773,12 +1962,12 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
       amount,
     });
     let status = 500;
-    let errorMessage = 'Failed to process withdrawal';
+    let errorMessage = 'Failed to request withdrawal';
     if (error.message.includes('Rate limit')) {
       status = 429;
       errorMessage = 'Too many requests. Please try again later.';
     }
-    const analytics = await Analytics.create({
+    const analytics = await new Analytics({
       event: 'withdraw_failed',
       identifier: username || 'unknown',
       phoneNumber: user?.phoneNumber,
@@ -1789,8 +1978,1348 @@ router.post('/withdraw/request', authenticateToken(), generalRateLimiter, async 
         userAgent: req.headers['user-agent'],
       },
       timestamp: new Date(),
-    });
+    }).save();
     res.status(status).json({ error: errorMessage, analyticsEventId: analytics._id });
+  }
+});
+
+// Withdraw (Direct)
+router.post('/api/withdraw', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { amount } = req.body;
+  console.log('[WithdrawDirect] Request:', { amount, username: req.user.username });
+
+  try {
+    const withdrawAmount = parseFloat(amount);
+    if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: 'Invalid amount', amount },
+        timestamp: new Date(),
+      }).save();
+      return res.status(400).json({ error: 'Invalid amount', analyticsEventId: analytics._id });
+    }
+
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: 'User not found' },
+        timestamp: new Date(),
+      }).save();
+      return res.status(404).json({ error: 'User not found', analyticsEventId: analytics._id });
+    }
+
+    if (!user.isActive || user.kycStatus !== 'verified') {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: user.isActive ? 'KYC verification required' : 'Account is inactive' },
+        timestamp: new Date(),
+      }).save();
+      return res.status(403).json({
+        error: user.isActive ? 'KYC verification required' : 'Account is inactive',
+        analyticsEventId: analytics._id,
+      });
+    }
+
+    const fee = withdrawAmount <= 50 ? 0.50 :
+                withdrawAmount <= 100 ? 1.00 :
+                withdrawAmount <= 500 ? 1.50 :
+                withdrawAmount <= 1000 ? 2.00 :
+                withdrawAmount <= 5000 ? 3.00 : 5.00;
+    const totalDeduction = withdrawAmount + fee;
+    if (user.balance < totalDeduction) {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: 'Insufficient balance including fee', amount, fee, balance: user.balance },
+        timestamp: new Date(),
+      }).save();
+      return res.status(400).json({
+        error: 'Insufficient balance including fee',
+        analyticsEventId: analytics._id,
+      });
+    }
+
+    // AI: Fraud detection via microservice
+    let fraudScore = 1;
+    try {
+      const fraudResult = await axios.post('http://localhost:5000/predict', {
+        username: req.user.username,
+        amount: withdrawAmount,
+        timestamp: Date.now(),
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+      });
+      fraudScore = fraudResult.data.is_anomaly ? -1 : 1;
+    } catch (fraudError) {
+      console.error('[WithdrawDirect] Fraud Detection Error:', fraudError.message);
+      fraudScore = 0; // Neutral score if fraud detection fails
+    }
+
+    if (user.isFlagged || fraudScore < -0.5) {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: 'Account flagged for suspicious activity', amount, fraudScore, isFlagged: user.isFlagged },
+        timestamp: new Date(),
+      }).save();
+      return res.status(403).json({
+        error: 'Account flagged for suspicious activity. Contact support.',
+        isFlagged: true,
+        fraudScore,
+        analyticsEventId: analytics._id,
+      });
+    }
+
+    // Increment withdrawal attempts
+    user.lastWithdrawAttempts = (user.lastWithdrawAttempts || 0) + 1;
+    if (user.lastWithdrawAttempts >= 5) {
+      user.isFlagged = true;
+    }
+
+    const transactionId = uuidv4();
+    user.balance -= totalDeduction;
+    user.transactions.push({
+      _id: transactionId,
+      type: 'withdrawn',
+      amount: withdrawAmount,
+      fee,
+      toFrom: 'System',
+      date: new Date(),
+      analyticsEventId: null, // Will be updated below
+    });
+
+    const analytics = await new Analytics({
+      event: 'withdraw_success',
+      identifier: req.user.username,
+      phoneNumber: user.phoneNumber,
+      data: {
+        amount: withdrawAmount,
+        fee,
+        transactionId,
+        fraudScore,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+      },
+      timestamp: new Date(),
+    }).save();
+
+    // Update transaction with analyticsEventId
+    user.transactions[user.transactions.length - 1].analyticsEventId = analytics._id;
+    await user.save();
+
+    await AdminLedger.updateOne(
+      {},
+      {
+        $inc: { totalBalance: fee },
+        $set: { lastUpdated: new Date() },
+        $push: {
+          transactions: {
+            type: 'fee-collected',
+            amount: fee,
+            sender: user.username,
+            receiver: 'System',
+            date: new Date(),
+            analyticsEventId: analytics._id,
+          },
+        },
+      },
+      { upsert: true }
+    );
+
+    console.log('[WithdrawDirect] Success:', { username: req.user.username, amount, transactionId });
+    res.json({
+      message: 'Withdrawal successful',
+      amount: withdrawAmount,
+      fee,
+      transactionId,
+      analyticsEventId: analytics._id,
+    });
+  } catch (error) {
+    console.error('[WithdrawDirect] Error:', {
+      message: error.message,
+      stack: error.stack,
+      body: req.body,
+    });
+    const analytics = await new Analytics({
+      event: 'withdraw_failed',
+      identifier: req.user.username || 'unknown',
+      data: { error: error.message, amount },
+      timestamp: new Date(),
+    }).save();
+    res.status(500).json({ error: 'Failed to process withdrawal', analyticsEventId: analytics._id });
+  }
+});
+
+// Save Push Token
+router.post('/save-push-token', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { pushToken } = req.body;
+  if (!pushToken) return res.status(400).json({ error: 'Push token is required' });
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.pushToken = pushToken;
+    await user.save();
+    res.status(200).json({ message: 'Push token saved for user' });
+  } catch (error) {
+    console.error('[SavePushToken] Error:', error.message);
+    res.status(500).json({ error: 'Failed to save push token' });
+  }
+});
+
+// Update Profile
+router.put('/user/update', authenticateToken(['user']), generalRateLimiter, validate(updateProfileValidation), async (req, res) => {
+  try {
+    const { email, password, pin, phoneNumber } = req.body;
+    if (phoneNumber !== req.user.phoneNumber) {
+      console.error('[UpdateProfile] Unauthorized phoneNumber:', { requested: phoneNumber, user: req.user.phoneNumber });
+      return res.status(403).json({ error: 'Unauthorized phone number' });
+    }
+
+    const updates = {};
+    if (email) {
+      updates.email = email;
+    }
+    if (password) {
+      updates.password = await bcrypt.hash(password, 10);
+    }
+    if (pin) {
+      if (!/^\d{4}$/.test(pin)) {
+        console.error('[UpdateProfile] Invalid PIN format:', { pin });
+        return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+      }
+      updates.pin = await bcrypt.hash(pin, 10);
+    }
+
+    if (!Object.keys(updates).length) {
+      console.log('[UpdateProfile] No fields to update');
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    console.log('[UpdateProfile] Updating user:', { phoneNumber: req.user.phoneNumber, updates });
+    const user = await User.findOneAndUpdate(
+      { phoneNumber: req.user.phoneNumber },
+      { $set: updates },
+      { new: true, runValidators: true }
+    ).select('username phoneNumber email balance transactions kycStatus role lastViewedTimestamp pendingDeposits pendingWithdrawals twoFactorEnabled');
+
+    if (!user) {
+      console.error('[UpdateProfile] User not found:', req.user.phoneNumber);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const token = jwt.sign(
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    console.log('[UpdateProfile] Profile updated:', { phoneNumber: user.phoneNumber, updatedFields: Object.keys(updates) });
+    res.json({
+      message: 'Profile updated',
+      status: 'updated',
+      user: {
+        username: user.username,
+        phoneNumber: user.phoneNumber,
+        email: user.email || '',
+        balance: user.balance || 0,
+        transactions: user.transactions || [],
+        kycStatus: user.kycStatus || 'pending',
+        role: user.role || 'user',
+        lastViewedTimestamp: user.lastViewedTimestamp || 0,
+        pendingDeposits: user.pendingDeposits || [],
+        pendingWithdrawals: user.pendingWithdrawals || [],
+        twoFactorEnabled: user.twoFactorEnabled || false,
+      },
+      token,
+    });
+  } catch (error) {
+    console.error('[UpdateProfile] Error:', {
+      message: error.message,
+      code: error.code,
+      name: error.name,
+      stack: error.stack,
+    });
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Email already exists' });
+    }
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: 'Invalid input', details: error.message });
+    }
+    res.status(500).json({ error: 'Server error', details: error.message });
+  }
+});
+
+// Delete User
+router.delete('/user/delete', authenticateToken(['user']), generalRateLimiter, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction({ writeConcern: { w: 'majority' } });
+  try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }).session(session);
+    if (!user) {
+      await session.abortTransaction();
+      session.endSession();
+      console.error('[DeleteUser] User not found:', req.user.phoneNumber);
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (user.isArchived) {
+      await session.abortTransaction();
+      session.endSession();
+      console.error('[DeleteUser] User already archived:', req.user.phoneNumber);
+      return res.status(400).json({ error: 'Account already archived' });
+    }
+
+    user.isActive = false;
+    user.isArchived = true;
+    user.archivedAt = new Date();
+    user.archivedReason = 'user-requested';
+    user.pushToken = null;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
+    user.twoFactorSecret = null;
+    user.twoFactorEnabled = false;
+    await user.save({ session });
+
+    await QRPin.updateMany(
+      { username: user.username },
+      {
+        $set: {
+          isActive: false,
+          archivedAt: new Date(),
+          archivedReason: 'user-archived',
+          updatedAt: new Date(),
+        },
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+    console.log('[DeleteUser] Account archived:', req.user.phoneNumber);
+    res.json({ message: 'Account archived successfully' });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    console.error('[DeleteUser] Error:', {
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ error: 'Server error archiving account' });
+  }
+});
+
+// Refresh Token
+router.post('/refresh-token', strictRateLimiter, async (req, res) => {
+  const { refreshToken } = req.body;
+  if (!refreshToken) {
+    console.log('[RefreshToken] Refresh token missing');
+    return res.status(400).json({ error: 'Refresh token is required', code: 'MISSING_REFRESH_TOKEN' });
+  }
+  try {
+    const user = await User.findOne({ refreshToken });
+    if (!user) {
+      console.log('[RefreshToken] Invalid refresh token');
+      return res.status(403).json({ error: 'Invalid refresh token', code: 'INVALID_REFRESH_TOKEN' });
+    }
+    try {
+      jwt.verify(refreshToken, JWT_SECRET);
+    } catch (error) {
+      console.log('[RefreshToken] Invalid or expired refresh token');
+      return res.status(403).json({ error: 'Invalid or expired refresh token', code: 'INVALID_REFRESH_TOKEN' });
+    }
+    const accessToken = jwt.sign(
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    const newRefreshToken = jwt.sign(
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    await User.updateOne({ _id: user._id }, { $set: { refreshToken: newRefreshToken } });
+    console.log('[RefreshToken] Success:', { phoneNumber: user.phoneNumber });
+    res.json({
+      accessToken,
+      refreshToken: newRefreshToken,
+    });
+  } catch (error) {
+    console.error('[RefreshToken] Error:', {
+      message: error.message,
+      stack: error.stack,
+      refreshToken: refreshToken ? 'provided' : 'missing',
+    });
+    res.status(500).json({ error: 'Server error refreshing token', code: 'SERVER_ERROR' });
+  }
+});
+
+// Update Timestamp
+router.patch('/update-timestamp', authenticateToken(), generalRateLimiter, async (req, res) => {
+  try {
+    const { phoneNumber, lastViewedTimestamp } = req.body;
+    if (!phoneNumber || !lastViewedTimestamp) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (req.user.phoneNumber !== phoneNumber) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const user = await User.findOneAndUpdate(
+      { phoneNumber },
+      { lastViewedTimestamp },
+      { new: true, lean: true }
+    );
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({
+      user: {
+        ...user,
+        balance: user.balance?.$numberDecimal ? parseFloat(user.balance.$numberDecimal) : user.balance || 0,
+        zambiaCoinBalance: user.zambiaCoinBalance?.$numberDecimal ? parseFloat(user.zambiaCoinBalance.$numberDecimal) : user.zambiaCoinBalance || 0,
+        trustScore: user.trustScore?.$numberDecimal ? parseFloat(user.trustScore.$numberDecimal) : user.trustScore || 0,
+        transactions: user.transactions?.map(tx => ({
+          ...tx,
+          amount: tx.amount?.$numberDecimal ? parseFloat(tx.amount.$numberDecimal) : tx.amount || 0,
+          fee: tx.fee?.$numberDecimal ? parseFloat(tx.fee.$numberDecimal) : tx.fee || 0,
+        })) || [],
+        pendingDeposits: user.pendingDeposits?.map(dep => ({
+          ...dep,
+          amount: dep.amount?.$numberDecimal ? parseFloat(dep.amount.$numberDecimal) : dep.amount || 0,
+        })) || [],
+        pendingWithdrawals: user.pendingWithdrawals?.map(wd => ({
+          ...wd,
+          amount: wd.amount?.$numberDecimal ? parseFloat(wd.amount.$numberDecimal) : wd.amount || 0,
+        })) || [],
+      },
+    });
+  } catch (error) {
+    console.error('[UpdateTimestamp] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Toggle Active Status
+router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
+  const { username } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: 'Username required' });
+  }
+  try {
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    user.isActive = !user.isActive;
+    await user.save();
+    res.json({ message: `User ${username} is now ${user.isActive ? 'active' : 'inactive'}` });
+  } catch (error) {
+    console.error('[ToggleActive] Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to toggle user status' });
+  }
+});
+
+// Get Transactions
+router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
+  const { username } = req.params;
+  const { startDate, endDate, limit = 50, skip = 0 } = req.query;
+  try {
+    const query = { username };
+    const transactionQuery = {};
+    if (startDate || endDate) {
+      transactionQuery.date = {};
+      if (startDate) transactionQuery.date.$gte = new Date(startDate);
+      if (endDate) transactionQuery.date.$lte = new Date(endDate);
+    }
+    const user = await User.findOne(query).lean();
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const transactions = user.transactions
+      .filter(tx => {
+        if (startDate && new Date(tx.date) < new Date(startDate)) return false;
+        if (endDate && new Date(tx.date) > new Date(endDate)) return false;
+        return true;
+      })
+      .slice(Number(skip), Number(skip) + Number(limit))
+      .map(tx => ({
+        _id: tx._id,
+        type: tx.type,
+        amount: tx.amount,
+        toFrom: tx.toFrom,
+        fee: tx.fee,
+        date: tx.date,
+      }));
+    res.json({ transactions, total: user.transactions.length });
+  } catch (error) {
+    console.error('[GetTransactions] Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+// Reset PIN
+router.post('/reset-pin', strictRateLimiter, async (req, res) => {
+  const { identifier } = req.body;
+  try {
+    const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const resetToken = crypto.randomBytes(20).toString('hex');
+    user.resetToken = resetToken;
+    user.resetTokenExpiry = Date.now() + 3600000;
+    await user.save();
+    const mailOptions = {
+      from: EMAIL_USER,
+      to: user.email,
+      subject: 'Zangena PIN Reset',
+      text: `Your PIN reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena app to reset your PIN.`,
+      html: `<h2>Zangena PIN Reset</h2><p>Your PIN reset token is: <strong>${resetToken}</strong></p><p>It expires in 1 hour. Enter it in the Zangena app to reset your PIN.</p>`,
+    };
+    await transporter.sendMail(mailOptions);
+    res.json({ message: 'PIN reset instructions sent' });
+  } catch (error) {
+    console.error('[ResetPin] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Verify TOTP Code
+router.post('/verify-totp', authenticateToken(), strictRateLimiter, async (req, res) => {
+  const { totpCode } = req.body;
+  if (!totpCode || !/^\d{6}$/.test(totpCode)) {
+    return res.status(400).json({ error: 'Valid 6-digit TOTP code required' });
+  }
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
+      return res.status(400).json({ error: '2FA not enabled' });
+    }
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: totpCode,
+    });
+    if (!verified) {
+      return res.status(400).json({ error: 'Invalid TOTP code' });
+    }
+    res.json({ message: 'TOTP verified' });
+  } catch (error) {
+    console.error('[VerifyTOTP] Error:', error.message);
+    res.status(500).json({ error: 'Server error verifying TOTP' });
+  }
+});
+
+// Validate Token
+router.get('/validate-token', authenticateToken(), strictRateLimiter, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || !user.isActive) {
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+    res.json({ message: 'Token valid' });
+  } catch (error) {
+    console.error('[ValidateToken] Error:', error.message);
+    res.status(500).json({ error: 'Server error validating token' });
+  }
+});
+
+// Analytics Endpoint
+router.post('/analytics', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { event, username, amount, transactionId, error, focusCount, errorCount, depositAttempts, signupAttempts, fileType, fileSize, kycStatus, kycAnalysis } = req.body;
+
+  // Validate request
+  if (!event || !username || ![
+    'deposit_submitted', 'deposit_failed', 'input_error', 'focus_event',
+    'signup_success', 'signup_failed', 'signup_document_upload', 'signup_document_failed', 'signup_document_removed'
+  ].includes(event)) {
+    console.error('[Analytics] Invalid request:', { event, username });
+    return res.status(400).json({ error: 'Invalid event or username' });
+  }
+  if (username !== req.user.username) {
+    console.error('[Analytics] Unauthorized:', { requested: username, actual: req.user.username });
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const analyticsEntry = new Analytics({
+      event,
+      username,
+      phoneNumber: req.user.phoneNumber,
+      timestamp: new Date(),
+      data: {
+        amount: parseFloat(amount) || 0,
+        transactionId: transactionId || '',
+        error: error || '',
+        focusCount: parseInt(focusCount) || 0,
+        errorCount: parseInt(errorCount) || 0,
+        depositAttempts: parseInt(depositAttempts) || 0,
+        signupAttempts: parseInt(signupAttempts) || 0,
+        fileType: fileType || '',
+        fileSize: parseInt(fileSize) || 0,
+        kycStatus: kycStatus || '',
+        kycAnalysis: kycAnalysis || null,
+      },
+    });
+
+    await analyticsEntry.save();
+    console.log('[Analytics] Event saved:', { 
+      event, 
+      username, 
+      phoneNumber: req.user.phoneNumber, 
+      timestamp: new Date().toISOString() 
+    });
+    res.status(201).json({ message: 'Analytics event recorded' });
+  } catch (error) {
+    console.error('[Analytics] Error:', {
+      message: error.message,
+      stack: error.stack,
+      body: req.body,
+    });
+    res.status(500).json({ error: 'Failed to record analytics event' });
+  }
+});
+
+router.post('/analytics/batch', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { events } = req.body;
+  if (!Array.isArray(events) || events.length === 0) {
+    console.error('[Analytics] Invalid batch request:', { events });
+    return res.status(400).json({ error: 'Invalid or empty events array' });
+  }
+
+  try {
+    const validEvents = events.filter(e => 
+      e.event && 
+      [
+        'deposit_submitted', 'deposit_failed', 'input_error', 'focus_event',
+        'signup_success', 'signup_failed', 'signup_document_upload', 
+        'signup_document_failed', 'signup_document_removed'
+      ].includes(e.event) &&
+      e.username === req.user.username
+    );
+
+    if (validEvents.length === 0) {
+      console.error('[Analytics] No valid events in batch:', { events });
+      return res.status(400).json({ error: 'No valid events provided' });
+    }
+
+    await Analytics.insertMany(validEvents.map(event => ({
+      event: event.event,
+      username: event.username,
+      phoneNumber: req.user.phoneNumber,
+      timestamp: new Date(event.timestamp),
+      data: {
+        amount: parseFloat(event.amount) || 0,
+        transactionId: event.transactionId || '',
+        error: event.error || '',
+        focusCount: parseInt(event.focusCount) || 0,
+        errorCount: parseInt(event.errorCount) || 0,
+        depositAttempts: parseInt(event.depositAttempts) || 0,
+        signupAttempts: parseInt(event.signupAttempts) || 0,
+        fileType: event.fileType || '',
+        fileSize: parseInt(event.fileSize) || 0,
+        kycStatus: event.kycStatus || '',
+        kycAnalysis: event.kycAnalysis || null,
+      },
+    })), { ordered: false });
+
+    console.log('[Analytics] Batch events saved:', { count: validEvents.length });
+    res.status(201).json({ message: 'Batch analytics events recorded', count: validEvents.length });
+  } catch (error) {
+    console.error('[Analytics] Batch Error:', { 
+      message: error.message, 
+      stack: error.stack, 
+      eventsCount: events.length 
+    });
+    res.status(500).json({ error: 'Failed to record batch analytics events' });
+  }
+});
+
+router.post('/update-trust-score', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
+  const { username } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: 'Username required' });
+  }
+  try {
+    const trustScore = await calculateTrustScore(username);
+    if (trustScore === null) {
+      return res.status(500).json({ error: 'Failed to calculate trust score' });
+    }
+    res.json({ message: 'Trust score updated', trustScore });
+  } catch (error) {
+    console.error('[UpdateTrustScore] Error:', error.message);
+    res.status(500).json({ error: 'Server error updating trust score' });
+  }
+});
+
+// Withdraw (Direct)
+router.post('/api/withdraw', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { amount } = req.body;
+  console.log('[WithdrawDirect] Request:', { amount, username: req.user.username });
+
+  try {
+    const withdrawAmount = parseFloat(amount);
+    if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: 'Invalid amount', amount },
+        timestamp: new Date(),
+      }).save();
+      return res.status(400).json({ error: 'Invalid amount', analyticsEventId: analytics._id });
+    }
+
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: 'User not found' },
+        timestamp: new Date(),
+      }).save();
+      return res.status(404).json({ error: 'User not found', analyticsEventId: analytics._id });
+    }
+
+    if (!user.isActive || user.kycStatus !== 'verified') {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: user.isActive ? 'KYC verification required' : 'Account is inactive' },
+        timestamp: new Date(),
+      }).save();
+      return res.status(403).json({
+        error: user.isActive ? 'KYC verification required' : 'Account is inactive',
+        analyticsEventId: analytics._id,
+      });
+    }
+
+    const fee = withdrawAmount <= 50 ? 0.50 :
+                withdrawAmount <= 100 ? 1.00 :
+                withdrawAmount <= 500 ? 1.50 :
+                withdrawAmount <= 1000 ? 2.00 :
+                withdrawAmount <= 5000 ? 3.00 : 5.00;
+    const totalDeduction = withdrawAmount + fee;
+    if (user.balance < totalDeduction) {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: 'Insufficient balance including fee', amount, fee, balance: user.balance },
+        timestamp: new Date(),
+      }).save();
+      return res.status(400).json({
+        error: 'Insufficient balance including fee',
+        analyticsEventId: analytics._id,
+      });
+    }
+
+    // AI: Fraud detection via microservice
+    let fraudScore = 1;
+    try {
+      const fraudResult = await axios.post('http://localhost:5000/predict', {
+        username: req.user.username,
+        amount: withdrawAmount,
+        timestamp: Date.now(),
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+      });
+      fraudScore = fraudResult.data.is_anomaly ? -1 : 1;
+    } catch (fraudError) {
+      console.error('[WithdrawDirect] Fraud Detection Error:', fraudError.message);
+      fraudScore = 0; // Neutral score if fraud detection fails
+    }
+
+    if (user.isFlagged || fraudScore < -0.5) {
+      const analytics = await new Analytics({
+        event: 'withdraw_failed',
+        identifier: req.user.username,
+        data: { error: 'Account flagged for suspicious activity', amount, fraudScore, isFlagged: user.isFlagged },
+        timestamp: new Date(),
+      }).save();
+      return res.status(403).json({
+        error: 'Account flagged for suspicious activity. Contact support.',
+        isFlagged: true,
+        fraudScore,
+        analyticsEventId: analytics._id,
+      });
+    }
+
+    // Increment withdrawal attempts
+    user.lastWithdrawAttempts = (user.lastWithdrawAttempts || 0) + 1;
+    if (user.lastWithdrawAttempts >= 5) {
+      user.isFlagged = true;
+    }
+
+    const transactionId = uuidv4();
+    user.balance -= totalDeduction;
+    user.transactions.push({
+      _id: transactionId,
+      type: 'withdrawn',
+      amount: withdrawAmount,
+      fee,
+      toFrom: 'System',
+      date: new Date(),
+      analyticsEventId: null, // Will be updated below
+    });
+
+    const analytics = await new Analytics({
+      event: 'withdraw_success',
+      identifier: req.user.username,
+      phoneNumber: user.phoneNumber,
+      data: {
+        amount: withdrawAmount,
+        fee,
+        transactionId,
+        fraudScore,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+      },
+      timestamp: new Date(),
+    }).save();
+
+    // Update transaction with analyticsEventId
+    user.transactions[user.transactions.length - 1].analyticsEventId = analytics._id;
+    await user.save();
+
+    await AdminLedger.updateOne(
+      {},
+      {
+        $inc: { totalBalance: fee },
+        $set: { lastUpdated: new Date() },
+        $push: {
+          transactions: {
+            type: 'fee-collected',
+            amount: fee,
+            sender: user.username,
+            receiver: 'System',
+            date: new Date(),
+            analyticsEventId: analytics._id,
+          },
+        },
+      },
+      { upsert: true }
+    );
+
+    console.log('[WithdrawDirect] Success:', { username: req.user.username, amount, transactionId });
+    res.json({
+      message: 'Withdrawal successful',
+      amount: withdrawAmount,
+      fee,
+      transactionId,
+      analyticsEventId: analytics._id,
+    });
+  } catch (error) {
+    console.error('[WithdrawDirect] Error:', {
+      message: error.message,
+      stack: error.stack,
+      body: req.body,
+    });
+    const analytics = await new Analytics({
+      event: 'withdraw_failed',
+      identifier: req.user.username || 'unknown',
+      data: { error: error.message, amount },
+      timestamp: new Date(),
+    }).save();
+    res.status(500).json({ error: 'Failed to process withdrawal', analyticsEventId: analytics._id });
+  }
+});
+
+// Save Push Token
+router.post('/save-push-token', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { pushToken } = req.body;
+  if (!pushToken) return res.status(400).json({ error: 'Push token is required' });
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.pushToken = pushToken;
+    await user.save();
+    res.status(200).json({ message: 'Push token saved for user' });
+  } catch (error) {
+    console.error('[SavePushToken] Error:', error.message);
+    res.status(500).json({ error: 'Failed to save push token' });
+  }
+});
+
+// Update Profile
+router.put('/user/update', authenticateToken(['user']), generalRateLimiter, validate(updateProfileValidation), async (req, res) => {
+  try {
+    const { email, password, pin, phoneNumber } = req.body;
+    if (phoneNumber !== req.user.phoneNumber) {
+      console.error('[UpdateProfile] Unauthorized phoneNumber:', { requested: phoneNumber, user: req.user.phoneNumber });
+      return res.status(403).json({ error: 'Unauthorized phone number' });
+    }
+
+    const updates = {};
+    if (email) {
+      updates.email = email;
+    }
+    if (password) {
+      updates.password = await bcrypt.hash(password, 10);
+    }
+    if (pin) {
+      if (!/^\d{4}$/.test(pin)) {
+        console.error('[UpdateProfile] Invalid PIN format:', { pin });
+        return res.status(400).json({ error: 'PIN must be a 4-digit number' });
+      }
+      updates.pin = await bcrypt.hash(pin, 10);
+    }
+
+    if (!Object.keys(updates).length) {
+      console.log('[UpdateProfile] No fields to update');
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    console.log('[UpdateProfile] Updating user:', { phoneNumber: req.user.phoneNumber, updates });
+    const user = await User.findOneAndUpdate(
+      { phoneNumber: req.user.phoneNumber },
+      { $set: updates },
+      { new: true, runValidators: true }
+    ).select('username phoneNumber email balance transactions kycStatus role lastViewedTimestamp pendingDeposits pendingWithdrawals twoFactorEnabled');
+
+    if (!user) {
+      console.error('[UpdateProfile] User not found:', req.user.phoneNumber);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const token = jwt.sign(
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    console.log('[UpdateProfile] Profile updated:', { phoneNumber: user.phoneNumber, updatedFields: Object.keys(updates) });
+    res.json({
+      message: 'Profile updated',
+      status: 'updated',
+      user: {
+        username: user.username,
+        phoneNumber: user.phoneNumber,
+        email: user.email || '',
+        balance: user.balance || 0,
+        transactions: user.transactions || [],
+        kycStatus: user.kycStatus || 'pending',
+        role: user.role || 'user',
+        lastViewedTimestamp: user.lastViewedTimestamp || 0,
+        pendingDeposits: user.pendingDeposits || [],
+        pendingWithdrawals: user.pendingWithdrawals || [],
+        twoFactorEnabled: user.twoFactorEnabled || false,
+      },
+      token,
+    });
+  } catch (error) {
+    console.error('[UpdateProfile] Error:', {
+      message: error.message,
+      code: error.code,
+      name: error.name,
+      stack: error.stack,
+    });
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Email already exists' });
+    }
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: 'Invalid input', details: error.message });
+    }
+    res.status(500).json({ error: 'Server error', details: error.message });
+  }
+});
+
+// Delete User
+router.delete('/user/delete', authenticateToken(['user']), generalRateLimiter, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction({ writeConcern: { w: 'majority' } });
+  try {
+    const user = await User.findOne({ phoneNumber: req.user.phoneNumber }).session(session);
+    if (!user) {
+      await session.abortTransaction();
+      session.endSession();
+      console.error('[DeleteUser] User not found:', req.user.phoneNumber);
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (user.isArchived) {
+      await session.abortTransaction();
+      session.endSession();
+      console.error('[DeleteUser] User already archived:', req.user.phoneNumber);
+      return res.status(400).json({ error: 'Account already archived' });
+    }
+
+    user.isActive = false;
+    user.isArchived = true;
+    user.archivedAt = new Date();
+    user.archivedReason = 'user-requested';
+    user.pushToken = null;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
+    user.twoFactorSecret = null;
+    user.twoFactorEnabled = false;
+    await user.save({ session });
+
+    await QRPin.updateMany(
+      { username: user.username },
+      {
+        $set: {
+          isActive: false,
+          archivedAt: new Date(),
+          archivedReason: 'user-archived',
+          updatedAt: new Date(),
+        },
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+    console.log('[DeleteUser] Account archived:', req.user.phoneNumber);
+    res.json({ message: 'Account archived successfully' });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    console.error('[DeleteUser] Error:', {
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ error: 'Server error archiving account' });
+  }
+});
+
+// Refresh Token
+router.post('/refresh-token', strictRateLimiter, async (req, res) => {
+  const { refreshToken } = req.body;
+  if (!refreshToken) {
+    console.log('[RefreshToken] Refresh token missing');
+    return res.status(400).json({ error: 'Refresh token is required', code: 'MISSING_REFRESH_TOKEN' });
+  }
+  try {
+    const user = await User.findOne({ refreshToken });
+    if (!user) {
+      console.log('[RefreshToken] Invalid refresh token');
+      return res.status(403).json({ error: 'Invalid refresh token', code: 'INVALID_REFRESH_TOKEN' });
+    }
+    try {
+      jwt.verify(refreshToken, JWT_SECRET);
+    } catch (error) {
+      console.log('[RefreshToken] Invalid or expired refresh token');
+      return res.status(403).json({ error: 'Invalid or expired refresh token', code: 'INVALID_REFRESH_TOKEN' });
+    }
+    const accessToken = jwt.sign(
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    const newRefreshToken = jwt.sign(
+      { phoneNumber: user.phoneNumber, role: user.role, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    await User.updateOne({ _id: user._id }, { $set: { refreshToken: newRefreshToken } });
+    console.log('[RefreshToken] Success:', { phoneNumber: user.phoneNumber });
+    res.json({
+      accessToken,
+      refreshToken: newRefreshToken,
+    });
+  } catch (error) {
+    console.error('[RefreshToken] Error:', {
+      message: error.message,
+      stack: error.stack,
+      refreshToken: refreshToken ? 'provided' : 'missing',
+    });
+    res.status(500).json({ error: 'Server error refreshing token', code: 'SERVER_ERROR' });
+  }
+});
+
+// Update Timestamp
+router.patch('/update-timestamp', authenticateToken(), generalRateLimiter, async (req, res) => {
+  try {
+    const { phoneNumber, lastViewedTimestamp } = req.body;
+    if (!phoneNumber || !lastViewedTimestamp) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (req.user.phoneNumber !== phoneNumber) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const user = await User.findOneAndUpdate(
+      { phoneNumber },
+      { lastViewedTimestamp },
+      { new: true, lean: true }
+    );
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({
+      user: {
+        ...user,
+        balance: user.balance?.$numberDecimal ? parseFloat(user.balance.$numberDecimal) : user.balance || 0,
+        zambiaCoinBalance: user.zambiaCoinBalance?.$numberDecimal ? parseFloat(user.zambiaCoinBalance.$numberDecimal) : user.zambiaCoinBalance || 0,
+        trustScore: user.trustScore?.$numberDecimal ? parseFloat(user.trustScore.$numberDecimal) : user.trustScore || 0,
+        transactions: user.transactions?.map(tx => ({
+          ...tx,
+          amount: tx.amount?.$numberDecimal ? parseFloat(tx.amount.$numberDecimal) : tx.amount || 0,
+          fee: tx.fee?.$numberDecimal ? parseFloat(tx.fee.$numberDecimal) : tx.fee || 0,
+        })) || [],
+        pendingDeposits: user.pendingDeposits?.map(dep => ({
+          ...dep,
+          amount: dep.amount?.$numberDecimal ? parseFloat(dep.amount.$numberDecimal) : dep.amount || 0,
+        })) || [],
+        pendingWithdrawals: user.pendingWithdrawals?.map(wd => ({
+          ...wd,
+          amount: wd.amount?.$numberDecimal ? parseFloat(wd.amount.$numberDecimal) : wd.amount || 0,
+        })) || [],
+      },
+    });
+  } catch (error) {
+    console.error('[UpdateTimestamp] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Toggle Active Status
+router.put('/toggle-active', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
+  const { username } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: 'Username required' });
+  }
+  try {
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    user.isActive = !user.isActive;
+    await user.save();
+    res.json({ message: `User ${username} is now ${user.isActive ? 'active' : 'inactive'}` });
+  } catch (error) {
+    console.error('[ToggleActive] Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to toggle user status' });
+  }
+});
+
+// Get Transactions
+router.get('/transactions/:username', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
+  const { username } = req.params;
+  const { startDate, endDate, limit = 50, skip = 0 } = req.query;
+  try {
+    const query = { username };
+    const transactionQuery = {};
+    if (startDate || endDate) {
+      transactionQuery.date = {};
+      if (startDate) transactionQuery.date.$gte = new Date(startDate);
+      if (endDate) transactionQuery.date.$lte = new Date(endDate);
+    }
+    const user = await User.findOne(query).lean();
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const transactions = user.transactions
+      .filter(tx => {
+        if (startDate && new Date(tx.date) < new Date(startDate)) return false;
+        if (endDate && new Date(tx.date) > new Date(endDate)) return false;
+        return true;
+      })
+      .slice(Number(skip), Number(skip) + Number(limit))
+      .map(tx => ({
+        _id: tx._id,
+        type: tx.type,
+        amount: tx.amount,
+        toFrom: tx.toFrom,
+        fee: tx.fee,
+        date: tx.date,
+      }));
+    res.json({ transactions, total: user.transactions.length });
+  } catch (error) {
+    console.error('[GetTransactions] Error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+// Reset PIN
+router.post('/reset-pin', strictRateLimiter, async (req, res) => {
+  const { identifier } = req.body;
+  try {
+    const user = await User.findOne({ $or: [{ username: identifier }, { phoneNumber: identifier }] });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const resetToken = crypto.randomBytes(20).toString('hex');
+    user.resetToken = resetToken;
+    user.resetTokenExpiry = Date.now() + 3600000;
+    await user.save();
+    const mailOptions = {
+      from: EMAIL_USER,
+      to: user.email,
+      subject: 'Zangena PIN Reset',
+      text: `Your PIN reset token is: ${resetToken}. It expires in 1 hour.\n\nEnter it in the Zangena app to reset your PIN.`,
+      html: `<h2>Zangena PIN Reset</h2><p>Your PIN reset token is: <strong>${resetToken}</strong></p><p>It expires in 1 hour. Enter it in the Zangena app to reset your PIN.</p>`,
+    };
+    await transporter.sendMail(mailOptions);
+    res.json({ message: 'PIN reset instructions sent' });
+  } catch (error) {
+    console.error('[ResetPin] Error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Verify TOTP Code
+router.post('/verify-totp', authenticateToken(), strictRateLimiter, async (req, res) => {
+  const { totpCode } = req.body;
+  if (!totpCode || !/^\d{6}$/.test(totpCode)) {
+    return res.status(400).json({ error: 'Valid 6-digit TOTP code required' });
+  }
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
+      return res.status(400).json({ error: '2FA not enabled' });
+    }
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: totpCode,
+    });
+    if (!verified) {
+      return res.status(400).json({ error: 'Invalid TOTP code' });
+    }
+    res.json({ message: 'TOTP verified' });
+  } catch (error) {
+    console.error('[VerifyTOTP] Error:', error.message);
+    res.status(500).json({ error: 'Server error verifying TOTP' });
+  }
+});
+
+// Validate Token
+router.get('/validate-token', authenticateToken(), strictRateLimiter, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || !user.isActive) {
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+    res.json({ message: 'Token valid' });
+  } catch (error) {
+    console.error('[ValidateToken] Error:', error.message);
+    res.status(500).json({ error: 'Server error validating token' });
+  }
+});
+
+// Analytics Endpoint
+router.post('/analytics', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { event, username, amount, transactionId, error, focusCount, errorCount, depositAttempts, signupAttempts, fileType, fileSize, kycStatus, kycAnalysis } = req.body;
+
+  // Validate request
+  if (!event || !username || ![
+    'deposit_submitted', 'deposit_failed', 'input_error', 'focus_event',
+    'signup_success', 'signup_failed', 'signup_document_upload', 'signup_document_failed', 'signup_document_removed'
+  ].includes(event)) {
+    console.error('[Analytics] Invalid request:', { event, username });
+    return res.status(400).json({ error: 'Invalid event or username' });
+  }
+  if (username !== req.user.username) {
+    console.error('[Analytics] Unauthorized:', { requested: username, actual: req.user.username });
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const analyticsEntry = new Analytics({
+      event,
+      username,
+      phoneNumber: req.user.phoneNumber,
+      timestamp: new Date(),
+      data: {
+        amount: parseFloat(amount) || 0,
+        transactionId: transactionId || '',
+        error: error || '',
+        focusCount: parseInt(focusCount) || 0,
+        errorCount: parseInt(errorCount) || 0,
+        depositAttempts: parseInt(depositAttempts) || 0,
+        signupAttempts: parseInt(signupAttempts) || 0,
+        fileType: fileType || '',
+        fileSize: parseInt(fileSize) || 0,
+        kycStatus: kycStatus || '',
+        kycAnalysis: kycAnalysis || null,
+      },
+    });
+
+    await analyticsEntry.save();
+    console.log('[Analytics] Event saved:', { 
+      event, 
+      username, 
+      phoneNumber: req.user.phoneNumber, 
+      timestamp: new Date().toISOString() 
+    });
+    res.status(201).json({ message: 'Analytics event recorded' });
+  } catch (error) {
+    console.error('[Analytics] Error:', {
+      message: error.message,
+      stack: error.stack,
+      body: req.body,
+    });
+    res.status(500).json({ error: 'Failed to record analytics event' });
+  }
+});
+
+// Analytics Batch Endpoint
+router.post('/analytics/batch', authenticateToken(), generalRateLimiter, async (req, res) => {
+  const { events } = req.body;
+  if (!Array.isArray(events) || events.length === 0) {
+    console.error('[Analytics] Invalid batch request:', { events });
+    return res.status(400).json({ error: 'Invalid or empty events array' });
+  }
+
+  try {
+    const validEvents = events.filter(e => 
+      e.event && 
+      [
+        'deposit_submitted', 'deposit_failed', 'input_error', 'focus_event',
+        'signup_success', 'signup_failed', 'signup_document_upload', 
+        'signup_document_failed', 'signup_document_removed'
+      ].includes(e.event) &&
+      e.username === req.user.username
+    );
+
+    if (validEvents.length === 0) {
+      console.error('[Analytics] No valid events in batch:', { events });
+      return res.status(400).json({ error: 'No valid events provided' });
+    }
+
+    await Analytics.insertMany(validEvents.map(event => ({
+      event: event.event,
+      username: event.username,
+      phoneNumber: req.user.phoneNumber,
+      timestamp: new Date(event.timestamp),
+      data: {
+        amount: parseFloat(event.amount) || 0,
+        transactionId: event.transactionId || '',
+        error: event.error || '',
+        focusCount: parseInt(event.focusCount) || 0,
+        errorCount: parseInt(event.errorCount) || 0,
+        depositAttempts: parseInt(event.depositAttempts) || 0,
+        signupAttempts: parseInt(event.signupAttempts) || 0,
+        fileType: event.fileType || '',
+        fileSize: parseInt(event.fileSize) || 0,
+        kycStatus: event.kycStatus || '',
+        kycAnalysis: event.kycAnalysis || null,
+      },
+    })), { ordered: false });
+
+    console.log('[Analytics] Batch events saved:', { count: validEvents.length });
+    res.status(201).json({ message: 'Batch analytics events recorded', count: validEvents.length });
+  } catch (error) {
+    console.error('[Analytics] Batch Error:', { 
+      message: error.message, 
+      stack: error.stack, 
+      eventsCount: events.length 
+    });
+    res.status(500).json({ error: 'Failed to record batch analytics events' });
+  }
+});
+
+// Update Trust Score
+router.post('/update-trust-score', authenticateToken(['admin']), requireAdmin, generalRateLimiter, async (req, res) => {
+  const { username } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: 'Username required' });
+  }
+  try {
+    const trustScore = await calculateTrustScore(username);
+    if (trustScore === null) {
+      return res.status(500).json({ error: 'Failed to calculate trust score' });
+    }
+    res.json({ message: 'Trust score updated', trustScore });
+  } catch (error) {
+    console.error('[UpdateTrustScore] Error:', error.message);
+    res.status(500).json({ error: 'Server error updating trust score' });
   }
 });
 
