@@ -477,8 +477,7 @@ const simplifiedLoginValidation = [
 ];
 
 // Login endpoint
-router.post('/login', strictRateLimiter, simplifiedLoginValidation, async (req, res) => {
-  // Check validation results
+router.post('/login', simplifiedLoginValidation, async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     console.log('[Login] Validation errors:', errors.array());
@@ -489,46 +488,26 @@ router.post('/login', strictRateLimiter, simplifiedLoginValidation, async (req, 
   console.log('[Login] Request:', { identifier });
 
   try {
-    // Optimize database query with indexed fields and lean()
     const user = await User.findOne({
       $or: [{ username: identifier }, { phoneNumber: identifier }],
     }).lean().select('username phoneNumber password role kycStatus isActive lastLogin lastLoginAttempts name');
 
     if (!user) {
       console.log('[Login] User not found:', identifier);
-      await Analytics.create({
-        event: 'login_failed',
-        username: identifier,
-        data: { reason: 'User not found' },
-        timestamp: new Date(),
-      });
       return res.status(400).json({ error: 'Invalid username or password' });
     }
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       console.log('[Login] Invalid password for:', user.username);
-      await Analytics.create({
-        event: 'login_failed',
-        username: user.username,
-        data: { reason: 'Invalid password' },
-        timestamp: new Date(),
-      });
       return res.status(400).json({ error: 'Invalid username or password' });
     }
 
     if (!user.isActive) {
       console.log('[Login] Inactive or archived user:', user.username);
-      await Analytics.create({
-        event: 'login_failed',
-        username: user.username,
-        data: { reason: 'Account inactive or archived' },
-        timestamp: new Date(),
-      });
       return res.status(403).json({ error: 'Account is inactive or archived. Please contact support.' });
     }
 
-    // Update user login details
     await User.updateOne(
       { _id: user._id },
       {
@@ -543,20 +522,6 @@ router.post('/login', strictRateLimiter, simplifiedLoginValidation, async (req, 
       { expiresIn: '1h' }
     );
 
-    const analyticsEvent = await Analytics.create({
-      event: 'login_success',
-      username: user.username,
-      data: { role: user.role, kycStatus: user.kycStatus },
-      timestamp: new Date(),
-    });
-
-    await AdminLedger.create({
-      action: 'login',
-      username: user.username,
-      details: { analyticsEventId: analyticsEvent._id },
-      timestamp: new Date(),
-    });
-
     res.json({
       phoneNumber: user.phoneNumber,
       token,
@@ -570,14 +535,6 @@ router.post('/login', strictRateLimiter, simplifiedLoginValidation, async (req, 
     });
   } catch (error) {
     console.error('[Login] Error:', error.message, error.stack);
-    await Analytics.create({
-      event: 'login_failed',
-      username: identifier || 'unknown',
-      data: { reason: error.message },
-      timestamp: new Date(),
-    });
-
-    // Handle specific errors for better frontend feedback
     if (error.name === 'MongoServerError' || error.message.includes('database')) {
       return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
     }
