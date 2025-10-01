@@ -355,7 +355,7 @@ router.post('/update-kyc', authenticateToken(['admin']), requireAdmin, generalRa
 });
 
 // Updated Register User
-router.post('/register', strictRateLimiter, upload.single('idImage'), handleMulterError, validate(registerValidation), async (req, res, next) => {
+router.post('/register', upload.single('idImage'), handleMulterError, validate(registerValidation), async (req, res, next) => {
   console.log('[Register] Request Body:', req.body);
   console.log('[Register] File:', req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size } : null);
 
@@ -391,25 +391,26 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       kycAnalysis.isValid = kycAnalysis.textCount > 0 && kycAnalysis.faceCount > 0;
     } catch (rekogError) {
       console.error('[Rekognition] Error:', rekogError.message);
-      kycAnalysis.error = rekogError.message;
-      kycAnalysis.isValid = false; // Fallback to manual review
+      kycAnalysis.error = rekogError.message || 'Failed to analyze ID image';
+      kycAnalysis.isValid = false;
     }
 
     let idImageUrl = '';
     try {
       const s3Key = `id-images/${username}-${Date.now()}-${idImage.originalname}`;
       const params = {
-        Bucket: S3_BUCKET,
+        Bucket: process.env.S3_BUCKET,
         Key: s3Key,
         Body: idImage.buffer,
         ContentType: idImage.mimetype,
         ACL: 'private',
       };
       await s3.send(new PutObjectCommand(params));
-      idImageUrl = `https://${S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
+      idImageUrl = `https://${process.env.S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
     } catch (s3Error) {
       console.error('[S3] Error:', s3Error.message);
-      idImageUrl = ''; // Fallback to empty URL, allow manual review
+      idImageUrl = '';
+      kycAnalysis.error = kycAnalysis.error || 'Failed to upload ID image to S3';
     }
 
     const trustScore = kycAnalysis.faceCount > 0 ? 10 : 0;
@@ -436,16 +437,20 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
     });
     await user.save();
 
-    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ phoneNumber: user.phoneNumber, role: user.role, username: user.username }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     const admin = await User.findOne({ role: 'admin' });
     if (admin && admin.pushToken) {
-      await sendPushNotification(
-        admin.pushToken,
-        'New User Registration',
-        `User ${username} needs KYC approval.`,
-        { userId: user._id }
-      );
+      try {
+        await sendPushNotification(
+          admin.pushToken,
+          'New User Registration',
+          `User ${username} needs KYC approval.`,
+          { userId: user._id }
+        );
+      } catch (notificationError) {
+        console.error('[Notification] Error:', notificationError.message);
+      }
     }
 
     console.log('[Register] Success:', { username, phoneNumber, kycStatus: user.kycStatus, trustScore });
@@ -457,6 +462,9 @@ router.post('/register', strictRateLimiter, upload.single('idImage'), handleMult
       body: req.body,
       file: req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size } : null,
     });
+    if (error.name === 'MongoServerError' || error.message.includes('database')) {
+      return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
+    }
     res.status(500).json({ error: 'Server error during registration' });
   }
 });
@@ -518,7 +526,7 @@ router.post('/login', simplifiedLoginValidation, async (req, res) => {
 
     const token = jwt.sign(
       { username: user.username, role: user.role, phoneNumber: user.phoneNumber },
-      JWT_SECRET,
+      process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
 
